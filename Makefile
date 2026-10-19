@@ -840,6 +840,13 @@ check-apiserver-cidrs: ## Every cloud overlay names both apiserver addresses, de
 	@printf "$(GREEN)▶$(NC) check-apiserver-cidrs...\n"
 	@python3 scripts/check-apiserver-cidrs.py --selftest
 
+.PHONY: check-pull-token-read-only
+check-pull-token-read-only: ## A job token that becomes the GHCR pull token holds no write permission (review of hosted#44)
+	@printf "$(GREEN)▶$(NC) check-pull-token-read-only...\n"
+	@python3 scripts/check-pull-token-read-only.py --selftest
+	@python3 scripts/check-pull-token-read-only.py
+check: check-pull-token-read-only
+
 .PHONY: check-exit-tests-off-pr
 check-exit-tests-off-pr: ## Exit tests never run on a pull request (ADR-0080)
 	@printf "$(GREEN)▶$(NC) check-exit-tests-off-pr...\n"

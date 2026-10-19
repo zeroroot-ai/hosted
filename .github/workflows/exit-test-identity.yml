@@ -70,8 +70,6 @@ concurrency:
 
 permissions:
   contents: read
-  # The GHCR pull token of the install is the job token (see Stage 0).
-  packages: read
 
 env:
   NS: gibson
@@ -113,6 +111,12 @@ jobs:
     name: online leg — Mailpit, invite, role change, MFA reset, removal (steps 1 to 6)
     needs: guards
     runs-on: ubuntu-latest
+    # The job token is the GHCR pull token of the install, and it reaches
+    # the cluster as an image pull secret. So this job holds no write
+    # permission (scripts/check-pull-token-read-only.py).
+    permissions:
+      contents: read
+      packages: read
     # One recreate on a 2-vCPU runner takes up to 90 minutes
     # (WAIT_APPS_TIMEOUT in the install action), then the drill (three
     # gibson-login device flows and two browser setups on top of the
@@ -188,6 +192,12 @@ jobs:
     name: offline leg — setup links from Secrets, no password Secret (baseline as shipped)
     needs: guards
     runs-on: ubuntu-latest
+    # The job token is the GHCR pull token of the install, and it reaches
+    # the cluster as an image pull secret. So this job holds no write
+    # permission (scripts/check-pull-token-read-only.py).
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 150
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7

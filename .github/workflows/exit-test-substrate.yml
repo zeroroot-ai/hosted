@@ -37,11 +37,11 @@ on:
     # so SUBSTRATE falls back to kind below.
     - cron: '50 6 * * *'
 
+# Each job names its own permissions. The install job gives its token to the
+# cluster as the GHCR pull token, so it holds no write permission. The proof
+# PR is a second job that installs nothing (review of hosted#44).
 permissions:
-  contents: write
-  pull-requests: write
-  packages: read
-  id-token: write   # OIDC: the read-only AWS role of the NLB check (eks only)
+  contents: read
 
 concurrency:
   group: exit-test-substrate-${{ inputs.substrate || 'kind' }}
@@ -58,6 +58,13 @@ jobs:
   substrate:
     name: install on ${{ inputs.substrate || 'kind' }} and prove the client-IP contract
     runs-on: ubuntu-latest
+    # The job token is the GHCR pull token of the install, and it reaches
+    # the cluster as an image pull secret. So this job holds no write
+    # permission (scripts/check-pull-token-read-only.py).
+    permissions:
+      contents: read
+      packages: read
+      id-token: write   # OIDC: the read-only AWS role of the NLB check (eks only)
     # The job runs in the environment named by the substrate, so a kubeconfig
     # can be an ENVIRONMENT secret rather than a repository one, and a
     # required reviewer on that environment gates reaching a real cluster.
@@ -243,35 +250,6 @@ jobs:
         if: env.SUBSTRATE == 'eks'
         run: test/edge/assert-nlb-security-group.sh
 
-      - name: Flip the overlay's Proof line to this run
-        if: success() && env.SUBSTRATE != 'kind'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          f="helm/gibson/values-${SUBSTRATE}.yaml"
-          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
-          today="$(date -u +%Y-%m-%d)"
-          python3 - "$f" "$run_url" "$today" <<'PY'
-          import re, sys
-          p, url, day = sys.argv[1:]
-          s = open(p).read()
-          new = f"# Proof: installed and proven on a real cluster on {day}: {url}\n"
-          s2, n = re.subn(r"^# Proof:.*\n(?:#\s+\(.*\n)*", new, s, count=1, flags=re.M)
-          assert n == 1, "no Proof: line in the overlay header"
-          open(p, "w").write(s2)
-          PY
-          git config user.name "exit-test-substrate"
-          git config user.email "noreply@zeroroot.ai"
-          b="proof/${SUBSTRATE}-${{ github.run_id }}"
-          git checkout -b "$b"
-          git add "$f"
-          git commit -m "docs(chart): values-${SUBSTRATE}.yaml proven on a real cluster — exit-test-substrate run ${{ github.run_id }}"
-          git push -u origin "$b"
-          gh pr create --base main --head "$b" \
-            --title "docs(chart): values-${SUBSTRATE}.yaml proven on a real cluster (exit-test-substrate)" \
-            --body "Green run of \`exit-test-substrate.yml\` on **${SUBSTRATE}**: ${run_url}. This flips the overlay's Proof line (CONTEXT.md § Substrate). Opened with GITHUB_TOKEN, so CI did not trigger — close and reopen to get checks, then merge."
-
       - name: Diagnostics on failure
         if: failure()
         run: |
@@ -356,3 +334,47 @@ jobs:
               kubectl -n "$NS" logs "$p" -c "$c" --previous --tail=30 2>/dev/null || kubectl -n "$NS" logs "$p" -c "$c" --tail=30 || true
             done
           done
+
+  # The proof PR. It runs after a green install and test, installs nothing,
+  # and is the only job with write permissions, so no token that the cluster
+  # holds can write to this repository (review of hosted#44).
+  proof:
+    name: flip the overlay's Proof line to this run
+    needs: substrate
+    if: ${{ success() && (inputs.substrate || 'kind') != 'kind' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Flip the overlay's Proof line to this run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          f="helm/gibson/values-${SUBSTRATE}.yaml"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          today="$(date -u +%Y-%m-%d)"
+          python3 - "$f" "$run_url" "$today" <<'PY'
+          import re, sys
+          p, url, day = sys.argv[1:]
+          s = open(p).read()
+          new = f"# Proof: installed and proven on a real cluster on {day}: {url}\n"
+          s2, n = re.subn(r"^# Proof:.*\n(?:#\s+\(.*\n)*", new, s, count=1, flags=re.M)
+          assert n == 1, "no Proof: line in the overlay header"
+          open(p, "w").write(s2)
+          PY
+          git config user.name "exit-test-substrate"
+          git config user.email "noreply@zeroroot.ai"
+          b="proof/${SUBSTRATE}-${{ github.run_id }}"
+          git checkout -b "$b"
+          git add "$f"
+          git commit -m "docs(chart): values-${SUBSTRATE}.yaml proven on a real cluster — exit-test-substrate run ${{ github.run_id }}"
+          git push -u origin "$b"
+          gh pr create --base main --head "$b" \
+            --title "docs(chart): values-${SUBSTRATE}.yaml proven on a real cluster (exit-test-substrate)" \
+            --body "Green run of \`exit-test-substrate.yml\` on **${SUBSTRATE}**: ${run_url}. This flips the overlay's Proof line (CONTEXT.md § Substrate). Opened with GITHUB_TOKEN, so CI did not trigger — close and reopen to get checks, then merge."
+

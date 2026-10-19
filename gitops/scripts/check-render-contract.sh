@@ -84,8 +84,8 @@
 #   scripts/check-render-contract.sh --selftest     # prove every assertion
 #                                                   # can fail (mutation set)
 #
-# Requires: helm, python3 (+pyyaml), and a ghcr login able to pull
-# oci://ghcr.io/zeroroot-ai/charts/gibson (GHCR_RO_PAT in CI — gitops#494).
+# Requires: helm and python3 (+pyyaml). The chart package
+# oci://ghcr.io/zeroroot-ai/charts/gibson is public, so a pull needs no login.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -132,8 +132,7 @@ fetch_chart() {
   [ -f "$tgz" ] && { echo "$tgz"; return; }
   if ! helm pull "$CHART_REPO" --version "$version" --destination "$WORKDIR" >/dev/null 2>"${WORKDIR}/pull.err"; then
     echo "::error::cannot pull ${CHART_REPO}:${version} — $(tail -1 "${WORKDIR}/pull.err")" >&2
-    echo "  the runner needs a ghcr login with read access to the charts package:" >&2
-    echo "  echo \"\$GHCR_RO_PAT\" | helm registry login ghcr.io -u \"\$ACTOR\" --password-stdin" >&2
+    echo "  the charts package is public, so a pull needs no login: check the version and the network" >&2
     exit 2
   fi
   echo "$tgz"

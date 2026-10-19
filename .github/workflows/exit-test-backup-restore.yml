@@ -115,8 +115,6 @@ concurrency:
 
 permissions:
   contents: read
-  # The GHCR pull token of the install is the job token (see Stage 0).
-  packages: read
 
 env:
   NS: gibson
@@ -136,6 +134,12 @@ jobs:
   restore-loop:
     name: preserve, restore, wipe — the whole loop
     runs-on: ubuntu-latest
+    # The job token is the GHCR pull token of the install, and it reaches
+    # the cluster as an image pull secret. So this job holds no write
+    # permission (scripts/check-pull-token-read-only.py).
+    permissions:
+      contents: read
+      packages: read
     # Three cold bringups of the whole platform, two teardowns with a verified
     # backup between them, and a tenant data plane on top. Measured on kind,
     # a cold recreate alone is 25-40 minutes.

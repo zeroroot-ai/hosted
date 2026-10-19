@@ -79,8 +79,6 @@ concurrency:
 
 permissions:
   contents: read
-  # The GHCR pull token of the install is the job token (see Stage 0).
-  packages: read
 
 env:
   NS: gibson
@@ -110,6 +108,12 @@ jobs:
     name: signup on a plain Kubernetes cluster
     needs: guards
     runs-on: ubuntu-latest
+    # The job token is the GHCR pull token of the install, and it reaches
+    # the cluster as an image pull secret. So this job holds no write
+    # permission (scripts/check-pull-token-read-only.py).
+    permissions:
+      contents: read
+      packages: read
     # One recreate on a 2-vCPU runner takes up to 90 minutes (WAIT_APPS_TIMEOUT
     # below), then the drill and its provisioning wait.
     timeout-minutes: 150

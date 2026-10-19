@@ -1,0 +1,9 @@
+name: bad-no-permissions
+on: workflow_dispatch
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make substrate ENV=kind
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,14 @@
+name: bad-job-write
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: read
+    steps:
+      - run: make substrate ENV=kind
+        env:
+          GHCR_PULL_TOKEN: ${{ github.token }}

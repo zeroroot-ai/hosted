@@ -92,8 +92,6 @@ concurrency:
 
 permissions:
   contents: read
-  # The GHCR pull token of the install is the job token (see Stage 0).
-  packages: read
 
 env:
   NS: gibson
@@ -131,6 +129,12 @@ jobs:
     name: enroll once, run unattended, report a finding (steps 1 to 5 and 7)
     needs: guards
     runs-on: ubuntu-latest
+    # The job token is the GHCR pull token of the install, and it reaches
+    # the cluster as an image pull secret. So this job holds no write
+    # permission (scripts/check-pull-token-read-only.py).
+    permissions:
+      contents: read
+      packages: read
     # One recreate on a 2-vCPU runner takes up to 90 minutes (WAIT_APPS_TIMEOUT
     # in the install action), then the drill.
     timeout-minutes: 150
@@ -236,6 +240,12 @@ jobs:
     name: a completion through the shim (steps 1 to 3 and 6)
     needs: guards
     runs-on: ubuntu-latest
+    # The job token is the GHCR pull token of the install, and it reaches
+    # the cluster as an image pull secret. So this job holds no write
+    # permission (scripts/check-pull-token-read-only.py).
+    permissions:
+      contents: read
+      packages: read
     timeout-minutes: 150
     # The gate. Until a person sets the variable, this job is skipped and the
     # job list says so. It never reads PASS with nothing tested.

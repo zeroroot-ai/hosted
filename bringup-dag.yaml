@@ -62,8 +62,8 @@ stages:
     wave: pre-argo
     owner: terraform:module.argocd
     depends_on: [bootstrap-addons]
-    readiness: "argocd server + repo-server Available; repo-creds + ghcr-charts OCI creds Secrets present; app-of-apps Application created"
-    blocked_hint: "Needs TF_VAR_argocd_github_pat at apply time (deploy#1107) — without it the repo-creds/ghcr-charts Secrets are never created and the umbrella 401s into ComparisonError."
+    readiness: "argocd server + repo-server Available; app-of-apps Application created"
+    blocked_hint: "hosted and the charts package are public, so Argo CD reads both with no repo-creds Secret (the argocd_github_pat variable is retired, ADR-0083). A ComparisonError names the source it cannot read."
 
   # --- ArgoCD (envs/<env>) --------------------------------------------------
   - name: gibson-umbrella
