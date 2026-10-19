@@ -104,6 +104,12 @@ jobs:
     name: signup on a plain Kubernetes cluster
     needs: guards
     runs-on: ubuntu-latest
+    # The job token is the GHCR pull token of the install, and it reaches
+    # the cluster as an image pull secret. So this job holds no write
+    # permission (scripts/check-pull-token-read-only.py).
+    permissions:
+      contents: read
+      packages: read
     # One recreate on a 2-vCPU runner takes up to 90 minutes (WAIT_APPS_TIMEOUT
     # below), then the drill and its provisioning wait.
     timeout-minutes: 150
@@ -158,15 +164,18 @@ jobs:
 
       # Stage 0 (ADR-0083): the durable bucket, the stage 0 relay, the DNS
       # sub-zone and the bringup keyring, on the runner's kind Docker network.
-      # GHCR_RO_PAT, not GITHUB_TOKEN: the first-party images live on packages
-      # owned by OTHER repos. The token becomes the keyring member
-      # GHCR_PULL_TOKEN; the sidecar seeds ghcr-pull-secret from it.
+      # The registry token is the job's own GITHUB_TOKEN (packages: read).
+      # The public first-party images need none. The private billing images
+      # grant this repository read access in their package settings ("Manage
+      # Actions access"), so no long-lived PAT exists for them. The token
+      # becomes the keyring member GHCR_PULL_TOKEN; the sidecar seeds
+      # ghcr-pull-secret from it, and it ends with the job.
       - name: Stage 0 (make substrate ENV=kind)
         env:
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_RO_PAT }}
+          GHCR_PULL_TOKEN: ${{ github.token }}
         run: |
           if [ -z "${GHCR_PULL_TOKEN}" ]; then
-            echo "::error::GHCR_RO_PAT is not available. The keyring member GHCR_PULL_TOKEN stays empty, first-party images will not pull and the install cannot succeed."
+            echo "::error::The job token is not available. The keyring member GHCR_PULL_TOKEN stays empty, first-party images will not pull and the install cannot succeed."
             exit 1
           fi
           SUBSTRATE_DIR="$RUNNER_TEMP/substrate" make substrate ENV=kind

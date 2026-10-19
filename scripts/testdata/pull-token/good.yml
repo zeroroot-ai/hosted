@@ -1,0 +1,25 @@
+name: good
+on: workflow_dispatch
+permissions:
+  contents: read
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+    steps:
+      - run: make substrate ENV=kind
+        env:
+          GHCR_PULL_TOKEN: ${{ github.token }}
+  proof:
+    needs: install
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - run: gh pr create
+        env:
+          GH_TOKEN: ${{ github.token }}

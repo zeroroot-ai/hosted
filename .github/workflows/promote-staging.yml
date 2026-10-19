@@ -47,7 +47,8 @@ name: promote-staging
 #
 # Prerequisites (deploy#1067): the `staging` GitHub Environment,
 # the OIDC role in vars.EKS_BRINGUP_ROLE_ARN (bootstrap/eks/aws-org github-oidc.tf,
-# eks_bringup), ARGOCD_GITHUB_PAT. The role needs only read-only EC2 and SSM
+# eks_bringup). No Argo CD token: the Terraform variable argocd_github_pat is
+# retired (ADR-0083), and hosted is public. The role needs only read-only EC2 and SSM
 # here, because nothing applies. Formerly eks-acceptance.yml (deploy#930).
 
 on:
@@ -80,7 +81,6 @@ jobs:
       CHART_VERSION: ${{ inputs.chart_version }}
       AWS_REGION: us-east-1
       KUBECONFIG: /tmp/eks-staging.kubeconfig
-      TF_VAR_argocd_github_pat: ${{ secrets.ARGOCD_GITHUB_PAT }}
       GH_TOKEN: ${{ github.token }}
     steps:
       - name: Checkout hosted

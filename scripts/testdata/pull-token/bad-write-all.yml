@@ -1,0 +1,10 @@
+name: bad-write-all
+on: workflow_dispatch
+permissions: write-all
+jobs:
+  install:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make substrate ENV=kind
+        env:
+          GHCR_PULL_TOKEN: ${{ github.token }}
