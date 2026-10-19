@@ -1,0 +1,2 @@
+# Locally-built binary; CI runs via the bash driver / go run, so we do not ship it.
+load

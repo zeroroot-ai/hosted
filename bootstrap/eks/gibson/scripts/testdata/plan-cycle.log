@@ -1,0 +1,8 @@
+# Verbatim `terraform plan` output captured on deploy#1588 (2026-08-14), when
+# the live staging state still held a pending cluster replacement. Kept as a
+# fixture because a cycle aborts the plan before any JSON is written, so this
+# log is the only artifact the guard can read.
+Error: Cycle: module.s3.aws_s3_bucket_server_side_encryption_configuration.this["audit"],
+module.s3.output.bucket_names (expand), module.kms.aws_kms_key.this["s3"],
+module.network (expand), module.cluster.module.eks.aws_eks_access_entry.this["cluster_creator"] (destroy),
+module.cluster (expand), module.s3 (expand)

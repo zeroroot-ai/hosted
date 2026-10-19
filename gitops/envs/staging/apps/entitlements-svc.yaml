@@ -1,0 +1,75 @@
+# SaaS overlay: entitlements-svc Argo Application for staging.
+#
+# ADR-0074 / deploy#1032: this is the SaaS overlay composition —
+# a separate Argo Application layered on top of the core `gibson` umbrella.
+# Self-hosted installs NEVER have this Application.
+#
+# ZeroRoot SaaS = core gibson umbrella Application (envs/staging/gibson.yaml)
+#               + this SaaS overlay Application
+#
+# This Application deploys the closed entitlements-svc (ghcr.io/zeroroot-ai/billing)
+# into the same namespace as the core platform. The core's seam knob
+# (gibson-workloads.gibson.entitlementsEndpoint) is set in the core Application's
+# values overlay (envs/staging/values.yaml) to point at the Service this
+# overlay deploys.
+#
+# This repo owns both halves: the chart at gitops/saas-overlay/entitlements-svc
+# and the env-specific values overlay under gitops/envs/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gibson-entitlements-svc
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+  annotations:
+    # Image updater wiring for the closed billing image.
+    # TODO: add billing image to the image-list once digest-pinning is wired.
+    argocd-image-updater.argoproj.io/image-list: ""
+spec:
+  project: default
+  sources:
+    # source[0] — the SaaS overlay chart. It lives in this repo under
+    # gitops/saas-overlay/ since the deploy repo was deleted (ADR-0086), so it
+    # tracks `main` like every other source under gitops/envs/. The old
+    # v0.109.2 pin named a tag of a repo that no longer exists. Before that the
+    # pin was v0.12.0, a tag whose tree never held the chart at all, so this
+    # Application could not sync and prod's entitlements-svc never served the
+    # daemon (gitops#355, gitops#364).
+    - repoURL: https://github.com/zeroroot-ai/hosted
+      targetRevision: main
+      path: gitops/saas-overlay/entitlements-svc
+      helm:
+        valueFiles:
+          # The env's values.yaml first, for global.spire.trustDomain: the
+          # one value that names the trust domain of this install (ADR-0164).
+          - $values/gitops/envs/staging/values.yaml
+          - $values/gitops/envs/staging/saas-overlay-entitlements-values.yaml
+    # source[1] — this repo as the $values ref.
+    - repoURL: https://github.com/zeroroot-ai/hosted
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    # Deployed into the same namespace as the core platform.
+    namespace: gibson
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # ApplyOutOfSyncOnly is deliberately ABSENT (gitops#363). With it enabled,
+      # a sync applies only what the comparison at sync-start marked OutOfSync —
+      # and when that comparison is computed against the previous revision, the
+      # resources a promotion actually changes look in-sync, get skipped, and the
+      # operation reports "successfully synced (no more tasks)". The next refresh
+      # marks them OutOfSync against the new revision, but nothing re-drives it
+      # where selfHeal is false. Reproduced on dev: a chartVersion move left the
+      # live Envoy ConfigMap on the old content with the app reporting Succeeded,
+      # indefinitely. The option is a throughput optimisation for applications
+      # with thousands of objects; this one has ~150, so applying them all is the
+      # cheap side of the trade.
+      - ServerSideApply=true
+      - ServerSideDiff=true
+      - RespectIgnoreDifferences=true

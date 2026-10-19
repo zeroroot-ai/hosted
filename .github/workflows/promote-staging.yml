@@ -1,0 +1,212 @@
+name: promote-staging
+# One button per release (ADR-0080 § Staging on demand, CONTEXT.md).
+#
+# Proves a RELEASED chart version on the PERMANENT staging estate:
+#
+#   assert    gitops/envs/staging pins chart_version (the promote-bump PR merged)
+#   reach     the API over SSM, for exactly as long as the assertions run
+#   ready     every Argo Application is Synced+Healthy
+#   landed    hard refresh, then check-promotion-landed.sh: the promotion landed,
+#             and prune-orphans.sh audit: no prune allowlist entry is stale
+#   smoke     signup -> tenant-provision -> run-mission
+#   prod      on green, prod-on-green.sh dispatches promote-bump prod (ADR-0080)
+#   report    the outcome of every stage on this run's summary
+#   issues    on failure, ONE issue per failed stage in this repo,
+#             ready-for-agent, with the log excerpt — troubleshot one by one,
+#             after the merge
+#
+# It never blocks a merge: the merge already happened. It answers "does
+# the version we just released work on the cloud shape kind cannot exercise?"
+# and it feeds the prod promotion (staging-smoke -> promote-bump prod,
+# ADR-0080 § Prod promotion).
+#
+# IT DOES NOT TOUCH THE LIFECYCLE OF STAGING (ADR-0095). Staging stays up all
+# the time, because with kind gone from the workstation it is the only place the
+# platform can be exercised. This workflow used to begin with
+# `make teardown ENV=staging MODE=wipe` as a from-zero preflight, with the input
+# defaulting to true, and then stand the estate back up; that is what kept
+# taking the environment away from whoever was using it. The
+# destroy-recreate-restore-smoke cycle now runs against `drill`, an environment
+# whose whole purpose is to be thrown away.
+# scripts/check-staging-not-ephemeral.py fails this workflow if a teardown or a
+# recreate against staging comes back.
+#
+# HOW IT REACHES A CLUSTER IT DID NOT BUILD. Staging publishes no API port
+# (`api_allow_cidrs = []`), so the only path is an SSM port forward, and before
+# ADR-0095 the only thing that opened one was `make recreate` as a side effect.
+# This workflow also called `make eks-kubeconfig`, which asks EKS for a cluster
+# named zeroroot-ai-staging that has not existed since ADR-0095 moved staging to
+# one EC2 instance running k3s. Both are gone: `make with-cluster ENV=staging
+# CMD=...` opens the forward, runs the whole assertion sequence in one step and
+# closes the forward with it. A forward that outlives its consumer leaves the
+# port bound, which is why it is one step and not four.
+#
+# COST: staging bills continuously by decision (ADR-0095) — one m6a.2xlarge, a
+# 200 GB volume and an Elastic IP. This workflow adds nothing to that and
+# removes nothing from it.
+#
+# Prerequisites (deploy#1067): the `staging` GitHub Environment,
+# the OIDC role in vars.EKS_BRINGUP_ROLE_ARN (bootstrap/eks/aws-org github-oidc.tf,
+# eks_bringup), ARGOCD_GITHUB_PAT. The role needs only read-only EC2 and SSM
+# here, because nothing applies. Formerly eks-acceptance.yml (deploy#930).
+
+on:
+  workflow_dispatch:
+    inputs:
+      chart_version:
+        description: "The released umbrella chart version to prove (bare semver, e.g. 0.118.0). gitops/envs/staging must already pin it (promote-bump)."
+        required: true
+        type: string
+
+concurrency:
+  group: promote-staging
+  cancel-in-progress: false
+
+permissions:
+  id-token: write
+  contents: read
+  issues: write
+  pull-requests: write
+  actions: write  # prod-on-green.sh dispatches promote-bump
+
+jobs:
+  staging:
+    name: prove ${{ inputs.chart_version }} on staging
+    runs-on: ubuntu-latest
+    environment: staging
+    timeout-minutes: 120
+    env:
+      ENV: staging
+      CHART_VERSION: ${{ inputs.chart_version }}
+      AWS_REGION: us-east-1
+      KUBECONFIG: /tmp/eks-staging.kubeconfig
+      TF_VAR_argocd_github_pat: ${{ secrets.ARGOCD_GITHUB_PAT }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout hosted
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: The chart version is released and staging pins it
+        id: pin
+        run: |
+          set -euo pipefail
+          [[ "$CHART_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::chart_version must be bare semver, got '$CHART_VERSION'"; exit 2; }
+          # The chart is released from zeroroot-ai/charts since ADR-0086.
+          if ! gh release view "v${CHART_VERSION}" --repo zeroroot-ai/charts --json tagName >/dev/null 2>&1; then
+            echo "::error::no release v${CHART_VERSION} in zeroroot-ai/charts — release-please has not cut it, or the version is wrong"; exit 2
+          fi
+          # The Argo tree is in THIS checkout now, so read the pin from the
+          # working tree with the shared reader rather than over the API. The
+          # reader fails loudly unless the Application carries exactly one OCI
+          # umbrella source; the awk this replaced took the first
+          # targetRevision it saw, which is the $values ref on some shapes.
+          . gitops/scripts/lib/chart-version.sh
+          pinned="$(env_chart_version staging)"
+          if [ "$pinned" != "$CHART_VERSION" ]; then
+            echo "::error::gitops/envs/staging pins targetRevision '$pinned', not '$CHART_VERSION'. Bump it, merge, then run this again."; exit 2
+          fi
+          echo "staging pins $CHART_VERSION"
+
+      - name: Configure AWS credentials (OIDC role assumption)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+        with:
+          role-to-assume: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-session-name: gh-actions-promote-staging-${{ github.run_id }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      # Pinned by version and sha256 (.github/actions/install-cluster-tools).
+      # `aws ssm start-session` calls the session-manager-plugin, and no
+      # runner image ships it.
+      - name: Install helm, kubectl and the SSM session-manager plugin
+        uses: ./.github/actions/install-cluster-tools
+
+      # ONE step for everything that needs the API, because the SSM forward
+      # lives exactly as long as the command that owns it.
+      #
+      # Three assertions, in order, each the same one the old workflow made:
+      #
+      #   Ready    every Application Synced+Healthy. On a permanent staging this
+      #            is a precondition, not a wait for a bringup: if it is red the
+      #            estate was already broken before this version was pinned.
+      #   landed   `.status.sync.revision` is an EMPTY STRING on every
+      #            multi-source Application, so a jsonpath equality on it can
+      #            never match, and `Synced` alone is not proof (gitops#363): a
+      #            sync can report success having skipped the resources the new
+      #            version changed. A hard refresh re-renders and re-compares
+      #            every resource, then check-promotion-landed.sh asserts the
+      #            operation Succeeded at the spec's own revision, Healthy, and
+      #            nothing OutOfSync except what the prune allowlist names.
+      #   smoke    signup -> tenant Ready -> data-plane secrets -> api-edge auth,
+      #            against the public host. `make eks-smoke` is not used: it
+      #            depends on eks-kubeconfig, which refuses ENV=staging.
+      # ONE step for everything that needs the API, because the SSM forward
+      # lives exactly as long as the command that owns it. The three assertions
+      # are scripts/prove-promotion.sh, which can be read and run on its own.
+      # The signup smoke of prove-promotion signs up through the edge with the
+      # one signup driver (hosted#647), so it needs the browser.
+      - name: The smoke prerequisites (browser driver, evidence directory)
+        uses: ./.github/actions/smoke-prereqs
+        with:
+          diag-dir: ${{ runner.temp }}/signup-diag
+
+      - name: Ready, the promotion landed, and the smoke passes
+        id: prove
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet -r requirements-ci.txt
+          bash gitops/scripts/check-promotion-landed.sh --selftest
+          make with-cluster ENV="${ENV}" CMD="scripts/prove-promotion.sh ${ENV}"
+
+      - name: Keep the page the signup stopped on
+        if: ${{ failure() && steps.prove.outcome == 'failure' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: signup-diag
+          path: ${{ runner.temp }}/signup-diag
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # ADR-0080 step 5: prod follows a green staging. This step runs only
+      # when every stage above passed, so a red run opens nothing. It
+      # dispatches promote-bump (env=prod). That PR's own checks and an
+      # independent review of its head are the guard on the way in (hosted#719). GITHUB_TOKEN may dispatch a
+      # workflow: workflow_dispatch is one of the two events GitHub does not
+      # suppress for the workflow token.
+      - name: Prod follows the green staging version
+        id: prod
+        run: bash gitops/scripts/prod-on-green.sh
+
+      - name: Report the run, one issue per failed stage
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          O_PROVE: ${{ steps.prove.outcome }}
+          O_PROD: ${{ steps.prod.outcome }}
+        run: |
+          set -euo pipefail
+          mark() { case "$1" in success) echo "✅";; failure) echo "❌";; *) echo "⏭";; esac; }
+          body="$(printf '%s\n' \
+            "## promote-staging: ${CHART_VERSION}" "" \
+            "| stage | outcome |" "|---|---|" \
+            "| Ready, ${CHART_VERSION} landed, smoke | $(mark "$O_PROVE") $O_PROVE |" \
+            "| prod follows the green version | $(mark "$O_PROD") $O_PROD |" "" \
+            "Run: ${RUN_URL}. Staging is up, and stays up (ADR-0095).")"
+          # The report goes to this run's summary. It used to be a comment on
+          # the release PR, which lived in the deleted deploy repo; the release
+          # PR is in zeroroot-ai/charts now and this workflow's repo-scoped
+          # token cannot write there.
+          printf '%s\n' "$body" | tee -a "$GITHUB_STEP_SUMMARY"
+          for stage in "Ready, the promotion landed, and the smoke:$O_PROVE" "prod follows the green version:$O_PROD"; do
+            name="${stage%%:*}"; outcome="${stage##*:}"
+            [ "$outcome" = "failure" ] || continue
+            title="staging(${CHART_VERSION}): ${name} failed"
+            if [ -z "$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')" ]; then
+              gh issue create --repo "${GITHUB_REPOSITORY}" --label ready-for-agent --title "$title" --body "$(printf '%s\n' \
+                "## What failed" "" \
+                "Stage **${name}** of \`promote-staging\` for chart version ${CHART_VERSION}: ${RUN_URL}" "" \
+                "Opened by the workflow, one issue per failed stage (ADR-0080 § Staging on demand). The merge for this version already landed; this is downstream. Read the run log for the stage, root-cause it, fix through the dev loop, and re-dispatch \`promote-staging\` with the next version.")"
+            fi
+          done

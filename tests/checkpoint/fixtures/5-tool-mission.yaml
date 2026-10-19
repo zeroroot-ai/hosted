@@ -1,0 +1,64 @@
+# 5-tool-mission.yaml — Spec 4 SIGKILL chaos test fixture
+#
+# A linear 5-tool mission. The chaos harness:
+#   1. Submits this mission.
+#   2. Waits for tool-2 to be in flight.
+#   3. SIGKILLs the daemon.
+#   4. Resumes after the pod comes back.
+#
+# After resume, only tools 3, 4, 5 should execute (1 + 2 already completed
+# before the kill, captured in the latest checkpoint). The harness asserts
+# this via per-tool execution counts on the mission-status RPC.
+#
+# Tools point at the in-cluster `noop-tool` shipped with the chart's test
+# image — a tool that always succeeds, sleeps 10s, and returns deterministic
+# output. The chart agent ships this image with the test runner.
+
+apiVersion: gibson.zeroroot.ai/v1
+kind: MissionDefinition
+metadata:
+  name: chaos-5-tool-linear
+spec:
+  description: "5-tool linear mission for SIGKILL recovery chaos test."
+  workspace:
+    repositories: []
+  nodes:
+    - id: tool-1
+      type: tool
+      tool: noop-tool
+      args:
+        sleep: "10s"
+        marker: "tool-1"
+      depends_on: []
+
+    - id: tool-2
+      type: tool
+      tool: noop-tool
+      args:
+        sleep: "30s"
+        marker: "tool-2"
+      depends_on: [tool-1]
+
+    - id: tool-3
+      type: tool
+      tool: noop-tool
+      args:
+        sleep: "10s"
+        marker: "tool-3"
+      depends_on: [tool-2]
+
+    - id: tool-4
+      type: tool
+      tool: noop-tool
+      args:
+        sleep: "10s"
+        marker: "tool-4"
+      depends_on: [tool-3]
+
+    - id: tool-5
+      type: tool
+      tool: noop-tool
+      args:
+        sleep: "10s"
+        marker: "tool-5"
+      depends_on: [tool-4]

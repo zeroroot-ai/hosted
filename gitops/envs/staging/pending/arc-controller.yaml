@@ -1,0 +1,60 @@
+# ARC (Actions Runner Controller) manager — Epic: cicd-efficiency (board #44),
+# gitops slice of zeroroot-ai/deploy#1067 (GitHub-hosted default,
+# ephemeral metal only for KVM).
+#
+# Installs the gha-runner-scale-set-controller: watches AutoscalingRunnerSet
+# CRs (created by the companion arc-runners-zeroroot Application,
+# envs/staging/arc-runners.yaml) and reconciles the EphemeralRunnerSet /
+# runner pods for each scale set. One controller can serve multiple scale
+# sets, so this Application is deliberately split from the scale-set install.
+#
+# ARCHITECTURE NOTE (supersedes an earlier draft detail): runner pods
+# are NORMAL pods — no /dev/kvm, no nodeSelector onto setec-metal. The KVM
+# requirement for the microVM e2e jobs is satisfied by the setec sandbox-host
+# node (Karpenter `setec-metal` NodePool) that the ALREADY-DEPLOYED setec
+# Application schedules onto; the runner pod only needs namespaced RBAC to
+# drive that setec deployment's Sandbox API (see envs/staging/arc-runners.yaml
+# + manifests/arc-runners/rbac.yaml).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-controller
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: ghcr.io/actions/actions-runner-controller-charts
+    chart: gha-runner-scale-set-controller
+    # Pinned (deploy engineering convention: pin to a release, bump
+    # deliberately). Verified live via `gh api
+    # /orgs/actions/packages/container/actions-runner-controller-charts%2Fgha-runner-scale-set-controller/versions`
+    # on 2026-07-01 — 0.14.2 was the latest published tag.
+    targetRevision: "0.14.2"
+    helm:
+      # Fixed release name so the fullname the chart derives
+      # ("<release>-gha-rs-controller") is predictable — arc-runners.yaml
+      # references it verbatim via controllerServiceAccount.name.
+      releaseName: arc-controller
+      valuesObject:
+        replicaCount: 1
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            memory: 256Mi
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-systems
+  syncPolicy:
+    automated:
+      prune: true
+      # selfHeal:true everywhere (deploy#1394, amends ADR-0072): drift
+      # auto-recovers; a genuinely stuck Application still fails the converge
+      # gates loudly.
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

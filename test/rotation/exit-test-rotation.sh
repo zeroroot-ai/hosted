@@ -1,0 +1,2107 @@
+#!/usr/bin/env bash
+# exit-test-rotation.sh: rotate each credential class through its normal path,
+# and prove the path that uses it (hosted#444).
+#
+# Run it on a running env through the SSM forward:
+#   make with-cluster ENV=drill CMD='test/rotation/exit-test-rotation.sh credential-classes.yaml <results.tsv>'
+# drill.yml does that on its monthly rotation run.
+#
+# The list is credential-classes.yaml. For each class on it:
+#   status: tested   the script calls class_<test> (dashes become
+#                    underscores). A failure fails the run.
+#   another status   the script records the class as untested, with the
+#                    `gap` text of the list. It does not fail the run: the
+#                    scope of these classes is an open decision (hosted#444).
+# scripts/check-rotation-classes.py keeps the tested classes and the class_*
+# functions of this file the same.
+#
+# Each test changes a value at its SOURCE: an OpenBao key, or a cert-manager
+# Certificate. No test writes a Kubernetes Secret (ADR-0014). A test READS a
+# Secret only to know the old value, so that it can prove the old value fails.
+#
+# Output: one line per class in <results.tsv>:
+#   <class> TAB pass|fail|untested TAB <reason>
+# drill.yml opens one issue for each failed line of that file.
+# When a class fails, the script also sends the alert CredentialRotationFailed
+# to the Alertmanager of the env, which sends it by email. When no
+# Alertmanager takes the alert, the script writes one more failed line for
+# the alert itself.
+#
+# Env:
+#   NS            the release namespace (default gibson)
+#   RELEASE       the release name (default gibson)
+#   MON_NS        the monitoring namespace (default monitoring)
+#   CHARTS_ROOT   a checkout of zeroroot-ai/charts, for scripts/baseline-set-secret.sh
+#   DAEMON_STS    the daemon StatefulSet (default: the one labeled component=daemon)
+#   ROTATION_WAIT seconds to wait for one rotation (default 1500)
+# Exit: 0 each tested class passed · 1 a tested class failed · 2 could not run
+set -euo pipefail
+
+# The restart of a platform workload is a pod delete (scripts/lib/restart-pods.sh):
+# the identity admission policy denies a `rollout restart` of one.
+# shellcheck source=../../scripts/lib/restart-pods.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../scripts/lib/restart-pods.sh"
+
+NS="${NS:-gibson}"
+RELEASE="${RELEASE:-gibson}"
+MON_NS="${MON_NS:-monitoring}"
+# The daemon StatefulSet, found by its label: the release names it
+# <release>-gibson-workloads, never a fixed name.
+DAEMON_STS="${DAEMON_STS:-$(kubectl -n "$NS" get statefulset -l app.kubernetes.io/component=daemon \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)}"
+DAEMON_STS="${DAEMON_STS:-${RELEASE}-gibson-workloads}"
+ROTATION_WAIT="${ROTATION_WAIT:-1500}"
+
+CLASSES="${1:-}"
+RESULTS="${2:-}"
+[ -n "$CLASSES" ] && [ -n "$RESULTS" ] || { echo "usage: exit-test-rotation.sh <credential-classes.yaml> <results.tsv>" >&2; exit 2; }
+[ -s "$CLASSES" ] || { echo "could not run: no class list at ${CLASSES}" >&2; exit 2; }
+: > "$RESULTS"
+
+# A class function prints its steps and returns non-zero with the reason in
+# $REASON. It never exits the script, so one failed class does not hide the
+# next one.
+REASON=""
+miss() { REASON="$*"; printf '    ✗ %s\n' "$*" >&2; return 1; }
+ok() { printf '    ✓ %s\n' "$*"; }
+mask() { [ -z "${GITHUB_ACTIONS:-}" ] || printf '::add-mask::%s\n' "$1"; }
+
+# new_password: 43 letters and digits, the shape of the OpenBao seed kind `pw`.
+new_password() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 43; }
+
+# STDIN_LOST: the exit code of an in-pod reader that got no secret on stdin.
+# The stdin of `kubectl exec -i` can arrive empty with the exec exit 0 (drill
+# runs 39171920065 and 39175834377). An empty secret is then no credential,
+# and the service refuses it: redis-cli answers NOAUTH, OpenBao answers 403,
+# the dashboard refuses the session. A refusal check would read that as a
+# pass. So each reader below exits STDIN_LOST on an empty read, and the
+# caller sends the secret again, at most 4 times (audit of the restore path,
+# 2026-10-19).
+STDIN_LOST=97
+
+# redis_cli POD PASSWORD ARGS...: run redis-cli in POD. The password goes on
+# stdin, never on an argv that a process list or a log could show.
+redis_cli() {
+  local pod="$1" pw="$2" out rc; shift 2
+  for _ in 1 2 3 4; do
+    rc=0
+    out="$(printf '%s\n' "$pw" | kubectl -n "$NS" exec -i "$pod" -c redis-stack -- \
+      sh -c 'IFS= read -r p; [ -n "$p" ] || exit 97; REDISCLI_AUTH="$p" exec redis-cli --no-auth-warning "$@"' redis-cli "$@" 2>&1)" || rc=$?
+    [ "$rc" -eq "$STDIN_LOST" ] || { printf '%s\n' "$out"; return "$rc"; }
+    sleep 1
+  done
+  printf 'the password did not reach redis-cli on stdin in 4 tries\n'
+  return "$STDIN_LOST"
+}
+
+# --- redis-password ----------------------------------------------------------
+# Source: the OpenBao key gibson-redis-password. Path: ESO, Reloader, and the
+# CronJob <release>-redis-rotation, which restarts the daemon and the
+# tenant-operator and then removes the old password from the ACL.
+class_redis_password() {
+  local es secret key state pod old new rv0 rv last start ips clients ip
+  [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
+    || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao key"; return 1; }
+  es="$(kubectl -n "$NS" get externalsecrets -o json | jq -r '.items[]
+        | select([.spec.data[]?.remoteRef.key] | index("gibson-redis-password")) | .metadata.name' | head -n1)"
+  [ -n "$es" ] || { miss "no ExternalSecret reads the OpenBao key gibson-redis-password"; return 1; }
+  secret="$(kubectl -n "$NS" get externalsecret "$es" -o jsonpath='{.spec.target.name}')"
+  [ -n "$secret" ] || secret="$es"
+  state="${RELEASE}-redis-rotation-state"
+  pod="${RELEASE}-redis-stack-0"
+  kubectl -n "$NS" get secret "$state" >/dev/null 2>&1 \
+    || { miss "the rotation CronJob has not recorded its first state (${state}), so it would not see a rotation"; return 1; }
+
+  key="$(kubectl -n "$NS" get externalsecret "$es" -o json | jq -r '(.spec.target.template.data // {}) | keys[0] // empty')"
+  [ -n "$key" ] || { miss "the ExternalSecret ${es} names no key of the Secret ${secret}"; return 1; }
+  old="$(kubectl -n "$NS" get secret "$secret" -o json | jq -r --arg k "$key" '.data[$k] // empty' | base64 -d)"
+  [ -n "$old" ] || { miss "the Secret ${secret} holds no password"; return 1; }
+  mask "$old"
+  [ "$(redis_cli "$pod" "$old" PING)" = PONG ] || { miss "redis-stack refuses the current password before the rotation"; return 1; }
+  rv0="$(kubectl -n "$NS" get secret "$secret" -o jsonpath='{.metadata.resourceVersion}')"
+  new="$(new_password)"
+  mask "$new"
+  start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+  # 1. Rotate at the source.
+  set_at_source gibson-redis-password password "$new" \
+    || { miss "the write of the new value to the OpenBao key gibson-redis-password failed"; return 1; }
+  ok "wrote a new value to the OpenBao key gibson-redis-password"
+
+  # 2. The path runs: ESO writes the Secret, and the CronJob records the new
+  #    version when the restarts are done and the old password is removed.
+  local deadline=$(( $(date +%s) + ROTATION_WAIT ))
+  while :; do
+    rv="$(kubectl -n "$NS" get secret "$secret" -o jsonpath='{.metadata.resourceVersion}')"
+    last="$(kubectl -n "$NS" get secret "$state" -o jsonpath='{.data.lastProcessedVersion}' | base64 -d 2>/dev/null || true)"
+    if [ "$rv" != "$rv0" ] && [ "$last" = "$rv" ]; then break; fi
+    [ "$(date +%s)" -lt "$deadline" ] \
+      || { miss "the rotation did not finish in ${ROTATION_WAIT}s (Secret version ${rv0} -> ${rv}, CronJob state ${last:-empty})"; return 1; }
+    sleep 15
+  done
+  ok "ESO wrote the new value, and the CronJob ${RELEASE}-redis-rotation finished its rotation"
+
+  # 3. The service accepts the new value and refuses the old one.
+  [ "$(redis_cli "$pod" "$new" PING)" = PONG ] || { miss "redis-stack refuses the new password"; return 1; }
+  ok "redis-stack accepts the new password"
+  # A refusal is an answer from redis-stack. A command that did not run (no
+  # pod, no exec, no redis-cli) is not a refusal, and it fails the class.
+  local out rc=0
+  out="$(redis_cli "$pod" "$old" PING)" || rc=$?
+  case "$out" in
+    PONG) miss "redis-stack still accepts the old password after the rotation"; return 1 ;;
+    *WRONGPASS*|*NOAUTH*|*"AUTH failed"*) ok "redis-stack refuses the old password" ;;
+    *) miss "the check of the old password did not run (exit ${rc}): $(printf '%s' "$out" | head -n1)"; return 1 ;;
+  esac
+
+  # 4. The caller: each daemon pod started after the rotation, is Ready, and
+  #    holds an authenticated connection to redis-stack.
+  kubectl -n "$NS" rollout status statefulset/"$DAEMON_STS" --timeout=60s >/dev/null \
+    || { miss "the daemon StatefulSet ${DAEMON_STS} is not ready after the rotation"; return 1; }
+  local sel
+  sel="$(kubectl -n "$NS" get statefulset "$DAEMON_STS" -o json | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
+  ips="$(kubectl -n "$NS" get pods -l "$sel" -o json | jq -r --arg t "$start" \
+          '.items[] | select(.status.startTime > $t) | .status.podIP')"
+  [ -n "$ips" ] || { miss "no daemon pod started after the rotation, so no caller loaded the new password"; return 1; }
+  clients="$(redis_cli "$pod" "$new" CLIENT LIST)"
+  for ip in $ips; do
+    printf '%s\n' "$clients" | grep -q "addr=${ip}:" \
+      || { miss "the daemon pod at ${ip} has no connection to redis-stack after the rotation"; return 1; }
+  done
+  ok "each daemon pod started after the rotation and holds a connection to redis-stack"
+
+  # 5. The other clients that read the password at start restarted onto it
+  #    (charts#528): the tenant-operator, ext-authz and ratelimit.
+  local d new_pods
+  for d in gibson-tenant-operator gibson-ext-authz gibson-ratelimit; do
+    kubectl -n "$NS" rollout status deployment/"$d" --timeout=60s >/dev/null \
+      || { miss "${d} is not ready after the rotation"; return 1; }
+    sel="$(kubectl -n "$NS" get deployment "$d" -o json | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
+    new_pods="$(kubectl -n "$NS" get pods -l "$sel" -o json | jq -r --arg t "$start" \
+      '[.items[] | select(.metadata.deletionTimestamp == null)] as $p | ($p | length) as $n | [$p[] | select(.status.startTime > $t)] | length == $n and $n > 0')"
+    [ "$new_pods" = true ] || { miss "a pod of ${d} started before the rotation and still holds the old password"; return 1; }
+  done
+  ok "the tenant-operator, ext-authz and ratelimit restarted onto the new password"
+}
+
+# --- edge-tls ----------------------------------------------------------------
+# Source: the Certificate gibson-envoy-edge. Path: cert-manager issues a new
+# certificate from Let's Encrypt, and Envoy serves it on the public edge.
+served_serial() {
+  openssl s_client -connect "$1:443" -servername "$1" </dev/null 2>/dev/null \
+    | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2
+}
+
+class_edge_tls() {
+  local cert=gibson-envoy-edge host secret rev0 rev old new served
+  command -v cmctl >/dev/null 2>&1 || { miss "cmctl is not on PATH, so the test cannot start the renewal"; return 1; }
+  host="$(kubectl -n "$NS" get certificate "$cert" -o jsonpath='{.spec.dnsNames[0]}')"
+  secret="$(kubectl -n "$NS" get certificate "$cert" -o jsonpath='{.spec.secretName}')"
+  [ -n "$host" ] && [ -n "$secret" ] || { miss "the Certificate ${cert} names no host or no Secret"; return 1; }
+  rev0="$(kubectl -n "$NS" get certificate "$cert" -o jsonpath='{.status.revision}')"
+  old="$(served_serial "$host")"
+  [ -n "$old" ] || { miss "https://${host} serves no certificate before the renewal"; return 1; }
+
+  # 1. Rotate at the source.
+  cmctl renew -n "$NS" "$cert" >/dev/null || { miss "cmctl renew ${cert} failed"; return 1; }
+  ok "cert-manager started the renewal of ${cert} (revision ${rev0:-none})"
+
+  # 2. The path runs: a new revision is Ready.
+  local deadline=$(( $(date +%s) + ROTATION_WAIT ))
+  while :; do
+    rev="$(kubectl -n "$NS" get certificate "$cert" -o jsonpath='{.status.revision}')"
+    if [ "${rev:-0}" -gt "${rev0:-0}" ] \
+       && [ "$(kubectl -n "$NS" get certificate "$cert" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" = True ]; then
+      break
+    fi
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "cert-manager did not issue a new revision of ${cert} in ${ROTATION_WAIT}s"; return 1; }
+    sleep 15
+  done
+  # tls.crt is the public certificate. The script does not read the key.
+  new="$(kubectl -n "$NS" get secret "$secret" -o jsonpath='{.data.tls\.crt}' | base64 -d \
+         | openssl x509 -noout -serial | cut -d= -f2)"
+  [ -n "$new" ] && [ "$new" != "$old" ] || { miss "revision ${rev} of ${cert} holds the same certificate as before"; return 1; }
+  ok "cert-manager issued revision ${rev}, serial ${new}"
+
+  # 3. The caller: a client on the internet gets the new certificate.
+  while :; do
+    served="$(served_serial "$host")"
+    [ "$served" = "$new" ] && break
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "https://${host} still serves serial ${served:-none}, not the new ${new}"; return 1; }
+    sleep 15
+  done
+  ok "https://${host} serves the new certificate"
+}
+
+# --- in-cluster listeners ----------------------------------------------------
+# pf_serial POD PORT: the serial of the certificate that PORT of POD serves.
+# A port-forward reaches a listener inside the cluster through the API, the
+# same way each kubectl call of this script does. A listener that asks for a
+# client certificate still sends its own certificate first.
+pf_serial() {
+  local pod="$1" port="$2" lport pid serial=""
+  lport=$(( 20000 + RANDOM % 20000 ))
+  kubectl -n "$NS" port-forward "pod/${pod}" "${lport}:${port}" >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    serial="$(openssl s_client -connect "127.0.0.1:${lport}" </dev/null 2>/dev/null \
+      | openssl x509 -noout -serial 2>/dev/null | cut -d= -f2)"
+    [ -n "$serial" ] && break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  printf '%s' "$serial"
+}
+
+# pf_pem POD PORT: the PEM of the certificate that PORT of POD serves.
+pf_pem() {
+  local pod="$1" port="$2" lport pid pem=""
+  lport=$(( 20000 + RANDOM % 20000 ))
+  kubectl -n "$NS" port-forward "pod/${pod}" "${lport}:${port}" >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    pem="$(openssl s_client -connect "127.0.0.1:${lport}" </dev/null 2>/dev/null | openssl x509 2>/dev/null)"
+    [ -n "$pem" ] && break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  printf '%s\n' "$pem"
+}
+
+# pods_of SELECTOR: the names of the Running pods that match SELECTOR.
+pods_of() {
+  kubectl -n "$NS" get pods -l "$1" --field-selector=status.phase=Running \
+    -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}'
+}
+
+# --- component-tls -----------------------------------------------------------
+# Source: the cert-manager Certificates of the in-cluster TLS listeners. Path:
+# cert-manager issues a new certificate, Reloader restarts the workload, and
+# the listener serves the new certificate (ADR-0171). The old certificate is
+# not revoked: the selfsigned CA has no revocation list. The old half of the
+# check is that no pod serves the old serial any more.
+#
+# One line per Certificate: <Certificate> <pod selector> <port>.
+COMPONENT_TLS="
+gibson-daemon-metrics-tls app.kubernetes.io/component=daemon 9090
+gibson-ext-authz-health-tls app.kubernetes.io/component=ext-authz 9002
+gibson-openfga-http-tls app.kubernetes.io/name=openfga 8080
+"
+
+class_component_tls() {
+  local cert sel port secret rev0 rev old new pods pod served deadline cafile bad
+  cafile="$(mktemp)"
+  # One deadline for the class. The daemon restart alone can take 15 minutes.
+  deadline=$(( $(date +%s) + 2 * ROTATION_WAIT ))
+  while read -r cert sel port; do
+    [ -n "$cert" ] || continue
+    kubectl -n "$NS" get certificate "$cert" >/dev/null 2>&1 \
+      || { miss "the Certificate ${cert} does not exist"; rm -f "$cafile"; return 1; }
+    secret="$(kubectl -n "$NS" get certificate "$cert" -o jsonpath='{.spec.secretName}')"
+    pods="$(pods_of "$sel")"
+    [ -n "$pods" ] || { miss "no Running pod matches ${sel}, so nothing serves ${cert}"; rm -f "$cafile"; return 1; }
+    old="$(kubectl -n "$NS" get secret "$secret" -o jsonpath='{.data.tls\.crt}' | base64 -d \
+           | openssl x509 -noout -serial | cut -d= -f2)"
+    [ -n "$old" ] || { miss "the Secret ${secret} holds no certificate"; rm -f "$cafile"; return 1; }
+    for pod in $pods; do
+      served="$(pf_serial "$pod" "$port")"
+      [ "$served" = "$old" ] || { miss "${pod}:${port} serves serial ${served:-none} before the renewal, not ${old} of ${secret}"; rm -f "$cafile"; return 1; }
+    done
+    rev0="$(kubectl -n "$NS" get certificate "$cert" -o jsonpath='{.status.revision}')"
+
+    # 1. Rotate at the source.
+    cmctl renew -n "$NS" "$cert" >/dev/null || { miss "cmctl renew ${cert} failed"; rm -f "$cafile"; return 1; }
+    while :; do
+      rev="$(kubectl -n "$NS" get certificate "$cert" -o jsonpath='{.status.revision}')"
+      if [ "${rev:-0}" -gt "${rev0:-0}" ] \
+         && [ "$(kubectl -n "$NS" get certificate "$cert" -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}')" = True ]; then
+        break
+      fi
+      [ "$(date +%s)" -lt "$deadline" ] || { miss "cert-manager did not issue a new revision of ${cert} in ${ROTATION_WAIT}s"; rm -f "$cafile"; return 1; }
+      sleep 15
+    done
+    new="$(kubectl -n "$NS" get secret "$secret" -o jsonpath='{.data.tls\.crt}' | base64 -d \
+           | openssl x509 -noout -serial | cut -d= -f2)"
+    [ -n "$new" ] && [ "$new" != "$old" ] || { miss "revision ${rev} of ${cert} holds the same certificate as before"; rm -f "$cafile"; return 1; }
+    ok "cert-manager issued revision ${rev} of ${cert}, serial ${new}"
+
+    # 2. The path runs: each pod serves the new certificate. Reloader
+    #    restarts the workload, so the pod names can change.
+    #    Each pod must serve the new serial, so no pod serves the old one.
+    while :; do
+      bad=""
+      pods="$(pods_of "$sel")"
+      for pod in $pods; do
+        served="$(pf_serial "$pod" "$port")"
+        [ "$served" = "$new" ] || { bad="${pod} serves ${served:-nothing}"; break; }
+      done
+      [ -n "$pods" ] && [ -z "$bad" ] && break
+      [ "$(date +%s)" -lt "$deadline" ] || { miss "${bad:-no pod of ${sel} runs}: on :${port}, not the new serial ${new}"; rm -f "$cafile"; return 1; }
+      sleep 15
+    done
+    ok "each pod of ${sel} serves the new certificate of ${cert} on :${port}, and none serves the old ${old}"
+
+    # 3. The new certificate chains to the CA in its Secret.
+    kubectl -n "$NS" get secret "$secret" -o jsonpath='{.data.ca\.crt}' | base64 -d > "$cafile"
+    kubectl -n "$NS" get secret "$secret" -o jsonpath='{.data.tls\.crt}' | base64 -d \
+      | openssl verify -CAfile "$cafile" >/dev/null 2>&1 \
+      || { miss "the new certificate of ${cert} does not chain to its CA"; rm -f "$cafile"; return 1; }
+
+    # 4. The caller. ext-authz calls OpenFGA over TLS at start: its startup
+    #    self-check (fga.SelfCheck in buildChecker) exits on any x509 or TLS
+    #    error, so a new ext-authz pod that becomes ready proves the TLS call
+    #    with the new certificate. The metrics and health listeners have no
+    #    working TLS client today: the Prometheus scrape of both is broken
+    #    (charts#543), so the listener half above is their proof.
+    if [ "$port" = 8080 ]; then
+      restart_pods "$NS" deployment/"${RELEASE}-ext-authz" 300 \
+        || { miss "ext-authz is not ready after a restart, so its TLS call to OpenFGA fails with the new certificate"; rm -f "$cafile"; return 1; }
+      ok "a new ext-authz pod is ready, so its TLS call to OpenFGA works with the new certificate"
+    fi
+  done <<< "$COMPONENT_TLS"
+  rm -f "$cafile"
+}
+
+# --- spire-svid --------------------------------------------------------------
+# Source: the X.509 authority of the SPIRE server. Path: the authority
+# rotation of SPIRE (`spire-server localauthority x509`): prepare a new
+# authority, wait for the bundle to reach each agent, activate it, taint the
+# old one so that each agent renews each SVID under the new authority, then
+# revoke the old one, which removes it from the bundle (ADR-0171).
+#
+# The caller half: a new ext-authz pod fetches its authz registry from the
+# daemon over SPIFFE mTLS at start and exits when that fails. So a restart of
+# ext-authz that becomes ready proves mTLS between two workloads, after the
+# taint and again after the revoke.
+#
+# The old half: the bundle of the server holds the old authority before the
+# revoke and not after it, and a probe SVID that the test mints under the old
+# authority no longer verifies against it, at a time inside the life of the
+# probe. The test keeps only the certificate of the probe. mint_probe drops
+# its key.
+SPIRE_POD="${SPIRE_POD:-${RELEASE}-server-0}"
+SPIRE_SOCKET="${SPIRE_SOCKET:-/tmp/spire-server/private/api.sock}"
+SPIRE_PROPAGATE="${SPIRE_PROPAGATE:-180}"
+
+spire() {
+  kubectl -n "$NS" exec "$SPIRE_POD" -c spire-server -- \
+    /opt/spire/bin/spire-server "$@" -socketPath "$SPIRE_SOCKET"
+}
+
+# mint_probe TTL TRUST_DOMAIN: print the certificate of a new probe SVID.
+# The key that mint also prints is dropped here.
+mint_probe() {
+  local out
+  out="$(spire x509 mint -spiffeID "spiffe://$2/drill/rotation-probe" -ttl "$1")" || return 1
+  printf '%s\n' "$out" | openssl x509 2>/dev/null
+}
+
+# bundle_skis FILE: the subject key id of each certificate in a PEM bundle.
+bundle_skis() {
+  awk '/BEGIN CERTIFICATE/{n++} {print > (f "." n)}' f="$1.part" "$1"
+  local c
+  for c in "$1".part.*; do ski_of < "$c"; done
+  rm -f "$1".part.*
+}
+
+# ext_authz_restarts_ready: restart ext-authz and wait until it is ready. A
+# new ext-authz pod fetches its registry from the daemon over SPIFFE mTLS at
+# start, and exits when the fetch fails.
+ext_authz_restarts_ready() {
+  restart_pods "$NS" deployment/"${RELEASE}-ext-authz" 420
+}
+
+# spire_bundle FILE: the X.509 roots of the trust bundle, as PEM.
+spire_bundle() { spire bundle show -format pem > "$1"; }
+
+# ski_of PEM: the subject key id of the certificate, lower-case hex.
+ski_of() { openssl x509 -noout -ext subjectKeyIdentifier 2>/dev/null | tail -n1 | tr -d ' :' | tr 'A-F' 'a-f'; }
+# aki_of PEM: the authority key id of the certificate, lower-case hex.
+aki_of() { openssl x509 -noout -ext authorityKeyIdentifier 2>/dev/null | tail -n1 | sed 's/^ *keyid://' | tr -d ' :' | tr 'A-F' 'a-f'; }
+
+class_spire_svid() {
+  local td work show active prepared deadline pod p aki bad probe_t
+  work="$(mktemp -d)"
+  td="$(kubectl -n "$NS" get configmap "${RELEASE}-server" -o jsonpath='{.data.server\.conf}' \
+        | jq -r '.server.trust_domain // empty')"
+  [ -n "$td" ] || { miss "the SPIRE server config names no trust domain"; rm -rf "$work"; return 1; }
+  show="$(spire localauthority x509 show -output json)" \
+    || { miss "spire-server localauthority x509 show failed"; rm -rf "$work"; return 1; }
+  active="$(printf '%s' "$show" | jq -r '(.active // {}) | .authority_id // .authorityId // empty' | tr 'A-F' 'a-f')"
+  [ -n "$active" ] || { miss "the SPIRE server reports no active X.509 authority"; rm -rf "$work"; return 1; }
+
+  # The probe under the old authority. The first certificate that mint
+  # prints is the SVID. mint_probe drops the key.
+  mint_probe 60m "$td" > "$work/probe.pem" \
+    || { miss "spire-server x509 mint failed"; rm -rf "$work"; return 1; }
+  [ -s "$work/probe.pem" ] || { miss "the minted probe has no certificate"; rm -rf "$work"; return 1; }
+  probe_t="$(date +%s)"
+  spire_bundle "$work/bundle0.pem" && [ -s "$work/bundle0.pem" ] \
+    || { miss "spire-server bundle show failed before the rotation"; rm -rf "$work"; return 1; }
+  openssl verify -attime "$probe_t" -CAfile "$work/bundle0.pem" "$work/probe.pem" >/dev/null 2>&1 \
+    || { miss "the probe of the active authority does not verify before the rotation"; rm -rf "$work"; return 1; }
+  [ "$(bundle_skis "$work/bundle0.pem" | grep -cx "$active")" = 1 ] \
+    || { miss "the bundle does not hold the active authority ${active} before the rotation"; rm -rf "$work"; return 1; }
+
+  # 1. Rotate at the source: prepare, wait for the bundle, activate, taint.
+  spire localauthority x509 prepare -output json > "$work/prepare.json" \
+    || { miss "spire-server localauthority x509 prepare failed"; rm -rf "$work"; return 1; }
+  prepared="$(jq -r '(.prepared_authority // .preparedAuthority // {}) | .authority_id // .authorityId // empty' "$work/prepare.json" | tr 'A-F' 'a-f')"
+  [ -n "$prepared" ] && [ "$prepared" != "$active" ] \
+    || { miss "the prepare step gave no new authority"; rm -rf "$work"; return 1; }
+  ok "prepared X.509 authority ${prepared}; waiting ${SPIRE_PROPAGATE}s for the bundle to reach each agent"
+  deadline=$(( $(date +%s) + ROTATION_WAIT ))
+  sleep "$SPIRE_PROPAGATE"
+  spire localauthority x509 activate -authorityID "$prepared" >/dev/null \
+    || { miss "spire-server localauthority x509 activate failed"; rm -rf "$work"; return 1; }
+  spire localauthority x509 taint -authorityID "$active" >/dev/null \
+    || { miss "spire-server localauthority x509 taint failed"; rm -rf "$work"; return 1; }
+  ok "activated ${prepared} and tainted ${active}"
+
+  # 2. The path runs: each daemon and ext-authz pod serves an SVID of the
+  #    new authority on its SPIFFE listener.
+  for p in "app.kubernetes.io/component=daemon 50051" "app.kubernetes.io/component=ext-authz 9001"; do
+    set -- $p
+    while :; do
+      local pods
+      bad=""
+      pods="$(pods_of "$1")"
+      for pod in $pods; do
+        aki="$(pf_pem "$pod" "$2" | aki_of)"
+        [ "$aki" = "$prepared" ] || { bad="${pod} serves an SVID of authority ${aki:-none}"; break; }
+      done
+      [ -n "$pods" ] && [ -z "$bad" ] && break
+      [ "$(date +%s)" -lt "$deadline" ] || { miss "${bad:-no pod of $1 runs} on :$2, not ${prepared}"; rm -rf "$work"; return 1; }
+      sleep 15
+    done
+    ok "each pod of $1 serves an SVID of the new authority on :$2"
+  done
+  ext_authz_restarts_ready \
+    || { miss "a new ext-authz pod is not ready after the taint, so its mTLS call to the daemon fails"; rm -rf "$work"; return 1; }
+  ok "a new ext-authz pod fetched its registry from the daemon over mTLS with SVIDs of the new authority"
+
+  # 3. Revoke the old authority. The probe of the old authority no longer
+  #    verifies against the bundle, and a probe of the new one does.
+  spire localauthority x509 revoke -authorityID "$active" >/dev/null \
+    || { miss "spire-server localauthority x509 revoke failed"; rm -rf "$work"; return 1; }
+  spire_bundle "$work/bundle1.pem" && [ -s "$work/bundle1.pem" ] \
+    || { miss "spire-server bundle show failed after the revoke"; rm -rf "$work"; return 1; }
+  if bundle_skis "$work/bundle1.pem" | grep -qx "$active"; then
+    miss "the bundle still holds the revoked authority ${active}"; rm -rf "$work"; return 1
+  fi
+  # At the mint time, so an expired probe cannot read as a refusal.
+  if openssl verify -attime "$probe_t" -CAfile "$work/bundle1.pem" "$work/probe.pem" >/dev/null 2>&1; then
+    miss "an SVID of the revoked authority ${active} still verifies against the bundle"; rm -rf "$work"; return 1
+  fi
+  ok "the bundle no longer holds the old authority, and an SVID of it is refused"
+  ext_authz_restarts_ready \
+    || { miss "a new ext-authz pod is not ready after the revoke"; rm -rf "$work"; return 1; }
+  ok "a new ext-authz pod works with the bundle after the revoke"
+  mint_probe 5m "$td" > "$work/probe-new.pem" && [ -s "$work/probe-new.pem" ] \
+    || { miss "spire-server x509 mint failed after the revoke"; rm -rf "$work"; return 1; }
+  openssl verify -CAfile "$work/bundle1.pem" "$work/probe-new.pem" >/dev/null 2>&1 \
+    || { miss "an SVID of the new authority does not verify against the bundle"; rm -rf "$work"; return 1; }
+  ok "an SVID of the new authority verifies"
+  rm -rf "$work"
+}
+
+# --- shared ------------------------------------------------------------------
+# secret_value SECRET KEY: the decoded value of KEY of SECRET, or nothing.
+secret_value() {
+  kubectl -n "$NS" get secret "$1" -o json 2>/dev/null | jq -r --arg k "$2" '.data[$k] // empty' | base64 -d 2>/dev/null
+}
+
+# set_at_source KEY PROPERTY VALUE: the write of a rotation at its source, the
+# OpenBao key, through the same script that the redis class uses. From charts
+# 0.147.0 the script takes the value on stdin only (charts#679).
+set_at_source() {
+  printf '%s\n' "$3" | NS="$NS" RELEASE="$RELEASE" "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" "$1" "$2" >/dev/null
+}
+
+# bootstrap_ready: the PlatformBootstrap of the release reports Ready.
+bootstrap_ready() {
+  [ "$(kubectl get platformbootstrap -o json 2>/dev/null \
+      | jq -r '[.items[0].status.conditions[]? | select(.type == "Ready")][0].status // empty')" = True ]
+}
+
+# --- openbao-service-tokens --------------------------------------------------
+# Source: the OpenBao key gibson-service-token-rotation, property
+# requested_at. Path: the openbao-auto-init sidecar mints a successor of each
+# service token, writes its Secret, and revokes the old token by accessor 15
+# minutes later (ADR-0171). Reloader restarts the tenant-operator, and the
+# platform-operator follows its token file. Each configuration Job reads its
+# token Secret when it starts.
+SERVICE_TOKEN_SECRETS="gibson-platform-operator-vault gibson-tenant-operator-vault"
+# The Job token Secrets. The two approle ones exist only when cert-manager
+# reads OpenBao.
+JOB_TOKEN_SECRETS="gibson-openbao-iam-admin-escrow gibson-openbao-jwt-auth-init gibson-openbao-approle-init gibson-openbao-approle-reader"
+
+# bao_token_status TOKEN: "ok" when OpenBao accepts TOKEN, "denied" when it
+# answers 403, and "error: <text>" for any other result (no answer, a TLS
+# error, a failed exec). The token goes on stdin. The openbao container sets
+# BAO_ADDR (https) and BAO_CACERT for the TLS listener (charts#540).
+bao_token_status() {
+  local out rc
+  for _ in 1 2 3 4; do
+    rc=0
+    out="$(printf '%s\n' "$1" | kubectl -n "$NS" exec -i "${RELEASE}-openbao-0" -c openbao -- \
+      sh -c 'read -r t; [ -n "$t" ] || exit 97; BAO_TOKEN="$t" bao token lookup -format=json 2>&1 >/dev/null' 2>&1)" || rc=$?
+    [ "$rc" -eq "$STDIN_LOST" ] || break
+    sleep 1
+  done
+  if [ "$rc" -eq 0 ]; then
+    printf 'ok'
+  elif [ "$rc" -eq "$STDIN_LOST" ]; then
+    printf 'error: the token did not reach bao on stdin in 4 tries'
+  elif printf '%s' "$out" | grep -q 'Code: 403'; then
+    printf 'denied'
+  else
+    printf 'error: %s' "$(printf '%s' "$out" | tr '\n' ' ' | cut -c1-200)"
+  fi
+}
+
+class_openbao_service_tokens() {
+  local s old new deadline start st secrets
+  declare -A olds=()
+  [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
+    || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao key"; return 1; }
+  # The two operator Secrets always, and each Job token Secret that exists.
+  secrets="$SERVICE_TOKEN_SECRETS"
+  for s in $JOB_TOKEN_SECRETS; do
+    kubectl -n "$NS" get secret "$s" >/dev/null 2>&1 && secrets="$secrets $s"
+  done
+  for s in $secrets; do
+    old="$(secret_value "$s" VAULT_ADMIN_TOKEN)"
+    [ -n "$old" ] || { miss "the Secret ${s} holds no token"; return 1; }
+    mask "$old"
+    st="$(bao_token_status "$old")"
+    [ "$st" = ok ] || { miss "OpenBao does not accept the token of ${s} before the rotation (${st})"; return 1; }
+    olds[$s]="$old"
+  done
+  start="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  deadline=$(( $(date +%s) + 2 * ROTATION_WAIT ))
+
+  # 1. Rotate at the source.
+  set_at_source gibson-service-token-rotation requested_at "$(date +%s)" \
+    || { miss "the write of the rotation request failed"; return 1; }
+  ok "asked for a rotation of the service tokens"
+
+  # 2. The path runs: each Secret gets a successor that OpenBao accepts.
+  for s in $secrets; do
+    while :; do
+      new="$(secret_value "$s" VAULT_ADMIN_TOKEN)"
+      [ -n "$new" ] && [ "$new" != "${olds[$s]}" ] && break
+      [ "$(date +%s)" -lt "$deadline" ] || { miss "the Secret ${s} still holds the old token"; return 1; }
+      sleep 15
+    done
+    mask "$new"
+    st="$(bao_token_status "$new")"
+    [ "$st" = ok ] || { miss "OpenBao does not accept the new token of ${s} (${st})"; return 1; }
+    ok "${s} holds a new token that OpenBao accepts"
+  done
+  kubectl -n "$NS" rollout status deployment/gibson-tenant-operator --timeout=300s >/dev/null \
+    || { miss "the tenant-operator is not ready after its token changed"; return 1; }
+
+  # 3. The old tokens are refused after the grace. Only a 403 counts as a
+  #    refusal: any other failure is no answer, and fails the check.
+  for s in $secrets; do
+    while :; do
+      st="$(bao_token_status "${olds[$s]}")"
+      [ "$st" = denied ] && break
+      [ "$st" = ok ] || { miss "OpenBao gave no answer about the old token of ${s} (${st})"; return 1; }
+      [ "$(date +%s)" -lt "$deadline" ] || { miss "OpenBao still accepts the old token of ${s} after the grace"; return 1; }
+      sleep 30
+    done
+    ok "OpenBao refuses the old token of ${s} (403)"
+  done
+
+  # 4. The callers. After the revoke, the platform-operator passes a full
+  #    reconcile (every 5 minutes) with OpenBao, and the tenant-operator runs.
+  sleep 360
+  bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the old tokens were revoked"; return 1; }
+  kubectl -n "$NS" rollout status deployment/gibson-tenant-operator --timeout=60s >/dev/null \
+    || { miss "the tenant-operator is not ready after the old tokens were revoked"; return 1; }
+  ok "the platform-operator and the tenant-operator work with the new tokens (since ${start})"
+}
+
+# --- zitadel-bringup-tokens --------------------------------------------------
+# Source: the OpenBao keys gibson-zitadel-iam-admin-pat and
+# gibson-zitadel-login-client-pat. Path: the platform-operator mints a
+# successor when a token is older than 30 days, waits until the consumer
+# Secret holds it for 10 minutes, and removes each other token of the user
+# (ADR-0171). The test makes the token due by writing an old mint time at the
+# source.
+#
+# One line per token: <OpenBao key> <consumer Secret>.
+ZITADEL_TOKENS="
+gibson-zitadel-iam-admin-pat iam-admin-pat
+gibson-zitadel-login-client-pat login-client
+"
+
+# zitadel_user_status TOKEN: the HTTP status of GET /auth/v1/users/me with TOKEN
+# (the token's own user),
+# through a port-forward to the Zitadel Service (ADR-0092: the host travels in
+# x-zitadel-instance-host).
+zitadel_user_status() {
+  local lport pid code="" domain
+  domain="$(kubectl get platformbootstrap -o jsonpath='{.items[0].spec.zitadel.externalDomain}')"
+  lport=$(( 20000 + RANDOM % 20000 ))
+  kubectl -n "$NS" port-forward "svc/${RELEASE}-zitadel" "${lport}:8080" >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$1" \
+      | curl -s -o /dev/null -w '%{http_code}' -K - -H "x-zitadel-instance-host: ${domain}" \
+          "http://127.0.0.1:${lport}/auth/v1/users/me" 2>/dev/null || true)"
+    [ -n "$code" ] && [ "$code" != 000 ] && break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  printf '%s' "$code"
+}
+
+class_zitadel_bringup_tokens() {
+  local key secret old new deadline code
+  [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
+    || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao key"; return 1; }
+  deadline=$(( $(date +%s) + 2 * ROTATION_WAIT ))
+  while read -r key secret; do
+    [ -n "$key" ] || continue
+    old="$(secret_value "$secret" pat)"
+    [ -n "$old" ] || { miss "the Secret ${secret} holds no token"; return 1; }
+    mask "$old"
+    [ "$(zitadel_user_status "$old")" = 200 ] || { miss "Zitadel refuses the token of ${secret} before the rotation"; return 1; }
+
+    # 1. Rotate at the source: the token is due.
+    set_at_source "$key" mintedAt 2000-01-01T00:00:00Z \
+      || { miss "the write of an old mint time to ${key} failed"; return 1; }
+    ok "made the token of ${key} due for rotation"
+
+    # 2. The path runs: the consumer Secret holds a new token that works.
+    while :; do
+      new="$(secret_value "$secret" pat)"
+      [ -n "$new" ] && [ "$new" != "$old" ] && break
+      [ "$(date +%s)" -lt "$deadline" ] || { miss "the Secret ${secret} still holds the old token"; return 1; }
+      sleep 15
+    done
+    mask "$new"
+    [ "$(zitadel_user_status "$new")" = 200 ] || { miss "Zitadel refuses the new token of ${secret}"; return 1; }
+    ok "${secret} holds a new token that Zitadel accepts"
+
+    # 3. The old token is removed after the consumer holds the new one.
+    while :; do
+      code="$(zitadel_user_status "$old")"
+      [ "$code" = 401 ] && break
+      [ "$(date +%s)" -lt "$deadline" ] || { miss "Zitadel still answers ${code:-nothing} to the old token of ${secret}, not 401"; return 1; }
+      sleep 30
+    done
+    ok "Zitadel refuses the old token of ${secret}"
+  done <<< "$ZITADEL_TOKENS"
+
+  # 4. The callers: the login UI restarted onto the new token, and the
+  #    platform-operator passes a full reconcile with the new admin token.
+  kubectl -n "$NS" rollout status deployment/gibson-zitadel-login --timeout=300s >/dev/null \
+    || { miss "zitadel-login is not ready after its token changed"; return 1; }
+  sleep 360
+  bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the old admin token was removed"; return 1; }
+  ok "zitadel-login and the platform-operator work with the new tokens"
+}
+
+# --- keyring-generated-keys --------------------------------------------------
+# Source: the bringup keyring file that stage 0 wrote on this runner
+# (KEYRING_FILE, SUBSTRATE_ENV_FILE). The drill env lives for one run, so the
+# check rotates its real keyring. Path: scripts/keyring.sh rotate and retire,
+# scripts/keyring-to-cluster.sh (the one producer of the keyring Secret), and
+# a restart of OpenBao or Velero (ADR-0171, ADR-0083).
+#
+# Seal key: the openbao container writes its seal stanza at start and logs
+# "[openbao] seal key id keyring-<16 hex>", the first 16 hex of the sha256 of
+# the key text (charts). Both halves:
+#   - after rotate and retire, OpenBao starts unsealed on the new key alone;
+#   - started with only the old key, OpenBao stays sealed.
+# Velero password: the repository opens with the keyring password, and a
+# backup run with another password does not complete.
+OPENBAO_POD="${RELEASE}-openbao-0"
+
+seal_id_of() { printf 'keyring-%s' "$(printf '%s' "$1" | sha256sum | cut -c1-16)"; }
+
+# k2c [KEYRING]: run the producer with the real keyring, or with KEYRING.
+k2c() {
+  KEYRING_FILE="${1:-$KEYRING_FILE}" NS="$NS" scripts/keyring-to-cluster.sh "$SUBSTRATE_ENV_FILE" >/dev/null
+}
+
+# bao_seal_state: "unsealed", "sealed", or "unknown", from the seal status
+# that the openbao-auto-init sidecar reads over TLS.
+bao_seal_state() {
+  local st
+  st="$(kubectl -n "$NS" exec "$OPENBAO_POD" -c openbao-auto-init -- \
+        sh -c 'curl -sS https://127.0.0.1:8200/v1/sys/seal-status' 2>/dev/null || true)"
+  case "$st" in
+    *'"initialized":true'*'"sealed":false'*) echo unsealed ;;
+    *'"initialized":true'*'"sealed":true'*) echo sealed ;;
+    *) echo unknown ;;
+  esac
+}
+
+# bao_restart WANT: delete the OpenBao pod and wait until it reports WANT.
+bao_restart() {
+  local deadline
+  kubectl -n "$NS" delete pod "$OPENBAO_POD" --wait=true --timeout=180s >/dev/null || return 1
+  deadline=$(( $(date +%s) + 300 ))
+  until [ "$(bao_seal_state)" = "$1" ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 5
+  done
+}
+
+# bao_ids: the seal key ids the openbao container runs on, in the shape of
+# the line it logs at start ("[openbao] seal key id <cur>[, previous <prev>]").
+# Read from the seal stanza the container wrote before `bao server`
+# (/tmp/seal.hcl: key ids and file paths, never a key). Not from the log: the
+# audit device writes to stdout, and the kubelet rotates the start line out
+# in minutes, long before this class runs (second drill sweep, row 18).
+bao_ids() {
+  local hcl cur prev
+  hcl="$(kubectl -n "$NS" exec "$OPENBAO_POD" -c openbao -- cat /tmp/seal.hcl 2>/dev/null || true)"
+  cur="$(printf '%s\n' "$hcl" | sed -n 's/^ *current_key_id *= *"\([^"]*\)".*/\1/p' | head -1)"
+  prev="$(printf '%s\n' "$hcl" | sed -n 's/^ *previous_key_id *= *"\([^"]*\)".*/\1/p' | head -1)"
+  [ -n "$cur" ] || return 0
+  printf '[openbao] seal key id %s%s\n' "$cur" "${prev:+, previous $prev}"
+}
+
+# velero_backup: create a Backup of the OpenBao pod volume through the kopia
+# repository, and print its final phase.
+#
+# Velero runs one backup at a time when their namespaces overlap, and every
+# backup here covers the release namespace. The hourly Schedule can hold the
+# queue for many minutes, and a backup that waits in the queue has no result
+# (drill 38484872614, hosted#731). So the function first waits for each backup
+# in flight, up to VELERO_QUEUE_WAIT. Its own backup then gets 900 s from the
+# moment it leaves the queue, and the time in the queue counts against
+# VELERO_QUEUE_WAIT. A timeout prints "timeout:<phase>", which is never a
+# result of the repository password.
+# 1200 s: an hourly backup of a cluster that is an hour old takes 5 to 8
+# minutes (staging, hosted#731). The drill.yml step budget counts this wait.
+VELERO_QUEUE_WAIT="${VELERO_QUEUE_WAIT:-1200}"
+# The time of the backup itself, from the moment it leaves the queue.
+VELERO_RUN_WAIT="${VELERO_RUN_WAIT:-900}"
+VELERO_IN_FLIGHT_PHASES="New Queued ReadyToStart InProgress WaitingForPluginOperations WaitingForPluginOperationsPartiallyFailed Finalizing FinalizingPartiallyFailed"
+
+# velero_in_flight: the backups of the velero namespace that have not ended,
+# one name a line.
+velero_in_flight() {
+  local list
+  list="$(kubectl -n velero get backups -o json)" || return 1
+  printf '%s' "$list" \
+    | jq -r --arg ph "$VELERO_IN_FLIGHT_PHASES" '
+        ($ph | split(" ")) as $p
+        | .items[]
+        | select((.status.phase // "New") as $s | $p | index($s))
+        | .metadata.name'
+}
+
+velero_backup() {
+  local name phase="" deadline queue_deadline busy
+  queue_deadline=$(( $(date +%s) + VELERO_QUEUE_WAIT ))
+  while :; do
+    # A list that cannot be read is not an empty queue.
+    busy="$(velero_in_flight)" || busy="(the backup list could not be read)"
+    [ -n "$busy" ] || break
+    [ "$(date +%s)" -lt "$queue_deadline" ] || { printf 'timeout:queue (%s)' "$(printf '%s' "$busy" | tr '\n' ' ')"; return; }
+    sleep 15
+  done
+  name="rotation-drill-$(date +%s)"
+  kubectl apply -f - >/dev/null <<YAML || { echo create-failed; return; }
+apiVersion: velero.io/v1
+kind: Backup
+metadata:
+  name: ${name}
+  namespace: velero
+spec:
+  includedNamespaces: ["${NS}"]
+  labelSelector:
+    matchLabels:
+      app.kubernetes.io/component: openbao
+  defaultVolumesToFsBackup: true
+  ttl: 1h0m0s
+YAML
+  deadline=""
+  while :; do
+    phase="$(kubectl -n velero get backup "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+    case "$phase" in
+      Completed|PartiallyFailed|Failed|FailedValidation) break ;;
+      ""|New|Queued|ReadyToStart)
+        # Still in the queue: a Schedule fired between the wait and the create.
+        [ "$(date +%s)" -lt "$queue_deadline" ] || { phase="timeout:${phase:-New}"; break; } ;;
+      *)
+        [ -n "$deadline" ] || deadline=$(( $(date +%s) + VELERO_RUN_WAIT ))
+        [ "$(date +%s)" -lt "$deadline" ] || { phase="timeout:${phase}"; break; } ;;
+    esac
+    sleep 15
+  done
+  printf '%s' "$phase"
+}
+
+# password_refused PHASE: true when PHASE, the end of a backup made with a
+# repository password that is not the keyring password, is a refusal. Only
+# Failed or PartiallyFailed is. A backup that never left the queue, never
+# ended, or was refused before it ran says nothing about the password.
+password_refused() {
+  case "$1" in
+    PartiallyFailed|Failed) return 0 ;;
+    Completed) miss "a backup with a password that is not the keyring password completed" ;;
+    FailedValidation) miss "the backup with another repository password failed validation, so it never read the repository" ;;
+    *) miss "the backup with another repository password did not end (${1:-no phase}), so it proves no refusal" ;;
+  esac
+}
+
+velero_restart() {
+  kubectl -n velero rollout restart deployment/velero >/dev/null \
+    && kubectl -n velero rollout status deployment/velero --timeout=300s >/dev/null
+}
+
+class_keyring_generated_keys() {
+  local work old new ids phase
+  [ -n "${KEYRING_FILE:-}" ] && [ -s "$KEYRING_FILE" ] && [ -n "${SUBSTRATE_ENV_FILE:-}" ] && [ -s "$SUBSTRATE_ENV_FILE" ] \
+    || { miss "no KEYRING_FILE or SUBSTRATE_ENV_FILE on this runner: the keyring lives with stage 0"; return 1; }
+  work="$(mktemp -d)"; chmod 700 "$work"
+  cp -p "$KEYRING_FILE" "$work/orig.env"
+  old="$(scripts/keyring.sh get "$KEYRING_FILE" OPENBAO_SEAL_KEY)"; mask "$old"
+  [ -z "$(scripts/keyring.sh get "$KEYRING_FILE" OPENBAO_SEAL_KEY_PREVIOUS)" ] \
+    || { miss "the keyring already holds a previous seal key: a rotation did not finish"; rm -rf "$work"; return 1; }
+
+  # 0. The chart of this env writes the seal stanza with the key id. Without
+  #    it a rotation would seal the store, so the check stops here.
+  ids="$(bao_ids)"
+  [ "$ids" = "[openbao] seal key id $(seal_id_of "$old")" ] \
+    || { miss "the openbao container does not log the seal key id of the keyring (got: ${ids:-nothing}); its chart predates the seal key rotation"; rm -rf "$work"; return 1; }
+  ok "OpenBao runs on the keyring seal key $(seal_id_of "$old")"
+
+  # 1. Rotate at the source. OpenBao starts with both keys and rewraps.
+  scripts/keyring.sh rotate "$KEYRING_FILE" OPENBAO_SEAL_KEY >/dev/null \
+    || { miss "keyring.sh rotate failed"; rm -rf "$work"; return 1; }
+  new="$(scripts/keyring.sh get "$KEYRING_FILE" OPENBAO_SEAL_KEY)"; mask "$new"
+  if ! { k2c && bao_restart unsealed; }; then
+    cp -p "$work/orig.env" "$KEYRING_FILE"; k2c; bao_restart unsealed || true
+    miss "OpenBao did not start unsealed with the new and the previous seal key"; rm -rf "$work"; return 1
+  fi
+  [ "$(bao_ids)" = "[openbao] seal key id $(seal_id_of "$new"), previous $(seal_id_of "$old")" ] \
+    || { miss "OpenBao did not log the new and the previous seal key id (got: $(bao_ids))"; rm -rf "$work"; return 1; }
+  ok "OpenBao started unsealed with the new key $(seal_id_of "$new") and the previous key"
+
+  # 2. Retire the old key. The new key alone opens the store.
+  scripts/keyring.sh retire "$KEYRING_FILE" OPENBAO_SEAL_KEY >/dev/null \
+    || { miss "keyring.sh retire failed"; rm -rf "$work"; return 1; }
+  k2c && bao_restart unsealed \
+    || { miss "OpenBao did not start unsealed with the new seal key alone: the store was not rewrapped"; rm -rf "$work"; return 1; }
+  [ "$(bao_ids)" = "[openbao] seal key id $(seal_id_of "$new")" ] \
+    || { miss "OpenBao did not log the new seal key id alone (got: $(bao_ids))"; rm -rf "$work"; return 1; }
+  ok "OpenBao starts unsealed with the new seal key alone"
+
+  # 3. The old key alone is refused: the store stays sealed. Then back.
+  ( umask 077; grep -vE '^OPENBAO_SEAL_KEY(_PREVIOUS)?=' "$KEYRING_FILE" > "$work/old.env"
+    printf 'OPENBAO_SEAL_KEY=%s\nOPENBAO_SEAL_KEY_PREVIOUS=\n' "$old" >> "$work/old.env" )
+  local refused=0
+  k2c "$work/old.env" && bao_restart sealed || refused=1
+  k2c && bao_restart unsealed \
+    || { miss "OpenBao did not return unsealed on the new seal key after the refusal test"; rm -rf "$work"; return 1; }
+  [ "$refused" -eq 0 ] || { miss "OpenBao did not stay sealed under the old seal key alone"; rm -rf "$work"; return 1; }
+  ok "OpenBao stays sealed under the old seal key, and opens again on the new one"
+  kubectl -n "$NS" rollout status statefulset/"${RELEASE}-openbao" --timeout=300s >/dev/null \
+    || { miss "OpenBao is not ready after the seal key rotation"; rm -rf "$work"; return 1; }
+
+  # 4. Velero: the keyring password opens the repository, another does not.
+  ( umask 077; grep -v '^VELERO_REPO_PASSWORD=' "$KEYRING_FILE" > "$work/velero.env"
+    printf 'VELERO_REPO_PASSWORD=%s\n' "$(head -c 32 /dev/urandom | base64 -w0)" >> "$work/velero.env" )
+  k2c "$work/velero.env" && velero_restart || { miss "Velero did not restart with another password"; k2c; velero_restart; rm -rf "$work"; return 1; }
+  phase="$(velero_backup)"
+  k2c && velero_restart || { miss "Velero did not restart with the keyring password"; rm -rf "$work"; return 1; }
+  password_refused "$phase" || { rm -rf "$work"; return 1; }
+  ok "a backup with another repository password does not complete (${phase})"
+  phase="$(velero_backup)"
+  [ "$phase" = Completed ] || { miss "a backup with the keyring repository password ends ${phase}"; rm -rf "$work"; return 1; }
+  ok "a backup with the keyring repository password completes"
+
+  # 5. Back to the key of stage 0, through the same path. The drill keyring
+  #    of stage 0 outlives this run, and the hourly Velero schedule may
+  #    store the OpenBao volume: a store left on the rotated key would not
+  #    open under that keyring after a restore.
+  ( umask 077; grep -vE '^OPENBAO_SEAL_KEY(_PREVIOUS)?=' "$work/orig.env" > "$work/back.env"
+    printf 'OPENBAO_SEAL_KEY=%s\nOPENBAO_SEAL_KEY_PREVIOUS=%s\n' "$old" "$new" >> "$work/back.env" )
+  k2c "$work/back.env" && bao_restart unsealed \
+    || { miss "OpenBao did not start unsealed on the way back to the stage 0 key"; rm -rf "$work"; return 1; }
+  cp -p "$work/orig.env" "$KEYRING_FILE"
+  k2c && bao_restart unsealed \
+    || { miss "OpenBao did not start unsealed on the stage 0 key alone"; rm -rf "$work"; return 1; }
+  [ "$(bao_ids)" = "[openbao] seal key id $(seal_id_of "$old")" ] \
+    || { miss "OpenBao is not back on the stage 0 seal key (got: $(bao_ids))"; rm -rf "$work"; return 1; }
+  ok "OpenBao is back on the stage 0 seal key, and the keyring file is the one stage 0 wrote"
+
+  # The callers of OpenBao work after the restarts.
+  sleep 120
+  bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the seal key rotation"; rm -rf "$work"; return 1; }
+  ok "the PlatformBootstrap is Ready after the rotation"
+  rm -rf "$work"
+}
+
+# --- neo4j-password ----------------------------------------------------------
+# The platform Neo4j had no client, so it is deleted, not rotated (ADR-0171,
+# D78, charts#563). Each tenant has its own Neo4j from the tenant-operator.
+# The check proves that nothing of the platform Neo4j is left: no seed line,
+# no ExternalSecret that reads its OpenBao key, no Secret, no workload and no
+# Service. A credential that no reader can get cannot be used.
+class_neo4j_password() {
+  local st n
+  [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
+    || { miss "CHARTS_ROOT holds no charts checkout, so the test cannot read the seed table"; return 1; }
+  if grep -q '^gibson-neo4j-password ' "${CHARTS_ROOT}/helm/gibson-workloads/files/openbao-seed-keys.txt"; then
+    miss "the seed table of the charts checkout still generates gibson-neo4j-password"; return 1
+  fi
+  # No reader can get the value: no ExternalSecret reads the OpenBao key.
+  # (The check does not log in to OpenBao: hosted holds no OpenBao login,
+  # ADR-0009, hosted#417.)
+  st="$(kubectl get externalsecret -A -o json \
+    | jq -r '[.items[] | select([.spec.data[]?.remoteRef.key, .spec.dataFrom[]?.extract.key] | index("gibson-neo4j-password")) | "\(.metadata.namespace)/\(.metadata.name)"] | join(" ")')" \
+    || { miss "the list of ExternalSecrets failed"; return 1; }
+  [ -z "$st" ] || { miss "ExternalSecrets still read gibson-neo4j-password: ${st}"; return 1; }
+  ok "no ExternalSecret reads the OpenBao key gibson-neo4j-password"
+  for n in "secret/${RELEASE}-neo4j-auth" "secret/gibson-neo4j-auth" "statefulset/${RELEASE}-neo4j" \
+           "statefulset/${RELEASE}" "service/${RELEASE}-neo4j" "service/${RELEASE}-neo4j-lb-neo4j"; do
+    if kubectl -n "$NS" get "$n" >/dev/null 2>&1; then
+      # The release StatefulSet named after the release was the Neo4j pod.
+      if [ "$n" = "statefulset/${RELEASE}" ] && ! kubectl -n "$NS" get "$n" -o json \
+           | jq -e '.spec.template.spec.containers[] | select(.name == "neo4j")' >/dev/null; then
+        continue
+      fi
+      miss "the platform Neo4j object ${n} still exists"; return 1
+    fi
+  done
+  [ -z "$(kubectl -n "$NS" get pods -l helm.neo4j.com/pod_category=neo4j-instance -o name 2>/dev/null)" ] \
+    || { miss "a platform Neo4j pod still runs in ${NS}"; return 1; }
+  st="$(kubectl -n "$NS" get secrets -o json | jq -r '[.items[] | select(.data.NEO4J_PASSWORD != null) | .metadata.name] | join(" ")')"
+  [ -z "$st" ] || { miss "Secrets of ${NS} still carry NEO4J_PASSWORD: ${st}"; return 1; }
+  ok "no key, Secret, workload or Service of the platform Neo4j exists"
+}
+
+# --- platform-signing-keys ---------------------------------------------------
+# Source: the OpenBao keys gibson-cg-signing-key, -next and -previous. Path:
+# the openbao-auto-init sidecar publishes a new kid in -next, promotes it to
+# current 10 minutes later (previous = the old current), and clears -previous
+# after the longest token life (ADR-0171, charts#555). The daemon reads the
+# mount again when it changes.
+#
+# The check starts a rotation with the write of step 1. It does not wait the
+# 25 hours of step 3: it writes the clear of -previous itself, the same write
+# that the sidecar makes. The proof is the per-kid key route of each daemon
+# pod, which ext-authz uses to verify a grant: the new kid answers 200, and
+# after the clear the old kid answers 404, so a grant of the old key cannot
+# verify.
+CG_KEY_KEY="gibson-cg-signing-key"
+
+# cg_kid_status POD KID CERT KEY BUNDLE: the HTTP status of the key route of
+# POD for KID, over SPIFFE mTLS with the given client SVID.
+cg_kid_status() {
+  local lport pid code=""
+  lport=$(( 20000 + RANDOM % 20000 ))
+  kubectl -n "$NS" port-forward "pod/$1" "${lport}:8086" >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    code="$(printf 'GET /capabilitygrant/v1/keys/%s HTTP/1.1\r\nHost: gibson\r\nConnection: close\r\n\r\n' "$2" \
+      | openssl s_client -quiet -verify_return_error -connect "127.0.0.1:${lport}" \
+          -cert "$3" -key "$4" -CAfile "$5" 2>/dev/null | head -n1 | awk '{print $2}')"
+    [ -n "$code" ] && break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  printf '%s' "$code"
+}
+
+# cg_all_pods WANT KID CERT KEY BUNDLE: wait until each daemon pod answers
+# WANT for KID, or the deadline passes.
+cg_all_pods() {
+  local pod bad pods code
+  while :; do
+    bad=""
+    pods="$(pods_of app.kubernetes.io/component=daemon)"
+    for pod in $pods; do
+      code="$(cg_kid_status "$pod" "$2" "$3" "$4" "$5")"
+      [ "$code" = "$1" ] || { bad="${pod} answers ${code:-nothing} for kid $2"; break; }
+    done
+    [ -n "$pods" ] && [ -z "$bad" ] && return 0
+    [ "$(date +%s)" -lt "$CG_DEADLINE" ] || { REASON="$bad"; return 1; }
+    sleep 15
+  done
+}
+
+class_platform_signing_keys() {
+  local work td reader secret old new seed
+  [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
+    || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao key"; return 1; }
+  work="$(mktemp -d)"; chmod 700 "$work"
+  secret="${DAEMON_STS}-cg-signing-key"
+  old="$(secret_value "$secret" current.kid)"
+  [ -n "$old" ] || { miss "the Secret ${secret} holds no current kid"; rm -rf "$work"; return 1; }
+
+  # A client SVID of the reader that the daemon admits on :8086, 10 minutes
+  # long. The key stays in the temporary directory and is removed at the end.
+  td="$(kubectl -n "$NS" get configmap "${RELEASE}-server" -o jsonpath='{.data.server\.conf}' \
+        | jq -r '.server.trust_domain // empty')"
+  reader="$(kubectl -n "$NS" get statefulset "$DAEMON_STS" -o json \
+    | jq -r '[.spec.template.spec.containers[].env[]? | select(.name == "GIBSON_AUTHZ_REGISTRY_READER_SVIDS") | .value][0] // empty' \
+    | tr ', ' '\n\n' | grep -m1 "^spiffe://${td}/")"
+  [ -n "$td" ] && [ -n "$reader" ] || { miss "no trust domain or no reader SVID of the daemon key route"; rm -rf "$work"; return 1; }
+  # x509 mint prints the SVID, then its private key, then the roots. The
+  # first certificate is the SVID.
+  ( umask 077; spire x509 mint -spiffeID "$reader" -ttl 10m > "$work/mint.txt" ) \
+    || { miss "spire-server x509 mint of the reader SVID failed"; rm -rf "$work"; return 1; }
+  openssl x509 < "$work/mint.txt" > "$work/svid.pem" 2>/dev/null
+  ( umask 077; awk '/BEGIN .*PRIVATE KEY/{k=1} k{print} /END .*PRIVATE KEY/{exit}' "$work/mint.txt" > "$work/key.pem" )
+  rm -f "$work/mint.txt"
+  spire_bundle "$work/bundle.pem"
+  [ -s "$work/svid.pem" ] && [ -s "$work/key.pem" ] && [ -s "$work/bundle.pem" ] \
+    || { miss "the reader SVID, its key or the bundle is missing"; rm -rf "$work"; return 1; }
+  CG_DEADLINE=$(( $(date +%s) + ROTATION_WAIT ))
+  cg_all_pods 200 "$old" "$work/svid.pem" "$work/key.pem" "$work/bundle.pem" \
+    || { miss "before the rotation: ${REASON}"; rm -rf "$work"; return 1; }
+  ok "each daemon pod serves the current kid ${old}"
+
+  # 1. Rotate at the source: the write of step 1 of the sidecar.
+  new="drill$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 8)"
+  seed="$(head -c 32 /dev/urandom | base64 | tr -d '\n=' | tr '+/' '-_')"
+  set_at_source "${CG_KEY_KEY}-next" key "$seed" && set_at_source "${CG_KEY_KEY}-next" kid "$new" \
+    || { miss "the write of the next kid failed"; seed=""; rm -rf "$work"; return 1; }
+  seed=""
+  ok "published the next kid ${new} at the source"
+
+  # 2. The path runs: each pod publishes the new kid, then the sidecar
+  #    promotes it, and the old kid still verifies.
+  cg_all_pods 200 "$new" "$work/svid.pem" "$work/key.pem" "$work/bundle.pem" \
+    || { miss "the next kid did not reach each daemon pod: ${REASON}"; rm -rf "$work"; return 1; }
+  ok "each daemon pod publishes the next kid ${new}"
+  while [ "$(secret_value "$secret" current.kid)" != "$new" ]; do
+    [ "$(date +%s)" -lt "$CG_DEADLINE" ] || { miss "the sidecar did not promote ${new} to current"; rm -rf "$work"; return 1; }
+    sleep 30
+  done
+  [ "$(secret_value "$secret" previous.kid)" = "$old" ] \
+    || { miss "after the promotion the previous slot does not hold ${old}"; rm -rf "$work"; return 1; }
+  cg_all_pods 200 "$old" "$work/svid.pem" "$work/key.pem" "$work/bundle.pem" \
+    || { miss "after the promotion the old kid does not verify: ${REASON}"; rm -rf "$work"; return 1; }
+  ok "the sidecar promoted ${new}, and ${old} still verifies"
+
+  # 3. Retire the old kid with the write of step 3. Each pod refuses it.
+  set_at_source "${CG_KEY_KEY}-previous" kid "" && set_at_source "${CG_KEY_KEY}-previous" key "" \
+    || { miss "the clear of the previous slot failed"; rm -rf "$work"; return 1; }
+  cg_all_pods 404 "$old" "$work/svid.pem" "$work/key.pem" "$work/bundle.pem" \
+    || { miss "the old kid is still served after the clear: ${REASON}"; rm -rf "$work"; return 1; }
+  cg_all_pods 200 "$new" "$work/svid.pem" "$work/key.pem" "$work/bundle.pem" \
+    || { miss "the new kid is not served after the clear: ${REASON}"; rm -rf "$work"; return 1; }
+  ok "each daemon pod refuses the old kid ${old} and serves ${new}"
+  rm -rf "$work"
+}
+
+# --- postgres-role-passwords -------------------------------------------------
+# Source: the OpenBao database engine, which issues a login role of each owner
+# of a platform database (charts, ADR-0171). Path: ESO asks for a new login
+# role every 24 hours, writes username and password, and Reloader restarts
+# each consumer. A login role lives 48 hours: its password expires then
+# (VALID UNTIL), and the engine drops the role.
+#
+# The check forces a new login role for each owner (an annotation that makes
+# ESO refresh, the same refresh as the schedule), and proves:
+#   - the Secret holds a new login role, a member of the owner;
+#   - each consumer runs on it: Postgres shows sessions of the new role and
+#     none of the old one;
+#   - the old role has a password end at most 72 hours away (max_ttl), so
+#     Postgres refuses it then, and the engine drops it.
+# <Secret> <owner role> <consumer workload, or - when it connects on demand>
+POSTGRES_LOGINS="
+gibson-platform-postgres-credentials gibson_platform deployment/gibson-dashboard
+tenant-admin-postgres-credentials tenant_admin -
+zitadel-postgres-credentials zitadel deployment/gibson-zitadel
+openfga-postgres-credentials openfga deployment/gibson-openfga
+spire-postgres-credentials spire statefulset/gibson-server
+"
+
+# The SaaS overlay consumers of gibson_platform (billing, entitlements). They
+# read the login role of gibson-platform-postgres-credentials too, so each
+# must roll onto the new one.
+POSTGRES_PLATFORM_CONSUMERS="deployment/gibson-billing-webhook deployment/gibson-entitlements-svc"
+
+pg_su() {  # SQL: run as the Postgres superuser in the CNPG primary. A failed
+  # exec or SQL error returns non-zero with its message on stderr, so a
+  # caller never reads an empty answer as a result.
+  local pod out
+  pod="$(kubectl -n "$NS" get pods -l cnpg.io/cluster=platform-postgres,cnpg.io/instanceRole=primary -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+  [ -n "$pod" ] || { echo "pg_su: no primary pod of platform-postgres" >&2; return 1; }
+  out="$(kubectl -n "$NS" exec "$pod" -c postgres -- psql -X -tA -v ON_ERROR_STOP=1 -d postgres -c "$1" 2>&1)" \
+    || { printf 'pg_su: %s\n' "$out" >&2; return 1; }
+  printf '%s\n' "$out"
+}
+
+# consumer_on_role <workload> <role> <since epoch> <deadline epoch>: the
+# workload runs on <role>. Two proofs (hosted#591):
+#   1. a new generation: every pod of the workload that is not being deleted
+#      started after <since>, is Ready, and there are as many of them as the
+#      workload wants. `rollout status` alone passed before Reloader had even
+#      started the restart;
+#   2. Postgres holds a session of <role> whose client address is one of
+#      those pods. A session of the role from another workload proves
+#      nothing about this one.
+consumer_on_role() {
+  local workload="$1" role="$2" since="$3" deadline="$4" sel want pods line name start ip gone ready
+  local ips n_new n_old sessions
+  sel="$(kubectl -n "$NS" get "$workload" -o jsonpath='{.spec.selector.matchLabels}' \
+    | python3 -c 'import json,sys; print(",".join("%s=%s" % kv for kv in sorted(json.load(sys.stdin).items())))')" \
+    || { miss "cannot read the pod selector of ${workload}"; return 1; }
+  [ -n "$sel" ] || { miss "${workload} has no matchLabels selector"; return 1; }
+  # A workload scaled to 0 has no pod to hold a session, and its IP list
+  # would be empty. Refuse it now, not after the wait.
+  want="$(kubectl -n "$NS" get "$workload" -o jsonpath='{.spec.replicas}')" \
+    || { miss "cannot read the replicas of ${workload}"; return 1; }
+  [ "${want:-1}" != 0 ] || { miss "${workload} has 0 replicas, so no pod of it can run on ${role}"; return 1; }
+  while :; do
+    want="$(kubectl -n "$NS" get "$workload" -o jsonpath='{.spec.replicas}')" \
+      || { miss "cannot read the replicas of ${workload}"; return 1; }
+    pods="$(kubectl -n "$NS" get pods -l "$sel" \
+      -o 'jsonpath={range .items[*]}{.metadata.name}{" "}{.status.startTime}{" "}{.status.podIP}{" "}{.metadata.deletionTimestamp}{"|"}{range .status.conditions[?(@.type=="Ready")]}{.status}{end}{"\n"}{end}')" \
+      || { miss "cannot list the pods of ${workload}"; return 1; }
+    ips=() n_new=0 n_old=0
+    while IFS= read -r line; do
+      [ -n "$line" ] || continue
+      ready="${line##*|}"; line="${line%|*}"
+      read -r name start ip gone <<< "$line"
+      [ -z "${gone:-}" ] || continue
+      if [ -n "$start" ] && [ "$(date -d "$start" +%s)" -gt "$since" ] && [ "$ready" = True ]; then
+        n_new=$(( n_new + 1 )); ips+=("'${ip}'")
+      else
+        n_old=$(( n_old + 1 ))
+      fi
+    done <<< "$pods"
+    [ "$n_old" = 0 ] && [ "$n_new" -ge "${want:-1}" ] && break
+    [ "$(date +%s)" -lt "$deadline" ] \
+      || { miss "${workload}: ${n_new} Ready pod(s) started after the rotation and ${n_old} other(s), want ${want:-1} new ones only"; return 1; }
+    sleep 15
+  done
+  ok "${workload} runs a new generation: ${n_new} Ready pod(s), all started after the rotation"
+  until sessions="$(pg_su "SELECT count(*) FROM pg_stat_activity WHERE usename = '${role}' AND host(client_addr) IN ($(IFS=,; echo "${ips[*]}"))")" \
+        && [ "${sessions:-0}" -gt 0 ]; do
+    [ "$(date +%s)" -lt "$deadline" ] \
+      || { miss "${workload}: Postgres holds no session of ${role} from its pods (${ips[*]})"; return 1; }
+    sleep 15
+  done
+  ok "${workload} holds ${sessions} session(s) of ${role} from its own pods"
+}
+
+class_postgres_role_passwords() {
+  local secret owner workload old new deadline member sessions until left count forced_at
+  declare -A olds=()
+  deadline=$(( $(date +%s) + 2 * ROTATION_WAIT ))
+  forced_at=$(date +%s)
+  # 1. Force a new login role at the source, for each owner.
+  while read -r secret owner workload; do
+    [ -n "$secret" ] || continue
+    old="$(secret_value "$secret" username)"
+    [ -n "$old" ] || { miss "${secret} holds no login role"; return 1; }
+    olds[$secret]="$old"
+    kubectl -n "$NS" annotate externalsecret "$secret" "force-sync=$(date +%s)" --overwrite >/dev/null \
+      || { miss "the refresh of ExternalSecret ${secret} failed"; return 1; }
+  done <<< "$POSTGRES_LOGINS"
+  ok "asked ESO for a new login role of each platform database"
+
+  # 2. The path runs: each Secret holds a new member of its owner, and each
+  #    consumer restarts onto it.
+  while read -r secret owner workload; do
+    [ -n "$secret" ] || continue
+    old="${olds[$secret]}"
+    until new="$(secret_value "$secret" username)" && [ -n "$new" ] && [ "$new" != "$old" ]; do
+      [ "$(date +%s)" -lt "$deadline" ] || { miss "${secret} still holds the old login role"; return 1; }
+      sleep 15
+    done
+    member="$(pg_su "SELECT count(*) FROM pg_auth_members m JOIN pg_roles r ON r.oid = m.roleid JOIN pg_roles u ON u.oid = m.member WHERE r.rolname = '${owner}' AND u.rolname = '${new}'")" \
+      || { miss "could not read the members of ${owner} from Postgres"; return 1; }
+    [ "$member" = 1 ] || { miss "the new login role of ${secret} is not a member of ${owner}"; return 1; }
+    if [ "$workload" != - ]; then
+      kubectl -n "$NS" rollout status "$workload" --timeout=600s >/dev/null \
+        || { miss "${workload} is not ready on the new login role"; return 1; }
+      until sessions="$(pg_su "SELECT count(*) FILTER (WHERE usename = '${new}') || ' ' || count(*) FILTER (WHERE usename = '${old}') FROM pg_stat_activity")" \
+            && [ "${sessions%% *}" -gt 0 ] && [ "${sessions##* }" = 0 ]; do
+        [ "$(date +%s)" -lt "$deadline" ] || { miss "${workload}: sessions of the new and the old login role are ${sessions}"; return 1; }
+        sleep 15
+      done
+      ok "${workload} runs on the new login role of ${owner}, and no session holds the old one"
+    else
+      ok "the login role of ${owner} is new (its consumer connects on demand)"
+    fi
+
+    # 3. The old role ends: it is gone, or its password expires within
+    #    max_ttl. Two questions, so an empty answer is never a pass: does the
+    #    role exist, and when it does, is its expiry a finite time.
+    count="$(pg_su "SELECT count(*) FROM pg_roles WHERE rolname = '${old}'")" \
+      || { miss "could not ask Postgres for the old login role of ${owner}"; return 1; }
+    case "$count" in
+      0) ok "the old login role of ${owner} is already gone" ;;
+      1)
+        until="$(pg_su "SELECT CASE WHEN rolvaliduntil IS NULL OR rolvaliduntil = 'infinity' THEN 'never' ELSE extract(epoch FROM rolvaliduntil)::bigint::text END FROM pg_roles WHERE rolname = '${old}'")" \
+          || { miss "could not read the expiry of the old login role of ${owner}"; return 1; }
+        [[ "$until" =~ ^[0-9]+$ ]] \
+          || { miss "the old login role of ${owner} has no finite expiry (${until:-empty}): its password never ends"; return 1; }
+        left=$(( until - $(date +%s) ))
+        [ "$left" -le $(( 72 * 3600 )) ] || { miss "the old login role of ${owner} is valid for ${left} more seconds, past max_ttl"; return 1; }
+        ok "Postgres refuses the old login role of ${owner} in $(( left / 3600 )) hours at the latest"
+        ;;
+      *) miss "Postgres gave '${count}' for the count of the old login role of ${owner}"; return 1 ;;
+    esac
+  done <<< "$POSTGRES_LOGINS"
+
+  # The SaaS overlay consumers of gibson_platform run on the new role too:
+  # each one restarted after the rotation, and each one holds a session of
+  # the new role from its own pods (hosted#591).
+  new="$(secret_value gibson-platform-postgres-credentials username)"
+  [ -n "$new" ] || { miss "gibson-platform-postgres-credentials holds no login role"; return 1; }
+  for workload in $POSTGRES_PLATFORM_CONSUMERS; do
+    consumer_on_role "$workload" "$new" "$forced_at" "$deadline" || return 1
+  done
+
+  sleep 120
+  bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the new login roles"; return 1; }
+}
+
+# --- platform-generated-secrets ----------------------------------------------
+# Three secrets that the platform generates (ADR-0171, row
+# platform-generated-secrets). Each is rotated at its source, an OpenBao key,
+# with the write that the sidecar makes, and each proves both halves.
+#
+# System API key (charts#570): two slots, each with its own System API user.
+#   The check makes the other slot active. A JWT signed with the new key works
+#   at once; the old key keeps working until the sidecar gives the old slot a
+#   new key, 15 minutes after the flip, and then Zitadel refuses it.
+# Masterkey (charts#572): the check writes `next`. The CronJob proves the
+#   marker, rewraps the Zitadel keys and moves `next` to `value`. Zitadel then
+#   serves with the new masterkey, and the marker no longer opens with the
+#   old one.
+# Session secret (charts#553): the check writes previous = old and a new
+#   secret, the write of a seed rotation. The dashboard then runs with both.
+#   A second rotation drops the first secret, which the dashboard then refuses.
+DASHBOARD_SECRETS="${DASHBOARD_SECRETS:-${DAEMON_STS}-dashboard-secrets}"
+
+b64url() { base64 -w0 | tr '+/' '-_' | tr -d '='; }
+
+# zitadel_admin_status TOKEN: the HTTP status of GET /admin/v1/orgs/default with
+# the bearer TOKEN, through a port-forward to Zitadel. The token goes to curl
+# on stdin, never on its command line.
+zitadel_admin_status() {
+  local domain lport pid code=""
+  domain="$(kubectl get platformbootstrap -o jsonpath='{.items[0].spec.zitadel.externalDomain}')"
+  lport=$(( 20000 + RANDOM % 20000 ))
+  kubectl -n "$NS" port-forward "svc/${RELEASE}-zitadel" "${lport}:8080" >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$1" \
+      | curl -s -o /dev/null -w '%{http_code}' -K - -H "x-zitadel-instance-host: ${domain}" \
+          "http://127.0.0.1:${lport}/admin/v1/orgs/default" 2>/dev/null || true)"
+    [ -n "$code" ] && [ "$code" != 000 ] && break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  printf '%s' "$code"
+}
+
+# system_jwt_status KEYFILE USER: zitadel_admin_status with a System API JWT that
+# USER signs with KEYFILE (RS256).
+system_jwt_status() {
+  local domain now head body sig
+  domain="$(kubectl get platformbootstrap -o jsonpath='{.items[0].spec.zitadel.externalDomain}')"
+  now="$(date +%s)"
+  head="$(printf '{"alg":"RS256","typ":"JWT"}' | b64url)"
+  body="$(jq -nc --arg u "$2" --arg a "https://${domain}" --argjson n "$now" \
+    '{iss: $u, sub: $u, aud: $a, iat: $n, exp: ($n + 60)}' | b64url)"
+  sig="$(printf '%s.%s' "$head" "$body" | openssl dgst -sha256 -sign "$1" | b64url)"
+  zitadel_admin_status "${head}.${body}.${sig}"
+}
+
+# admin_pat_status: zitadel_admin_status with the PAT of the Zitadel admin
+# (PlatformBootstrap spec.zitadel.adminTokenRef). A PAT is an opaque token
+# that Zitadel decrypts with a key of system.encryption_keys, which the
+# masterkey wraps. So a 200 proves that Zitadel opens its keys.
+admin_pat_status() {
+  local ref pat code rns rname rkey
+  ref="$(kubectl get platformbootstrap -o json | jq -r --arg d "$NS" '.items[0].spec.zitadel.adminTokenRef | "\(.namespace // $d) \(.name) \(.key)"')"
+  read -r rns rname rkey <<<"$ref"
+  pat="$(kubectl -n "$rns" get secret "$rname" -o json 2>/dev/null | jq -r --arg k "$rkey" '.data[$k] // empty' | base64 -d)"
+  [ -n "$pat" ] || return 0
+  mask "$pat"
+  code="$(zitadel_admin_status "$pat")"; pat=""
+  printf '%s' "$code"
+}
+
+# zitadel_pods_after EPOCH: true when each pod of the Zitadel Deployment
+# started after EPOCH and is Ready, so none runs on an older Secret.
+zitadel_pods_after() {
+  local sel
+  sel="$(kubectl -n "$NS" get deployment "${RELEASE}-zitadel" -o json \
+    | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
+  kubectl -n "$NS" get pods -l "$sel" -o json | jq -e --argjson t "$1" '
+    [.items[] | select(.metadata.deletionTimestamp == null)] as $p
+    | ($p | length) > 0 and all($p[];
+        (.status.startTime | fromdateiso8601) > $t
+        and ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) > 0)' >/dev/null
+}
+
+# session_probe SECRET: in each running dashboard pod, make an Auth.js session
+# token with SECRET (JWE dir A256CBC-HS512, the key and its kid derived as
+# Auth.js does) and send it to /api/auth/session. Prints "accepted" when every
+# pod returns the session, "refused" when none does, and "mixed" otherwise.
+# It prints "error" when no dashboard pod runs, or when a pod gives no answer
+# that is accepted or refused: an empty answer, a lost stdin ("lost"), or a
+# response that is not an Auth.js session answer (a 5xx). Each of those is
+# sent again, at most 4 times, before it counts. The secret goes to node on
+# stdin.
+SESSION_PROBE_JS='
+const c = require("crypto");
+let sec = "";
+process.stdin.on("data", (d) => (sec += d)).on("end", async () => {
+  sec = sec.trim();
+  if (!sec) { process.stdout.write("lost"); return; }
+  const name = (process.env.AUTH_URL || "").startsWith("https:") ? "__Secure-authjs.session-token" : "authjs.session-token";
+  const key = Buffer.from(c.hkdfSync("sha256", sec, name, `Auth.js Generated Encryption Key (${name})`, 64));
+  const u = (b) => Buffer.from(b).toString("base64url");
+  const kid = u(c.createHash("sha512").update(JSON.stringify({ k: u(key), kty: "oct" })).digest());
+  const now = Math.floor(Date.now() / 1000);
+  const hdr = u(JSON.stringify({ alg: "dir", enc: "A256CBC-HS512", kid }));
+  const body = JSON.stringify({ sub: "rotation-drill", name: "rotation drill", email: "rotation-drill@invalid",
+    authIssuedAt: now, iat: now, exp: now + 300, jti: c.randomUUID() });
+  const iv = c.randomBytes(16);
+  const ci = c.createCipheriv("aes-256-cbc", key.subarray(32), iv);
+  const ct = Buffer.concat([ci.update(body), ci.final()]);
+  const aad = Buffer.from(hdr);
+  const al = Buffer.alloc(8); al.writeBigUInt64BE(BigInt(aad.length * 8));
+  const tag = c.createHmac("sha512", key.subarray(0, 32)).update(Buffer.concat([aad, iv, ct, al])).digest().subarray(0, 32);
+  const jwe = [hdr, "", u(iv), u(ct), u(tag)].join(".");
+  const r = await fetch(`http://127.0.0.1:${process.env.PORT || 3000}/api/auth/session`, { headers: { cookie: `${name}=${jwe}` } });
+  if (!r.ok) { process.stdout.write("error"); return; }
+  // Auth.js answers JSON, null for a cookie it does not accept. A body that
+  // is not JSON is no answer.
+  let j;
+  try { j = await r.json(); } catch (e) { process.stdout.write("error"); return; }
+  process.stdout.write(j && j.user && j.user.email === "rotation-drill@invalid" ? "accepted" : "refused");
+});'
+session_probe() {
+  local pod out seen="" pods
+  # No Running dashboard pod, or a probe with no answer, is an "error". It
+  # was "refused" before, so a refusal check passed on nothing (review of
+  # hosted#797).
+  pods="$(pods_of app.kubernetes.io/component=dashboard)" || pods=""
+  [ -n "$pods" ] || { printf 'error'; return 0; }
+  for pod in $pods; do
+    # Anything but accepted or refused (a lost stdin, an empty answer from a
+    # dropped stdout frame, a failed exec, a 5xx) is sent again. One that
+    # stays is neither accepted nor refused.
+    for _ in 1 2 3 4; do
+      out="$(printf '%s' "$1" | kubectl -n "$NS" exec -i "$pod" -c dashboard -- node -e "$SESSION_PROBE_JS" 2>/dev/null || true)"
+      case "$out" in accepted|refused) break ;; esac
+      sleep 1
+    done
+    case "$out" in accepted|refused) ;; *) out=error ;; esac
+    case "$seen" in "") seen="$out" ;; "$out") ;; *) seen=mixed ;; esac
+  done
+  printf '%s' "$seen"
+}
+
+# The AES-CFB of the Zitadel masterkey (zitadel internal/crypto/aes.go), as
+# the CronJob zitadel-masterkey-rotation does it.
+mk_hex_of() { od -An -v -tx1 | tr -d ' \n'; }
+mk_decrypt_text() {  # STRING KEY32: the plaintext of a Zitadel AESString
+  local raw
+  raw="$(printf '%s' "$1" | tr '_-' '/+' | base64 -d 2>/dev/null | mk_hex_of)"
+  [ "${#raw}" -ge 32 ] || return 0
+  printf '%b' "$(printf '%s' "${raw:32}" | sed 's/../\\x&/g')" \
+    | openssl enc -d -aes-256-cfb -K "$(printf '%s' "$2" | mk_hex_of)" -iv "${raw:0:32}" -nopad 2>/dev/null
+}
+
+# zitadel_marker: the masterkey marker row, read as the Postgres superuser in
+# the primary of platform-postgres.
+zitadel_marker() {
+  local pod
+  pod="$(kubectl -n "$NS" get pods -l cnpg.io/cluster=platform-postgres,cnpg.io/instanceRole=primary -o jsonpath='{.items[0].metadata.name}')"
+  kubectl -n "$NS" exec "$pod" -c postgres -- psql -X -tA -d zitadel \
+    -c "SELECT marker FROM gibson_rotation.masterkey_marker WHERE id = 1" 2>/dev/null
+}
+
+class_platform_generated_secrets() {
+  local work deadline old_user new_user other mk_old mk_new mk_at marker s_old s_new s_newer
+  [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
+    || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao keys"; return 1; }
+  work="$(mktemp -d)"; chmod 700 "$work"
+  deadline=$(( $(date +%s) + 2 * ROTATION_WAIT ))
+
+  # --- the System API key ---
+  old_user="$(secret_value gibson-zitadel-system-key user)"
+  ( umask 077; secret_value gibson-zitadel-system-key private-key.pem > "$work/old.pem" )
+  case "$old_user" in
+    gibson-system-bot) other=b; new_user=gibson-system-bot-b ;;
+    gibson-system-bot-b) other=a; new_user=gibson-system-bot ;;
+    *) miss "gibson-zitadel-system-key names the user '${old_user}', not a slot user"; rm -rf "$work"; return 1 ;;
+  esac
+  [ "$(system_jwt_status "$work/old.pem" "$old_user")" = 200 ] \
+    || { miss "Zitadel refuses the active System API key before the rotation"; rm -rf "$work"; return 1; }
+  set_at_source gibson-zitadel-system-active slot "$other" \
+    || { miss "the write of the active slot failed"; rm -rf "$work"; return 1; }
+  ok "made slot ${other} (${new_user}) active at the source"
+  until [ "$(secret_value gibson-zitadel-system-key user)" = "$new_user" ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "the operator mount still names ${old_user}"; rm -rf "$work"; return 1; }
+    sleep 15
+  done
+  ( umask 077; secret_value gibson-zitadel-system-key private-key.pem > "$work/new.pem" )
+  [ "$(system_jwt_status "$work/new.pem" "$new_user")" = 200 ] \
+    || { miss "Zitadel refuses the new System API key of ${new_user}"; rm -rf "$work"; return 1; }
+  [ "$(system_jwt_status "$work/old.pem" "$old_user")" = 200 ] \
+    || { miss "Zitadel refuses the old System API key as soon as the new one works: no overlap"; rm -rf "$work"; return 1; }
+  ok "Zitadel accepts the new System API key of ${new_user}, and still the old one"
+  while [ "$(system_jwt_status "$work/old.pem" "$old_user")" != 401 ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "Zitadel still accepts the old System API key of ${old_user}"; rm -rf "$work"; return 1; }
+    sleep 60
+  done
+  ok "Zitadel refuses the old System API key of ${old_user} after the refresh of its slot"
+
+  # --- the masterkey ---
+  mk_old="$(secret_value gibson-zitadel-masterkey masterkey)"; mask "$mk_old"
+  mk_new="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 43)"; mask "$mk_new"
+  set_at_source zitadel-masterkey next "$mk_new" || { miss "the write of the next masterkey failed"; rm -rf "$work"; return 1; }
+  ok "wrote the next masterkey at the source"
+  [ "$(admin_pat_status)" = 200 ] \
+    || { miss "Zitadel refuses its admin PAT before the masterkey rotation"; rm -rf "$work"; return 1; }
+  until [ "$(secret_value gibson-zitadel-masterkey masterkey)" = "${mk_new:0:32}" ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "the CronJob did not move the next masterkey to value"; rm -rf "$work"; return 1; }
+    sleep 30
+  done
+  mk_at="$(date +%s)"
+  until zitadel_pods_after "$mk_at"; do
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "no Zitadel pod is Ready that started after the new masterkey"; rm -rf "$work"; return 1; }
+    sleep 15
+  done
+  [ "$(admin_pat_status)" = 200 ] \
+    || { miss "Zitadel on the new masterkey refuses its admin PAT: it does not open its encryption keys"; rm -rf "$work"; return 1; }
+  marker="$(zitadel_marker)"
+  [ "$(mk_decrypt_text "$marker" "${mk_new:0:32}")" = gibson-zitadel-masterkey-marker-v1 ] \
+    || { miss "the masterkey marker does not open with the new masterkey"; rm -rf "$work"; return 1; }
+  [ "$(mk_decrypt_text "$marker" "${mk_old:0:32}")" != gibson-zitadel-masterkey-marker-v1 ] \
+    || { miss "the masterkey marker still opens with the old masterkey"; rm -rf "$work"; return 1; }
+  mk_old=""; mk_new=""
+  ok "Zitadel restarted on the new masterkey and opens its keys (admin PAT), and the marker no longer opens with the old one"
+
+  # --- the session secret ---
+  # A session made with a secret is accepted while the dashboard holds that
+  # secret as AUTH_SECRET or AUTH_SECRET_PREVIOUS, and refused after.
+  s_old="$(secret_value "$DASHBOARD_SECRETS" auth-secret)"; mask "$s_old"
+  [ "$(session_probe "$s_old")" = accepted ] \
+    || { miss "the dashboard refuses a session made with its own secret before the rotation"; rm -rf "$work"; return 1; }
+  [ "$(session_probe "$(head -c 32 /dev/urandom | base64 -w0)")" = refused ] \
+    || { miss "the dashboard accepts a session made with a random secret"; rm -rf "$work"; return 1; }
+  s_new="$(head -c 32 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '=')"; mask "$s_new"
+  set_at_source gibson-dashboard-session-secrets auth_secret_previous "$s_old" \
+    && set_at_source gibson-dashboard-session-secrets auth_secret "$s_new" \
+    || { miss "the write of the session secrets failed"; rm -rf "$work"; return 1; }
+  until [ "$(session_probe "$s_new")" = accepted ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "the dashboard does not accept a session made with the new secret"; rm -rf "$work"; return 1; }
+    sleep 20
+  done
+  [ "$(session_probe "$s_old")" = accepted ] \
+    || { miss "the dashboard on the new secret refuses a session made with the old one: sessions break"; rm -rf "$work"; return 1; }
+  ok "the dashboard accepts sessions made with the new and with the old session secret"
+  s_newer="$(head -c 32 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '=')"; mask "$s_newer"
+  set_at_source gibson-dashboard-session-secrets auth_secret_previous "$s_new" \
+    && set_at_source gibson-dashboard-session-secrets auth_secret "$s_newer" \
+    || { miss "the second write of the session secrets failed"; rm -rf "$work"; return 1; }
+  until [ "$(session_probe "$s_newer")" = accepted ] && [ "$(session_probe "$s_old")" = refused ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "after a second rotation the dashboard does not refuse a session made with the first secret"; rm -rf "$work"; return 1; }
+    sleep 20
+  done
+  [ "$(session_probe "$s_new")" = accepted ] \
+    || { miss "after a second rotation the dashboard refuses a session made with the previous secret"; rm -rf "$work"; return 1; }
+  s_old=""; s_new=""; s_newer=""
+  ok "after a second rotation the dashboard refuses a session made with the first secret"
+  sleep 120
+  bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the rotations"; rm -rf "$work"; return 1; }
+  rm -rf "$work"
+}
+
+# --- openfga-preshared-key ---------------------------------------------------
+# Source: the OpenBao key gibson-openfga-preshared-key (key, key_previous).
+# Path: ESO writes the Secret gibson-openfga-preshared-key, Reloader restarts
+# OpenFGA with both keys, and each client reads its mounted key files again
+# (charts#645, gibson#1091, ADR-0171). The check proves:
+#   - OpenFGA refuses a call with no key;
+#   - after one rotation OpenFGA accepts the new key and the old one;
+#   - after a second rotation OpenFGA refuses the first key and accepts the
+#     second and the third;
+#   - the clients keep service through both rotations with no restart: each
+#     daemon pod stays Ready the whole time, and its /readyz answers 200 at
+#     the end. The daemon readiness runs an OpenFGA Check with the key of the
+#     daemon, and a refused key makes it fail (gibson internal/server/daemon
+#     readiness.go, probe authz_fga);
+#   - no client logs a refused OpenFGA call during the rotations;
+#   - ext-authz starts on the current key: its start self-check is an OpenFGA
+#     Check, and a refused key stops the start.
+
+# fga_status KEY: the HTTP status of an OpenFGA Check with KEY as the bearer
+# token, through a port-forward to the OpenFGA Service. An empty KEY sends no
+# key. The key goes to curl on stdin, never on an argv.
+fga_status() {
+  local lport pid code="" store
+  store="$(kubectl -n "$NS" get configmap gibson-fga-config -o jsonpath='{.data.store_id}' 2>/dev/null)"
+  [ -n "$store" ] || { printf 'no-store'; return 0; }
+  lport=$(( 20000 + RANDOM % 20000 ))
+  kubectl -n "$NS" port-forward "svc/${RELEASE}-openfga" "${lport}:8080" >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    code="$( { [ -z "$1" ] || printf 'header = "Authorization: Bearer %s"\n' "$1"; } \
+      | curl -ks -o /dev/null -w '%{http_code}' -K - -H 'Content-Type: application/json' \
+          --data '{"tuple_key":{"user":"user:rotation-drill","relation":"owner","object":"tenant:rotation-drill"}}' \
+          "https://127.0.0.1:${lport}/stores/${store}/check" 2>/dev/null || true)"
+    [ -n "$code" ] && [ "$code" != 000 ] && break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  printf '%s' "$code"
+}
+
+# daemons_ready: each daemon pod is Ready. Its readiness probe is /readyz,
+# which runs an OpenFGA Check with the key of the daemon.
+daemons_ready() {
+  kubectl -n "$NS" get pods -l app.kubernetes.io/component=daemon -o json \
+    | jq -e '(.items | length) > 0 and all(.items[];
+        ([.status.conditions[]? | select(.type == "Ready" and .status == "True")] | length) > 0)' >/dev/null
+}
+
+# daemon_readyz POD: the HTTP status of /readyz of POD, through a
+# port-forward to its health port.
+daemon_readyz() {
+  local lport pid code=""
+  lport=$(( 20000 + RANDOM % 20000 ))
+  kubectl -n "$NS" port-forward "pod/$1" "${lport}:health" >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 15 "http://127.0.0.1:${lport}/readyz" 2>/dev/null || true)"
+    [ -n "$code" ] && [ "$code" != 000 ] && break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  printf '%s' "$code"
+}
+
+# FGA_CLIENTS: the pod selectors of the OpenFGA clients that run all the time.
+FGA_CLIENTS="app.kubernetes.io/component=daemon app.kubernetes.io/component=ext-authz app.kubernetes.io/name=gibson-tenant-operator app.kubernetes.io/name=gibson-platform-operator"
+
+# refused_fga_calls SINCE: the count of log lines of the OpenFGA clients
+# since SINCE (RFC 3339) that name a refused OpenFGA call.
+refused_fga_calls() {
+  local sel pod n=0 c
+  for sel in $FGA_CLIENTS; do
+    for pod in $(pods_of "$sel"); do
+      c="$(kubectl -n "$NS" logs "$pod" --all-containers --since-time="$1" 2>/dev/null \
+        | grep -ciE 'fga.*(401|unauthenticated|bearer token)|(401|unauthenticated).*fga' || true)"
+      n=$(( n + ${c:-0} ))
+    done
+  done
+  printf '%s' "$n"
+}
+
+# daemon_restarts: the name and the restart count of each daemon container,
+# one pair a line, sorted.
+daemon_restarts() {
+  kubectl -n "$NS" get pods -l app.kubernetes.io/component=daemon -o json \
+    | jq -r '.items[] | .metadata.name as $p | .status.containerStatuses[]? | "\($p)/\(.name) \(.restartCount)"' | sort
+}
+
+# new_fga_key: 43 URL-safe base64 characters, the shape of the seed kind rand.
+new_fga_key() { head -c 32 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '='; }
+
+class_openfga_preshared_key() {
+  local k0 k1 k2 deadline since pod refused restarts unready=0
+  [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
+    || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao key"; return 1; }
+  k0="$(secret_value gibson-openfga-preshared-key key)"; mask "$k0"
+  [ -n "$k0" ] || { miss "the Secret gibson-openfga-preshared-key holds no key"; return 1; }
+  [ "$(fga_status "")" = 401 ] || { miss "OpenFGA does not refuse a call with no key"; return 1; }
+  [ "$(fga_status "$k0")" = 200 ] || { miss "OpenFGA refuses the key of the cluster"; return 1; }
+  daemons_ready || { miss "a daemon pod is not Ready before the rotation"; return 1; }
+  restarts="$(daemon_restarts)"
+  ok "OpenFGA refuses a call with no key and accepts the key of the cluster"
+
+  since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  deadline=$(( $(date +%s) + ROTATION_WAIT ))
+  k1="$(new_fga_key)"; mask "$k1"
+  set_at_source gibson-openfga-preshared-key key_previous "$k0" \
+    && set_at_source gibson-openfga-preshared-key key "$k1" \
+    || { miss "the write of the OpenFGA key failed"; return 1; }
+  until [ "$(fga_status "$k1")" = 200 ] && [ "$(fga_status "$k0")" = 200 ]; do
+    daemons_ready || unready=$((unready + 1))
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "OpenFGA does not accept the new and the old key after the rotation"; return 1; }
+    sleep 15
+  done
+  ok "after one rotation OpenFGA accepts the new key and the old one"
+
+  k2="$(new_fga_key)"; mask "$k2"
+  set_at_source gibson-openfga-preshared-key key_previous "$k1" \
+    && set_at_source gibson-openfga-preshared-key key "$k2" \
+    || { miss "the second write of the OpenFGA key failed"; return 1; }
+  until [ "$(fga_status "$k2")" = 200 ] && [ "$(fga_status "$k0")" = 401 ]; do
+    daemons_ready || unready=$((unready + 1))
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "after a second rotation OpenFGA does not refuse the first key"; return 1; }
+    sleep 15
+  done
+  [ "$(fga_status "$k1")" = 200 ] || { miss "after a second rotation OpenFGA refuses the previous key"; return 1; }
+  ok "after a second rotation OpenFGA refuses the first key and accepts the previous and the new one"
+
+  # Each client reads its key files again within ten seconds; give the
+  # kubelet a sync period to write them, then prove each client.
+  sleep 120
+  [ "$unready" -eq 0 ] || { miss "a daemon pod went unready ${unready} times during the rotations: its OpenFGA Check was refused"; return 1; }
+  [ "$(daemon_restarts)" = "$restarts" ] \
+    || { miss "a daemon pod or container restarted during the rotations, so the poll cannot prove it kept service"; return 1; }
+  for pod in $(pods_of app.kubernetes.io/component=daemon); do
+    [ "$(daemon_readyz "$pod")" = 200 ] || { miss "/readyz of ${pod} fails after the rotations"; return 1; }
+  done
+  ok "each daemon pod stayed Ready through both rotations with no restart, and its /readyz answers 200"
+  refused="$(refused_fga_calls "$since")"
+  [ "$refused" = 0 ] || { miss "the OpenFGA clients logged ${refused} refused OpenFGA calls during the rotations"; return 1; }
+  ok "no OpenFGA client logged a refused call during the rotations"
+  restart_pods "$NS" deployment/"${RELEASE}-ext-authz" 300 \
+    || { miss "ext-authz does not start on the current key: its start self-check is refused"; return 1; }
+  bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the rotations"; return 1; }
+  k0=""; k1=""; k2=""
+  ok "ext-authz starts on the current key, and the PlatformBootstrap is Ready"
+}
+
+# --- vendor-issued-inputs ----------------------------------------------------
+# Source: GitHub and Stripe. A person creates the new value at the vendor and
+# runs scripts/keyring.sh set, which records the time; keyring-to-cluster.sh
+# writes the value and the time (an annotation of the keyring Secret), and
+# the chart moves the value to its consumer (ADR-0171). The vendor value has
+# no issue API, so the drill does not rotate it. The check proves:
+#   - each vendor value the cluster holds has a recorded set time, younger
+#     than its lifetime;
+#   - the Stripe webhook secret: an event signed with the secret the
+#     billing-webhook holds is accepted, and one signed with another secret
+#     is refused.
+VENDOR_LIFETIME_DAYS="${VENDOR_LIFETIME_DAYS:-365}"
+# <member> <key of bringup-keyring, or - when the value lives elsewhere>
+VENDOR_VALUES="
+GHCR_PULL_TOKEN ghcr-pull-token
+STRIPE_SECRET_KEY stripe-secret-key
+STRIPE_PUBLISHABLE_KEY stripe-publishable-key
+STRIPE_WEBHOOK_SECRET stripe-webhook-secret
+GITHUB_APP_PRIVATE_KEY -
+"
+
+# stripe_signed_status SECRET NS POD: the HTTP status of a test event signed
+# with SECRET, posted to /webhook of POD through a port-forward.
+stripe_signed_status() {
+  local lport pid code="" ts body sig
+  ts="$(date +%s)"
+  body="$(jq -nc --arg id "evt_rotation_drill_${ts}" \
+    '{id: $id, object: "event", type: "rotation.drill.check", api_version: "2024-06-20", created: 0, data: {object: {}}}')"
+  sig="$(printf '%s.%s' "$ts" "$body" | openssl dgst -sha256 -hmac "$1" -hex | sed 's/^.*= //')"
+  lport=$(( 20000 + RANDOM % 20000 ))
+  kubectl -n "$2" port-forward "pod/$3" "${lport}:8090" >/dev/null 2>&1 &
+  pid=$!
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    code="$(printf 'header = "Stripe-Signature: t=%s,v1=%s"\n' "$ts" "$sig" \
+      | curl -s -o /dev/null -w '%{http_code}' -K - -H 'Content-Type: application/json' \
+          --data-binary "$body" "http://127.0.0.1:${lport}/webhook" 2>/dev/null || true)"
+    [ -n "$code" ] && [ "$code" != 000 ] && break
+    sleep 1
+  done
+  kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null || true
+  printf '%s' "$code"
+}
+
+class_vendor_issued_inputs() {
+  local member key value at age annotations dep ns pod sec skey whsec code
+  annotations="$(kubectl -n "$NS" get secret bringup-keyring -o json | jq -c '.metadata.annotations // {}')" \
+    || { miss "no keyring Secret ${NS}/bringup-keyring"; return 1; }
+  while read -r member key; do
+    [ -n "$member" ] || continue
+    at="$(jq -r --arg a "keyring.zeroroot.ai/set-at.$(printf '%s' "$member" | tr 'A-Z_' 'a-z-')" '.[$a] // empty' <<<"$annotations")"
+    if [ "$key" != - ]; then
+      value="$(secret_value bringup-keyring "$key")"
+      if [ -z "$value" ]; then ok "${member}: not supplied in this env"; continue; fi
+      value=""
+      [ -n "$at" ] || { miss "${member} is supplied and has no recorded set time: set it again with keyring.sh set"; return 1; }
+    elif [ -z "$at" ]; then
+      # The GitHub App key reaches the cluster as argocd/zeroroot-ai-creds
+      # (keyring-to-cluster.sh). That Secret means the key is in use.
+      if kubectl -n argocd get secret zeroroot-ai-creds >/dev/null 2>&1; then
+        miss "${member} is in use (argocd/zeroroot-ai-creds) and has no recorded set time: set it again with keyring.sh set"; return 1
+      fi
+      ok "${member}: not used in this env"; continue
+    fi
+    age=$(( ( $(date +%s) - at ) / 86400 ))
+    [ "$age" -le "$VENDOR_LIFETIME_DAYS" ] \
+      || { miss "${member} was set ${age} days ago, past its lifetime of ${VENDOR_LIFETIME_DAYS} days: rotate it at the vendor"; return 1; }
+    ok "${member}: set ${age} days ago"
+  done <<< "$VENDOR_VALUES"
+
+  # The Stripe webhook secret, at its consumer.
+  dep="$(kubectl get deploy -A -o json | jq -r '.items[] | select(.metadata.name | endswith("billing-webhook")) | "\(.metadata.namespace) \(.metadata.name)"' | head -n1)"
+  if [ -z "$dep" ]; then ok "no billing-webhook in this env: no Stripe webhook to prove"; return 0; fi
+  ns="${dep%% *}"
+  read -r sec skey < <(kubectl -n "$ns" get deploy "${dep#* }" -o json | jq -r '
+    [.spec.template.spec.containers[].env[]? | select(.name == "STRIPE_WEBHOOK_SECRET") | .valueFrom.secretKeyRef][0] | "\(.name) \(.key)"')
+  whsec="$(kubectl -n "$ns" get secret "$sec" -o json 2>/dev/null | jq -r --arg k "$skey" '.data[$k] // empty' | base64 -d 2>/dev/null)"
+  [ -n "$whsec" ] || { miss "the billing-webhook holds no Stripe webhook secret (${sec}/${skey})"; return 1; }
+  mask "$whsec"
+  pod="$(kubectl -n "$ns" get pods -o json | jq -r --arg d "${dep#* }" '[.items[] | select(.metadata.name | startswith($d + "-")) | select(.status.phase == "Running") | .metadata.name][0] // empty')"
+  [ -n "$pod" ] || { miss "no running billing-webhook pod in ${ns}"; return 1; }
+  code="$(stripe_signed_status "$whsec" "$ns" "$pod")"; whsec=""
+  [ "$code" = 200 ] || { miss "the billing-webhook answers ${code:-nothing}, not 200, to an event signed with the secret it holds"; return 1; }
+  code="$(stripe_signed_status "whsec_$(openssl rand -hex 16)" "$ns" "$pod")"
+  [ "$code" = 400 ] || { miss "the billing-webhook answers ${code:-nothing}, not 400, to an event signed with another secret"; return 1; }
+  ok "the billing-webhook accepts an event signed with its secret and refuses one signed with another"
+}
+
+# --- setec-disk-signing-seed ------------------------------------------------
+# Source: the bringup keyring members SETEC_DISK_SIGNING_SEED and the second,
+# permanent seed SETEC_DISK_SIGNING_SEED_PREVIOUS, whose two public keys the
+# drill overlay lists (owner decision of 2026-10-18, hosted#444, option a).
+# Path: keyring-to-cluster.sh writes the seed to the bringup keyring, the
+# openbao-auto-init sidecar copies it to OpenBao, ESO writes the Secret
+# setec-system/setec-disk-signing, and the setec operator signs each new disk
+# with it. A disk tag names the key id of its signer (setec#272), so a new
+# seed makes a new disk.
+#
+# The check switches the signing seed to the second seed in a copy of the
+# runner keyring, waits until the operator Secret holds it, and boots a
+# launcher Sandbox of a first-party image (the default class, an image of the
+# ghcr.io mirror, the one registry of the install). It proves that the
+# operator ran the disk Job of that image digest and the key id of the second
+# seed, and that the Sandbox runs: the launcher verified the disk. Then it
+# switches back, through the same path. The class does not revoke: both keys
+# stay trusted (revokes_old: false).
+SETEC_NS="${SETEC_NS:-setec-system}"
+DISK_SIGNING_SECRET="${DISK_SIGNING_SECRET:-setec-disk-signing}"
+SEED_WAIT="${SEED_WAIT:-900}"
+SANDBOX_NS="${SANDBOX_NS:-setec-sandboxes}"
+SANDBOX_WAIT="${SANDBOX_WAIT:-900}"
+# A small first-party image, by digest: a disk belongs to one digest.
+DISK_PROBE_IMAGE="${DISK_PROBE_IMAGE:-ghcr.io/zeroroot-ai/mirror/alpine@sha256:48b0309ca019d89d40f670aa1bc06e426dc0931948452e8491e3d65087abc07d}"
+
+# disk_key_id PUB_B64: the key id of a raw ed25519 public key, as setec
+# names it in a disk tag: 16 hex of the SHA-256 of the key (diskbuilder.KeyID).
+disk_key_id() { printf '%s' "$1" | base64 -d | sha256sum | cut -c1-16; }
+
+# with_disk_seeds FILE OUT SEED PREVIOUS: a copy of keyring FILE at OUT with
+# the two disk seed members set. Every other member stays as it is.
+with_disk_seeds() {
+  ( umask 077
+    grep -vE '^SETEC_DISK_SIGNING_SEED(_PREVIOUS)?=' "$1" > "$2"
+    printf 'SETEC_DISK_SIGNING_SEED=%s\nSETEC_DISK_SIGNING_SEED_PREVIOUS=%s\n' "$3" "$4" >> "$2" )
+}
+
+# signing_seed_is SEED: true when the operator Secret holds SEED. The values
+# are compared by hash, never printed.
+signing_seed_is() {
+  local have
+  have="$(kubectl -n "$SETEC_NS" get secret "$DISK_SIGNING_SECRET" -o jsonpath='{.data.seed}' 2>/dev/null | base64 -d 2>/dev/null | sha256sum | cut -c1-64)"
+  [ "$have" = "$(printf '%s' "$1" | sha256sum | cut -c1-64)" ]
+}
+
+# wait_signing_seed SEED: until the operator Secret holds SEED, or SEED_WAIT.
+# The input pass of the sidecar runs every five minutes, then ESO refreshes.
+wait_signing_seed() {
+  local deadline=$(( $(date +%s) + SEED_WAIT ))
+  until signing_seed_is "$1"; do
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    kubectl -n "$SETEC_NS" annotate externalsecret "$DISK_SIGNING_SECRET" "force-sync=$(date +%s)" --overwrite >/dev/null 2>&1 || true
+    sleep 30
+  done
+}
+
+# disk_job_name IMAGE KEY_ID: the name of the disk Job of an image digest and
+# a signing key, as the setec operator names it (diskJobName): setec-disk-,
+# the first 20 hex of the digest, -, the key id.
+disk_job_name() {
+  local digest="${1##*@sha256:}"
+  [ "$digest" != "$1" ] || return 1
+  printf 'setec-disk-%s-%s' "${digest:0:20}" "$2"
+}
+
+# probe_sandbox NAME JOB: create a launcher Sandbox of DISK_PROBE_IMAGE and
+# wait until it runs, or SANDBOX_WAIT. While it waits, it reads the disk Job
+# JOB, because the Job is deleted 600 s after it ends (diskJobTTLSeconds), and
+# writes "job-succeeded" to the file JOB_SEEN when the Job succeeded. Prints
+# the last phase and reason on failure.
+probe_sandbox() {
+  local deadline phase
+  kubectl apply -f - >/dev/null <<YAML || return 1
+apiVersion: setec.zeroroot.ai/v1alpha1
+kind: Sandbox
+metadata:
+  name: ${1}
+  namespace: ${SANDBOX_NS}
+spec:
+  image: ${DISK_PROBE_IMAGE}
+  command: ["/bin/sh", "-c", "sleep 600"]
+  resources:
+    vcpu: 1
+    memory: 512Mi
+  network:
+    mode: none
+  desiredState: Running
+YAML
+  deadline=$(( $(date +%s) + SANDBOX_WAIT ))
+  while :; do
+    if kubectl -n "$SETEC_NS" get job "$2" -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -qx 1; then
+      echo job-succeeded > "$JOB_SEEN"
+    fi
+    phase="$(kubectl -n "$SANDBOX_NS" get sandbox "$1" -o jsonpath='{.status.phase}/{.status.reason}' 2>/dev/null || true)"
+    case "$phase" in Running/*) return 0 ;; Failed/*) printf '%s' "$phase"; return 1 ;; esac
+    [ "$(date +%s)" -lt "$deadline" ] || { printf '%s' "${phase:-none}"; return 1; }
+    sleep 15
+  done
+}
+
+
+class_setec_disk_signing_seed() {
+  local work cur prev keys cur_pub prev_pub new_id job box since got
+  [ -n "${KEYRING_FILE:-}" ] && [ -s "$KEYRING_FILE" ] && [ -n "${SUBSTRATE_ENV_FILE:-}" ] && [ -s "$SUBSTRATE_ENV_FILE" ] \
+    || { miss "no KEYRING_FILE or SUBSTRATE_ENV_FILE on this runner: the keyring lives with stage 0"; return 1; }
+  cur="$(scripts/keyring.sh get "$KEYRING_FILE" SETEC_DISK_SIGNING_SEED)"; mask "$cur"
+  prev="$(scripts/keyring.sh get "$KEYRING_FILE" SETEC_DISK_SIGNING_SEED_PREVIOUS)"; mask "$prev"
+  [ -n "$cur" ] && [ -n "$prev" ] \
+    || { miss "the keyring holds no second disk seed (SETEC_DISK_SIGNING_SEED_PREVIOUS), so there is nothing to switch to"; return 1; }
+  keys="$(scripts/keyring.sh disk-public-keys "$KEYRING_FILE")" \
+    || { miss "keyring.sh disk-public-keys failed"; return 1; }
+  cur_pub="$(printf '%s\n' "$keys" | sed -n 1p)"; prev_pub="$(printf '%s\n' "$keys" | sed -n 2p)"
+  [ -n "$prev_pub" ] || { miss "the second disk seed has no public key"; return 1; }
+  new_id="$(disk_key_id "$prev_pub")"
+  job="$(disk_job_name "$DISK_PROBE_IMAGE" "$new_id")" \
+    || { miss "the probe image ${DISK_PROBE_IMAGE} has no digest"; return 1; }
+  signing_seed_is "$cur" \
+    || { miss "before the switch the Secret ${SETEC_NS}/${DISK_SIGNING_SECRET} does not hold the keyring seed"; return 1; }
+  ok "the disk builder signs with the seed of key $(disk_key_id "$cur_pub"), and the keyring keeps the second seed of key ${new_id}"
+
+  work="$(mktemp -d)"; chmod 700 "$work"
+  with_disk_seeds "$KEYRING_FILE" "$work/switched.env" "$prev" "$cur"
+
+  # 1. Rotate at the source: the second seed signs.
+  if ! { k2c "$work/switched.env" && wait_signing_seed "$prev"; }; then
+    k2c; wait_signing_seed "$cur" || true
+    miss "the Secret ${SETEC_NS}/${DISK_SIGNING_SECRET} did not take the second seed in ${SEED_WAIT}s"; rm -rf "$work"; return 1
+  fi
+  ok "the disk builder holds the second seed"
+
+  # 2. The path runs: a launcher Sandbox boots. The operator runs the disk
+  #    Job of the image digest and the key id of the second seed, and the
+  #    launcher verifies the disk against the overlay keys before it boots.
+  box="rotation-disk-seed-$(date +%s)"
+  JOB_SEEN="$work/job-seen"
+  if ! got="$(probe_sandbox "$box" "$job")"; then
+    kubectl -n "$SANDBOX_NS" delete sandbox "$box" --wait=false >/dev/null 2>&1 || true
+    k2c; wait_signing_seed "$cur" || true
+    miss "a launcher Sandbox did not run after the switch to the second seed (phase ${got})"; rm -rf "$work"; return 1
+  fi
+  if ! { [ -s "$JOB_SEEN" ] || kubectl -n "$SETEC_NS" get job "$job" -o jsonpath='{.status.succeeded}' 2>/dev/null | grep -qx 1; }; then
+    kubectl -n "$SANDBOX_NS" delete sandbox "$box" --wait=false >/dev/null 2>&1 || true
+    k2c; wait_signing_seed "$cur" || true
+    miss "no succeeded disk Job ${job} for the key ${new_id} of the second seed"; rm -rf "$work"; return 1
+  fi
+  kubectl -n "$SANDBOX_NS" delete sandbox "$box" --wait=false >/dev/null 2>&1 || true
+  ok "a launcher Sandbox runs a disk of the second key: the operator chose it by the key id of the second seed (disk Job ${job}), and the launcher verified its signature"
+
+  # 3. Back to the seed of stage 0, through the same path.
+  k2c && wait_signing_seed "$cur" \
+    || { miss "the Secret ${SETEC_NS}/${DISK_SIGNING_SECRET} did not return to the stage 0 seed"; rm -rf "$work"; return 1; }
+  ok "the disk builder signs with the stage 0 seed again"
+  rm -rf "$work"
+}
+
+# --- substrate-cloud-credentials ---------------------------------------------
+# Source: the access keys of the substrate IAM users (stage 0,
+# substrate/gibson-bootstrap). Path: scripts/substrate-rotate.sh at stage 0,
+# on the operator workstation (ADR-0083, ADR-0171). The drill does not rotate
+# them: the drill stage 0 outlives the run. The check asks IAM for the keys of
+# each user and proves the result of the path:
+#   - exactly one active key, so no old key is still accepted;
+#   - its id is the id the cluster holds, so the cluster uses the live key;
+#   - it is younger than its lifetime, so the rotation runs on time.
+# A key that IAM no longer lists is refused by AWS.
+#
+# AN OPEN ROTATION. The monthly rotation job starts a rotation of each user
+# (scripts/drill-rotate-keys.sh start) before this class runs, and a rotation
+# deletes the old key only after it stays unused for QUIET_SECS (4 hours,
+# scripts/substrate-rotate.sh). So in that run each user has two active keys.
+# When the stage 0 file key-slots.tfvars.json shows two slots for a user, the
+# check accepts two active keys, and proves the state of the rotation instead:
+#   - the cluster holds the newer key;
+#   - AWS reports no use of the older key after the switch time that
+#     key-rotation.json records, so no consumer still holds it.
+# A later daily run deletes the older key (drill-rotate-keys.sh continue).
+SUBSTRATE_KEY_LIFETIME_DAYS="${SUBSTRATE_KEY_LIFETIME_DAYS:-90}"
+
+# key_last_used ID: the epoch of the last use of the access key ID, or 0.
+key_last_used() {
+  local d
+  d="$(aws iam get-access-key-last-used --access-key-id "$1" \
+         --query 'AccessKeyLastUsed.LastUsedDate' --output text 2>/dev/null)" || return 1
+  case "$d" in ''|None) echo 0 ;; *) date -d "$d" +%s ;; esac
+}
+
+class_substrate_cloud_credentials() {
+  local env user slot want keys n id created age smtp_user state slots switched_file switched old_id olu
+  # drill.yml sets ENV for the job; the IAM users carry it in their names.
+  env="${ENV:-}"
+  [ -n "$env" ] || { miss "no ENV: the check cannot name the IAM users"; return 1; }
+  command -v aws >/dev/null 2>&1 || { miss "aws is not on PATH"; return 1; }
+  # The stage 0 files of this env, next to substrate.env.
+  state="$(dirname "${SUBSTRATE_ENV_FILE:-/nonexistent/substrate.env}")"
+  slots="${state}/key-slots.tfvars.json"
+  switched_file="${state}/key-rotation.json"
+  smtp_user="$(secret_value bringup-keyring smtp-username)"
+  # <IAM user> <its key-slots name> <the access key id the cluster holds>
+  while read -r user slot want; do
+    [ -n "$user" ] || continue
+    if [ -z "$want" ]; then
+      ok "${user}: the cluster holds no key of it (not used in this env)"; continue
+    fi
+    keys="$(aws iam list-access-keys --user-name "$user" --output json 2>/dev/null)" \
+      || { miss "IAM gave no answer for the keys of ${user}"; return 1; }
+    n="$(jq '[.AccessKeyMetadata[] | select(.Status == "Active")] | length' <<<"$keys")"
+    if [ "$n" = 2 ] && [ -s "$slots" ] \
+       && [ "$(jq -r --arg u "$slot" '.key_slots[$u].keep | length' "$slots")" = 2 ]; then
+      # An open rotation. The newer key is the one the cluster must hold.
+      id="$(jq -r '[.AccessKeyMetadata[] | select(.Status == "Active")] | sort_by(.CreateDate) | .[1].AccessKeyId' <<<"$keys")"
+      old_id="$(jq -r '[.AccessKeyMetadata[] | select(.Status == "Active")] | sort_by(.CreateDate) | .[0].AccessKeyId' <<<"$keys")"
+      if [ "$want" = "$old_id" ]; then
+        miss "${user}: a rotation is open, and the cluster still holds the old key. The step 'Start the access key rotation' did not reach the cluster: read its log"; return 1
+      fi
+      [ "$id" = "$want" ] \
+        || { miss "${user}: a rotation is open, and the cluster holds ${want}, which is neither key of the user"; return 1; }
+      switched="$(jq -r --arg u "$slot" '.[$u] // 0' "$switched_file" 2>/dev/null || echo 0)"
+      [ "${switched:-0}" -gt 0 ] \
+        || { miss "${user}: a rotation is open, and ${switched_file} records no switch time. The step 'Start the access key rotation' stopped before step 3c of substrate-rotate.sh: read its log"; return 1; }
+      olu="$(key_last_used "$old_id")" \
+        || { miss "IAM gave no answer for the last use of the old key of ${user}"; return 1; }
+      [ "$olu" -lt "$switched" ] \
+        || { miss "${user}: the old key ${old_id} was used at $(date -u -d "@$olu" +%FT%TZ), after the switch: a consumer still holds it"; return 1; }
+      ok "${user}: a rotation is open. The cluster holds the newer key, and the old key is unused since the switch"
+      continue
+    fi
+    [ "$n" = 1 ] || { miss "${user} has ${n} active access keys, not 1: an old key is still accepted"; return 1; }
+    id="$(jq -r '.AccessKeyMetadata[] | select(.Status == "Active") | .AccessKeyId' <<<"$keys")"
+    [ "$id" = "$want" ] || { miss "${user}: the active key is ${id}, and the cluster holds ${want}"; return 1; }
+    created="$(jq -r '.AccessKeyMetadata[] | select(.Status == "Active") | .CreateDate' <<<"$keys")"
+    age=$(( ( $(date +%s) - $(date -d "$created" +%s) ) / 86400 ))
+    [ "$age" -le "$SUBSTRATE_KEY_LIFETIME_DAYS" ] \
+      || { miss "${user}: the active key is ${age} days old, past its lifetime of ${SUBSTRATE_KEY_LIFETIME_DAYS} days"; return 1; }
+    ok "${user}: one active key, the one the cluster holds, ${age} days old"
+  done <<EOF
+zeroroot-ai-${env}-platform platform $(secret_value bringup-keyring bucket-access-key)
+zeroroot-ai-${env}-dns dns $(secret_value route53-credential access-key-id)
+zeroroot-ai-${env}-setec-disk-builder setec-disk-builder $(secret_value setec-disk-push-credential access-key-id)
+zeroroot-ai-${env}-smtp smtp $([ "${smtp_user#AKIA}" != "$smtp_user" ] && printf '%s' "$smtp_user")
+EOF
+}
+
+# --- diagnostics of a failed class -------------------------------------------
+# diagnose_failed_class NAME: what the cluster looks like when a class fails,
+# so the run names the cause (drill run 39125128505: redis-password failed
+# with the CronJob state unchanged, and each later class found the daemon
+# down, with no log of either). Pods that are not Ready (Pending pods in their
+# init containers too), their recent events and the tail of their logs, and
+# the last Jobs of the rotation CronJobs with each container. No Secret value
+# is read. It prints only and decides nothing, and it runs in a subshell
+# with errexit and pipefail off, so a failed read never stops the run.
+diagnose_failed_class() (
+  set +e +o pipefail
+  local pod job pods
+  printf '    --- diagnostics after %s ---\n' "$1"
+  pods="$(kubectl -n "$NS" get pods --no-headers \
+    -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,READY:.status.conditions[?(@.type=="Ready")].status,RESTARTS:.status.containerStatuses[*].restartCount,START:.status.startTime' 2>&1 \
+    | awk '$3 != "True" && $2 != "Succeeded"')"
+  printf '%s\n' "$pods" | head -n 20 | sed 's/^/      /'
+  for pod in $(printf '%s\n' "$pods" | awk '$2 == "Running" || $2 == "Pending" {print $1}' | head -n 5); do
+    printf '      events of %s:\n' "$pod"
+    kubectl -n "$NS" get events --field-selector "involvedObject.name=${pod}" --sort-by=.lastTimestamp 2>&1 | tail -n 5 | sed 's/^/        /'
+    printf '      last log lines of %s:\n' "$pod"
+    kubectl -n "$NS" logs "$pod" --all-containers --tail=15 2>&1 | cut -c1-300 | sed 's/^/        /'
+  done
+  # The CronJob Jobs carry no label of their own (the jobTemplate has no
+  # metadata), so they are found by name.
+  for job in $(kubectl -n "$NS" get jobs --sort-by=.metadata.creationTimestamp -o name 2>&1 \
+                 | grep -E "^job.batch/${RELEASE}-(redis-rotation|zitadel-masterkey-rotation)-" | tail -n 3); do
+    printf '      log of %s:\n' "$job"
+    kubectl -n "$NS" logs "$job" --all-containers --tail=20 2>&1 | cut -c1-300 | sed 's/^/        /'
+  done
+  return 0
+)
+
+# --- the classes of the list -------------------------------------------------
+# One line per class: <name> TAB <status> TAB <test> TAB <gap>.
+rows="$(python3 - "$CLASSES" <<'PY'
+import sys, yaml
+doc = yaml.safe_load(open(sys.argv[1]))
+for c in doc["classes"]:
+    gap = " ".join(str(c.get("gap", "")).split())
+    print(f"{c['name']}\t{c['status']}\t{c['test']}\t{gap}")
+PY
+)" || { echo "could not run: the class list does not parse" >&2; exit 2; }
+[ -n "$rows" ] || { echo "could not run: the class list is empty" >&2; exit 2; }
+
+failed=()
+tested=0
+while IFS=$'\t' read -r -u 3 name status test gap; do
+  printf '▶ %s\n' "$name"
+  REASON=""
+  if [ "$status" != tested ]; then
+    printf '    - untested (%s): %s\n' "$status" "$gap"
+    printf '%s\tuntested\t%s: %s\n' "$name" "$status" "$gap" >> "$RESULTS"
+    continue
+  fi
+  tested=$((tested + 1))
+  fn="class_${test//-/_}"
+  if ! declare -F "$fn" >/dev/null; then
+    REASON="the class is marked tested, and this script has no ${fn}"
+    printf '    ✗ %s\n' "$REASON" >&2
+  else
+    # A line that stands until the class ends. When the step limit stops
+    # the run inside a class, the results still name that class as failed.
+    printf '%s\tfail\t%s\n' "$name" "the test did not finish before the step limit" >> "$RESULTS"
+    if "$fn"; then
+      sed -i '$d' "$RESULTS"
+      printf '%s\tpass\t\n' "$name" >> "$RESULTS"
+      continue
+    fi
+    sed -i '$d' "$RESULTS"
+    diagnose_failed_class "$name"
+  fi
+  printf '%s\tfail\t%s\n' "$name" "${REASON:-the test failed and gave no reason}" >> "$RESULTS"
+  failed+=("$name")
+done 3<<< "$rows"
+
+[ "$tested" -gt 0 ] || { echo "could not run: the class list marks no class as tested" >&2; exit 2; }
+if [ "${#failed[@]}" -eq 0 ]; then
+  printf 'PASS: each of the %s tested credential classes rotated, and each path works with the new value\n' "$tested"
+  exit 0
+fi
+
+# --- the alert -----------------------------------------------------------------
+# The Alertmanager of the env sends it by email (the path that
+# test/monitoring/exit-test-alert-delivery.sh proves).
+list="$(IFS=,; echo "${failed[*]}")"
+alert="$(jq -nc --arg c "$list" --arg r "${RUN_URL:-a local run}" \
+  '[{labels:{alertname:"CredentialRotationFailed",severity:"warning",classes:$c},
+     annotations:{summary:("Credential rotation failed for: " + $c + " (hosted#444)"),run:$r}}]')"
+am_pod="$(kubectl -n "$MON_NS" get pods -l app.kubernetes.io/name=alertmanager \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
+if [ -n "$am_pod" ] && kubectl -n "$MON_NS" exec "$am_pod" -c alertmanager -- \
+     wget -qO- --header 'Content-Type: application/json' --post-data "$alert" \
+     http://localhost:9093/api/v2/alerts >/dev/null 2>&1; then
+  printf 'sent the alert CredentialRotationFailed for: %s\n' "$list"
+else
+  # The alert is half of the failure report. A run that could not send it
+  # says so as a failure of its own, and drill.yml opens an issue for it.
+  printf '    ✗ could not send the alert CredentialRotationFailed: no Alertmanager answered in %s\n' "$MON_NS" >&2
+  printf 'alert CredentialRotationFailed\tfail\tno Alertmanager in the namespace %s took the alert for: %s\n' "$MON_NS" "$list" >> "$RESULTS"
+fi
+printf 'FAIL: %s of the credential classes failed: %s\n' "${#failed[@]}" "$list" >&2
+exit 1

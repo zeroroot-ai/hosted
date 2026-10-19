@@ -1,0 +1,143 @@
+# SaaS overlay: billing-webhook values.
+#
+# This chart is deployed ONLY in the ZeroRoot SaaS deployment (dev-saas,
+# staging + prod). Self-hosted installs NEVER install this chart.
+#
+# ADR-0074: self-hosted vs SaaS seam model. The closed billing image reference
+# lives exclusively in the SaaS overlay charts — the core gibson umbrella
+# carries zero closed refs.
+# -----------------------------------------------------------------------------
+
+# Image — ghcr.io/zeroroot-ai/billing cmd/billing-webhook. Same image as the
+# entitlements-svc overlay (one image, two binaries); the entrypoint is
+# overridden to /usr/local/bin/billing-webhook.
+# deploy#789 / ADR-0072: digest-pinned for staging/prod immutability.
+# Re-resolve via:
+#   gh api /orgs/zeroroot-ai/packages/container/billing/versions
+# Env overlays in gitops (envs/<env>/saas-overlay-billing-webhook-values.yaml)
+# may pin their own digest; kind/dev overlays are exempt from the digest guard.
+image:
+  repository: ghcr.io/zeroroot-ai/billing
+  # billing 4b2c65f: the two redirect endpoints (billing#20), the license
+  # file (billing#33), and an entitlements-svc that proves its database
+  # credential at start (billing#43).
+  tag: "sha-4b2c65f@sha256:2e4715c0f95fcac3e9eae410e94b697e49aba322c44586e3e8201c3f9467a46c"
+  pullPolicy: Always
+
+# Image pull secrets for the closed ghcr.io/zeroroot-ai/billing image.
+imagePullSecrets:
+  - name: ghcr-credentials
+
+replicas: 1
+
+# HTTP listen port. MUST match the port of the envoy.extraRoutes entry in
+# each env's values.yaml (8090). The Service name and port are a cross-chart
+# contract with that entry (charts#375).
+port: 8090
+
+# Service name. Pinned (not release-derived) because each envoy.extraRoutes
+# entry names this exact Service.
+fullnameOverride: "gibson-billing-webhook"
+
+# Platform Postgres connection (libpq env vars). The receiver writes
+# subscription_status into tenant_quotas in the platform database and runs
+# EnsureSchema at boot, so the user must own that schema.
+# These MUST be overridden by the env-specific overlay.
+postgres:
+  host: ""
+  port: 5432
+  database: "gibson_platform"
+  # ESO-projected Secret name + key (same secret as the core daemon's postgres).
+  passwordSecretName: "gibson-platform-postgres-credentials"
+  passwordSecretKey: "password"
+  sslMode: "require"
+
+# The Stripe credentials (STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET). This chart
+# owns the ExternalSecret (templates/external-secret.yaml). It reads the
+# OpenBao key gibson-stripe-credentials through the chart's one cluster store.
+# The charts secret contract names this overlay as the consumer
+# (helm/gibson/secret-contract.yaml, consumers: [gitops:billing]).
+#
+# The target Secret has its own name. The core chart before 0.140.0 still
+# renders a Secret called gibson-stripe-credentials for its dashboard, so a
+# second ExternalSecret with that name would give the Secret two writers.
+stripe:
+  secretName: "gibson-billing-stripe"
+  remoteKey: "gibson-stripe-credentials"
+  storeName: "gibson-secrets"
+  refreshInterval: "60s"
+
+# The sign-in client of billing (D54). The platform-operator mints it from
+# the gibson-billing entry of platformBootstrap.oidcClients in the env's
+# values.yaml and writes this Secret. That operator is the one writer of the
+# client secret. The Secret holds client_id and client_secret.
+oidc:
+  secretName: "gibson-billing-oidc"
+  scopes: "openid profile"
+
+# The neutral connection points of the daemon (ConnectionPointService,
+# gibson#895). billing dials them over SPIFFE mTLS. The address is the
+# daemon Service of the umbrella release `gibson` (gibson.daemonAddress in
+# charts gibson-common). The daemon accepts CompleteSignupStep only from the
+# SPIFFE ID that gibson.connectionPoints.signupStepCompleterPath names in the
+# env's values.yaml, and that path must equal spiffe.path below.
+daemon:
+  connectionAddress: "gibson-gibson-workloads:50051"
+  # The fixed SPIFFE path of the daemon under the trust domain.
+  spiffePath: "platform/daemon"
+
+# The public paths that billing sends the browser back to, on the app host
+# (app.<global.domain>). The app host and the issuer come from global.domain,
+# which the Application loads from the env's values.yaml.
+returnPaths:
+  # The step page of the dashboard. Checkout returns here on success and on
+  # cancel.
+  signup: "/signup/step"
+  # The settings page of the dashboard that shows the account link.
+  account: "/dashboard/pages/settings"
+# The public path of the sign-in callback. It must start with /account: the
+# sign-in cookies of billing carry Path=/account.
+accountCallbackPath: "/account/callback"
+
+# Dedicated ServiceAccount for the billing pod. It is a workload-attestation
+# attribute, not an API credential: the ClusterSPIFFEID selects on the literal
+# `k8s:sa:<this name>`, and the identity admission policy keys on it.
+# name: empty means the release-derived fullname (gibson-billing-webhook).
+serviceAccount:
+  name: ""
+  annotations: {}
+
+# SPIFFE identity of billing. No trust domain here (ADR-0164): the chart reads
+# global.spire.trustDomain from the env's values.yaml.
+spiffe:
+  # The SPIFFE path of billing. The daemon config names the same path
+  # (gibson.connectionPoints.signupStepCompleterPath).
+  path: "platform/billing"
+  # SPIRE controller-manager className. Each env overlay sets the class that
+  # its controller-manager watches.
+  controllerManagerClassName: "gibson-gibson-spire"
+
+# Plans ConfigMap of the core gibson-operators sub-chart. The signup step
+# reads the Stripe lookup key and the trial length of the plan from it.
+plansCmName: "gibson-tenant-operator-plans"
+
+# Platform identity admission (templates/identity-admission.yaml). It guards
+# the `platform/billing` SVID, which can complete a signup step, against a
+# pod-create adversary that wears the component label and the ServiceAccount.
+identityAdmission:
+  actions: ["Deny"]
+  extraAllowedCreators: []
+  workloadCreators:
+    - "system:serviceaccount:argocd:argocd-application-controller"
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+# Extra env vars forwarded to the billing-webhook container.
+# DATABASE_URL (a full DSN) takes precedence over the PG* vars when set.
+extraEnv: []

@@ -1,0 +1,55 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DenyAllOutsideUSEast1",
+      "Effect": "Deny",
+      "NotAction": [
+        "iam:*",
+        "sts:*",
+        "organizations:*",
+        "cloudfront:*",
+        "route53:*",
+        "route53domains:*",
+        "support:*",
+        "trustedadvisor:*",
+        "ce:*",
+        "budgets:*",
+        "tag:*",
+        "resource-groups:*",
+        "access-analyzer:*",
+        "ec2:DescribeRegions",
+        "ec2:DescribeAvailabilityZones",
+        "globalaccelerator:*",
+        "shield:*",
+        "wafv2:GetIPSet",
+        "wafv2:GetRegexPatternSet",
+        "wafv2:ListIPSets",
+        "wafv2:ListRegexPatternSets",
+        "ses:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": "us-east-1"
+        }
+      }
+    },
+    {
+      "Sid": "DenySESOutsideApprovedRegions",
+      "Effect": "Deny",
+      "Action": [
+        "ses:*"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "aws:RequestedRegion": [
+            "us-east-1",
+            "us-east-2"
+          ]
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,5 @@
+terraform -chdir="$EC2_DIR" apply -auto-approve "${TF_TARGETS[@]}"
+INSTANCE_ID="$(terraform -chdir="$EC2_DIR" output -raw instance_id)"
+WANT_NODES="$(terraform -chdir="$EC2_DIR" output -raw node_count)"
+log "stage 1: phase 2 — Argo CD"
+LATE="$(terraform -chdir="$EC2_DIR" output -raw only_after_phase_2)"

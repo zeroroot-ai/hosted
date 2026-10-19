@@ -1,0 +1,256 @@
+#!/usr/bin/env bash
+# ----------------------------------------------------------------------------
+# Node init. Cloud-init runs this once, on the first boot.
+#
+# It does these things, in this order:
+#   0. raise the kernel's inotify limits, because a full platform on one node
+#      exhausts the stock limit and the SSM agent is the first to lose;
+#   1. install the host iptables tools;
+#   2. install the kubelet ECR credential provider, so the node pulls the
+#      setec disks with its instance role (D85);
+#   3. install k3s, which brings the cluster up as a systemd unit, so a
+#      reboot returns a working cluster with no operator.
+#
+# It is idempotent. Cloud-init reruns on some replacement paths, and a rerun
+# on a node that is already set up must be a no-op.
+
+# The node installs no sandbox runtime. The sandbox runtime of setec is the
+# launcher pod, and a node needs /dev/kvm only (ADR-0083, hosted#447).
+#
+# EVERY DOWNLOAD SURVIVES THE ADDRESS SWAP. The Elastic IP is associated
+# moments after the instance launches, which replaces the public address
+# cloud-init is already using and resets every connection in flight. curl
+# retries a timeout by default but NOT a reset, so the first bringup failed
+# here three times with `curl: (56) Recv failure: Connection reset by peer`,
+# seconds into the boot (2026-09-22). --retry-all-errors is what covers it.
+# ----------------------------------------------------------------------------
+set -euo pipefail
+exec > >(tee -a /var/log/node-init.log) 2>&1
+
+echo "node-init: start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# ---------------------------------------------------------------------------
+# THE CEILING IS ARMED FIRST, BEFORE ANYTHING THAT CAN FAIL.
+#
+# Everything below this can hang: a package install, a k3s install, an API that
+# never answers. Armed at the end, the instance that most needs to die on its
+# own — the one whose bringup wedged — would be the one that never does. It sits
+# after `set -euo pipefail` and the log redirect only because neither of those
+# can block, and this way the arming is in /var/log/node-init.log.
+#
+# IT RE-ARMS ON EVERY BOOT. `shutdown -h +N` is a one-shot a reboot forgets, so
+# the timer is a systemd unit rather than a command.
+#
+# AND IT FAILS CLOSED. An instance that cannot arm its own ceiling is an
+# instance that would run unbounded, so it powers off now instead. Losing a
+# drill run costs a rerun; a forgotten m6a.2xlarge costs until somebody notices.
+#
+# self_terminate_after_minutes is 0 for a permanent environment, and then none
+# of this is rendered (ADR-0095: staging must never self-terminate).
+# ---------------------------------------------------------------------------
+%{ if self_terminate_after_minutes > 0 ~}
+# A TIMER, NOT `shutdown -h +N`. The first version ran
+# `/sbin/shutdown -h +${self_terminate_after_minutes}` from a oneshot unit and
+# then verified it with `shutdown --show`. Both halves were wrong, and the
+# instance terminated itself 9 seconds into its first boot
+# (i-0ce55619f367ab87c, 2026-10-01):
+#
+#   [8.846] Created symlink .../self-terminate.service
+#   [9.192] node-init: FATAL could not arm the self-termination ceiling
+#
+# `shutdown` talks to logind over D-Bus, which is not reliably up that early in
+# boot, and `shutdown --show` reports a scheduled shutdown as a MESSAGE rather
+# than as state — so the verification could not distinguish "not scheduled"
+# from "scheduled, printed somewhere I was not reading".
+#
+# A timer has neither problem. `OnBootSec` needs no D-Bus to arm, it re-arms on
+# every boot by construction rather than by a unit that re-runs a one-shot
+# command, and `systemctl is-active` is state rather than a message.
+cat > /etc/systemd/system/self-terminate.service <<'UNIT'
+[Unit]
+Description=Power off this instance (throwaway environment ceiling)
+
+[Service]
+Type=oneshot
+# The instance's shutdown behaviour is `terminate`, so this poweroff IS the
+# termination. Nothing outside the box is consulted: no network, no GitHub, no
+# terraform state, no credential.
+ExecStart=/usr/bin/systemctl --no-block poweroff
+UNIT
+cat > /etc/systemd/system/self-terminate.timer <<'UNIT'
+[Unit]
+Description=Terminate this instance ${self_terminate_after_minutes} minutes after every boot
+
+[Timer]
+OnBootSec=${self_terminate_after_minutes}min
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now self-terminate.timer || true
+
+# VERIFY STATE, NOT A MESSAGE.
+if [ "$(systemctl is-active self-terminate.timer 2>/dev/null)" = active ]; then
+  echo "node-init: armed self-termination at +${self_terminate_after_minutes}m"
+  systemctl list-timers self-terminate.timer --no-pager || true
+else
+  # FAIL CLOSED, BUT LEAVE A WINDOW. The first version powered off immediately,
+  # which terminated the node before its SSM agent had registered — so the one
+  # run that most needed diagnosing produced no log at all, and the only
+  # evidence was the serial console. An unbounded instance is the thing to
+  # prevent; twenty minutes of a diagnosable one is not.
+  echo "node-init: FATAL could not arm the self-termination timer. Falling back to a 20-minute ceiling so this node is diagnosable and still cannot run unbounded." >&2
+  systemctl status self-terminate.timer --no-pager >&2 2>&1 || true
+  systemd-run --on-active=20min /usr/bin/systemctl --no-block poweroff \
+    || { echo "node-init: FATAL the fallback could not be armed either; powering off now" >&2; /sbin/poweroff --force; }
+fi
+%{ endif ~}
+
+# ---------------------------------------------------------------------------
+# 0. Kernel limits.
+#
+# fs.inotify.max_user_instances is 128 on a stock AL2023 kernel, and it is
+# counted per uid. On this node every root process shares one budget: k3s
+# itself takes about twenty, and every kubelet, containerd shim and root
+# container process takes more. Measured on the hosted#209 rebuild
+# (2026-09-29): with the umbrella converged, root held 127 of 128. The SSM
+# agent worker was next in line. Its session worker could not open an inotify
+# instance ("too many open files"), the agent fell back to an in-process
+# executer that has no Port plugin, and every port-forward session ended with
+# "Plugin with name Port not found". The recreate verb reaches the API only
+# through that forward, so the gates after stage 2 could not run.
+#
+# These are the values Kubernetes distributions ship for a node. The file is
+# in sysctl.d so a reboot keeps them, and sysctl --system applies them now.
+# ---------------------------------------------------------------------------
+cat > /etc/sysctl.d/90-zeroroot-node.conf <<'SYSCTL'
+fs.inotify.max_user_instances = 8192
+fs.inotify.max_user_watches = 1048576
+SYSCTL
+sysctl --system >/dev/null
+echo "node-init: inotify limits $(sysctl -n fs.inotify.max_user_instances) instances, $(sysctl -n fs.inotify.max_user_watches) watches"
+
+# ---------------------------------------------------------------------------
+# 1. iptables.
+#
+# Amazon Linux 2023 ships no iptables. k3s carries its own binaries and warns
+# "Host iptables-save/iptables-restore tools not found", which is easy to read
+# as harmless. Install the host tools so kube-proxy and the CNI write rules
+# through the same backend the kernel already uses, and so an operator can
+# read them.
+# ---------------------------------------------------------------------------
+if ! command -v iptables >/dev/null 2>&1; then
+  dnf install -y iptables-nft >/dev/null 2>&1 || dnf install -y iptables >/dev/null 2>&1 || true
+  command -v iptables >/dev/null 2>&1 \
+    && echo "node-init: installed host iptables" \
+    || echo "node-init: no host iptables package available, k3s uses its own"
+fi
+
+# 2. The ECR credential provider of the kubelet, before k3s starts.
+${ecr_credential_provider}
+
+# ---------------------------------------------------------------------------
+# 3. k3s.
+#
+# --disable traefik    the edge is Envoy, from the chart. Two ingress paths
+#                      would be two answers to the same question (ADR-0027).
+# --disable servicelb  k3s would otherwise put its own proxy in front of the
+#                      edge Service and hide the client address. The edge is
+#                      a NodePort Service on 80 and 443 instead, which is why
+#                      the port range below starts at 80. kube-proxy opens
+#                      the port on the host and, with the chart's structural
+#                      externalTrafficPolicy: Local, does not rewrite the
+#                      source address. Envoy's socket peer is the client
+#                      (ADR-0079).
+# --flannel-backend=none
+# --disable-network-policy
+#                      Cilium is the network plugin (ADR-0083, hosted#436).
+#                      k3s installs no plugin and runs no policy controller
+#                      of its own. The recreate verb installs Cilium through
+#                      the API (scripts/lib/cilium.sh), with the same version
+#                      and the same values as every other substrate. The node
+#                      is NotReady until then, and no pod starts.
+# --disable-kube-proxy Cilium replaces kube-proxy (hosted#446, setec#182) and
+#                      serves the edge NodePort (ADR-0079).
+# --service-cidr       the Service range. The apiserver egress rule names its
+#                      first address (scripts/check-apiserver-cidrs.py).
+# --tls-san            the Elastic IP, so a kubeconfig that names the public
+#                      address passes certificate verification.
+#
+# THE NODE CARRIES EVERY ROLE LABEL, because it is every node. On EKS the
+# roles are separate node groups and a pod selects the one it needs:
+# Argo CD asks for `workload=system`, and a setec sandbox asks for
+# `setec.zeroroot.ai/sandbox-host=true`. Here there is one machine, and it
+# is both. Without these labels the pods stay Pending with
+# "node(s) didn't match Pod's node affinity/selector", which is how the
+# first bringup stalled with six of seven Argo pods unschedulable
+# (2026-09-22). A label is cheaper and truer than a per-substrate override
+# in a chart that has one answer everywhere else.
+#
+# THERE IS NO --node-external-ip, and that is load-bearing. With it, k3s
+# advertises the public address as the endpoint of the `kubernetes` Service,
+# so every in-cluster client resolving 172.20.0.1:443 is sent out to the
+# internet and back in on 6443 — a port this security group closes on
+# purpose. The first bringup died there: Argo CD's pre-install hook timed
+# out dialling its own API server (2026-09-22). The node advertises its
+# private address, which is the only one anything inside the cluster
+# should use.
+#
+# A pinned version, never a channel: an unattended rebuild must not move the
+# Kubernetes version.
+#
+# The label node.kubernetes.io/instance-type carries the EC2 type. The k3s
+# cloud controller keeps a label the node registers with, and writes "k3s"
+# only when there is none. setec reads the label: a snapshot records the type
+# of its source, and a restore stays on nodes of that type, so "k3s" on every
+# node of a mixed drill would let a restore land on another CPU (hosted#676).
+# ---------------------------------------------------------------------------
+if systemctl is-active --quiet k3s; then
+  echo "node-init: k3s is already running"
+else
+  curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 20 https://get.k3s.io -o /tmp/k3s-install.sh
+%{ if agent_token != "" ~}
+  # The agent token of the second node (hosted#453). It admits an agent only.
+  # The server token stays the one k3s mints on this node. A one-node cluster
+  # renders none of this.
+  INSTALL_K3S_VERSION="${k3s_version}" K3S_AGENT_TOKEN="${agent_token}" sh /tmp/k3s-install.sh \
+%{ else ~}
+  INSTALL_K3S_VERSION="${k3s_version}" sh /tmp/k3s-install.sh \
+%{ endif ~}
+    --disable traefik \
+    --disable servicelb \
+    --flannel-backend=none \
+    --disable-network-policy \
+    --disable-kube-proxy \
+    --service-cidr "${service_cidr}" \
+    --kube-apiserver-arg=service-node-port-range=80-32767 \
+    --write-kubeconfig-mode 0600 \
+    --tls-san "${node_ip}" \
+    --node-label "zeroroot.ai/cluster=${cluster_name}" \
+    --node-label "workload=system" \
+    --node-label "setec.zeroroot.ai/sandbox-host=true" \
+    --node-label "node.kubernetes.io/instance-type=${instance_type}"
+  echo "node-init: installed k3s ${k3s_version}"
+fi
+
+# The kubeconfig k3s writes names 127.0.0.1. The operator fetches this file
+# through SSM, so it must name the address that works from elsewhere.
+install -d -m 0700 /var/lib/rancher/k3s/server
+sed "s#https://127.0.0.1:6443#https://${node_ip}:6443#" \
+  /etc/rancher/k3s/k3s.yaml > /var/lib/rancher/k3s/server/kubeconfig-external.yaml
+chmod 0600 /var/lib/rancher/k3s/server/kubeconfig-external.yaml
+
+# The readiness marker the recreate verb waits for. It is written last, so its
+# presence means every step above finished. The node is listed here but it is
+# not Ready: it has no network plugin until the recreate verb installs Cilium.
+kubectl() { k3s kubectl "$@"; }
+for _ in $(seq 1 60); do
+  if kubectl get node >/dev/null 2>&1; then break; fi
+  sleep 5
+done
+kubectl get node -o wide
+touch /var/lib/rancher/k3s/server/node-init.done
+echo "node-init: done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

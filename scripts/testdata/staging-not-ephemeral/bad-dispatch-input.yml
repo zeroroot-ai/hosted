@@ -1,0 +1,17 @@
+# A dispatch input offers staging, and it reaches the verb through the job env.
+# The guard must reject it.
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        type: choice
+        options: [staging, prod]
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    env:
+      ENV: ${{ inputs.env }}
+    steps:
+      - name: make teardown
+        run: make teardown ENV="${ENV}" MODE=wipe

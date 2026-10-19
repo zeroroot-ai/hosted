@@ -1,0 +1,339 @@
+# Umbrella-chart digest ledger (hosted#116, the consuming half of deploy#1194).
+#
+# WHAT THIS IS
+#
+# One entry per chartVersion an env under envs/ pins. Each entry records the
+# registry digest that version resolved to when scripts/verify-chart-signature.sh
+# admitted it, and whether that digest carries a valid cosign signature.
+#
+# WHY A LEDGER AND NOT JUST A SIGNATURE CHECK
+#
+# zeroroot-ai/charts signs every umbrella-chart publish with cosign, keyless
+# through GitHub Actions OIDC, over the chart's CONTENT DIGEST and not the
+# mutable tag. Verifying that signature proves the bytes came from the
+# publish-umbrella-chart workflow. It does NOT stop a tag swap: a re-run of
+# that same trusted workflow republishes `gibson:0.128.0` over different bytes,
+# and the new digest is signed by the same identity. A signature check alone
+# accepts it.
+#
+# The digest recorded here closes that. `envs/<env>/gibson.yaml` pins a tag.
+# This file pins what that tag is allowed to mean. If the registry resolves a
+# recorded version to a different digest, the tag moved, and
+# scripts/verify-chart-signature.sh fails. exit-test-chart-signing.yml runs it
+# on main and on a schedule, so a swap that lands after a merge is caught too.
+#
+# WHY NOT PIN THE DIGEST IN THE ARGO APPLICATION
+#
+# It does not work for Helm OCI charts. ArgoCD appends a semver `--version`
+# flag when the revision is a digest, which breaks Helm-packaged OCI charts
+# (plain OCI artifacts are fine). Upstream: argoproj/argo-cd#24970 and #25078.
+# ArgoCD also has no Application field that verifies a cosign signature for a
+# Helm OCI source. So verification is a gate on the way in, not an admission
+# check at sync time. See the header of scripts/verify-chart-signature.sh.
+#
+# WHO SIGNS
+#
+# zeroroot-ai/charts, since the 2026-09-04 split (ADR-0086). The deleted deploy
+# repo signed every version before that, and the registry no longer serves any
+# of them. A pin on such a version fails the live check with "cannot resolve",
+# and the fix is a promotion onto a version charts published, never a wider
+# identity regexp.
+#
+# HOW TO ADD AN ENTRY
+#
+# A promotion to a version not listed here fails the guard. Record it with:
+#
+#     scripts/verify-chart-signature.sh --record <version>
+#
+# which resolves the live digest, verifies the signature, and writes the entry.
+# promote-bump.yml runs that for every promotion. Never hand-edit a `digest:`.
+# Delete an entry when no env pins its version any more.
+
+charts:
+  # prod. Published and signed by the deleted deploy repo. The registry no
+  # longer serves the tag, so prod pins a chart nobody can pull, and the live
+  # check fails on it until prod is promoted onto a version staging proved
+  # (hosted#116).
+  "0.113.0":
+    digest: "sha256:814388d935d235e6bce6d57fbab2ce87a75eb4f2ec4104f010c520773c9100be"
+    signed: true
+
+  # dev. Same state as prod: signed by the deleted deploy repo, tag no longer
+  # served. Nothing on the kind path reads this pin (the kind verb installs
+  # from a charts checkout), so it is stale rather than dangerous.
+  "0.119.0":
+    digest: "sha256:b750e2785ba3cdec1f1c76ca245cce2024f35ba818bdee250f3a12004322d8b6"
+    signed: true
+
+  # staging. Signed by zeroroot-ai/charts, recorded 2026-09-17.
+  "0.128.0":
+    digest: "sha256:f128f62e7eefaad989090b7244a0c8200c78020be2881304f48fe9f6a6aa699a"
+    signed: true
+
+  "0.130.0":
+    digest: "sha256:ecfded967fee13794b0c1ba2cdcf5e0d558ed55b0955501bdccad9f82d4cdd89"
+    signed: true
+
+  "0.130.1":
+    digest: "sha256:8a818f99b827ea917473688e51ae9f9c98c4dc4ce3e2e9c75d55cec6d3fcb7ff"
+    signed: true
+
+  "0.130.2":
+    digest: "sha256:fc32aaa13a2034e66e6db32187f27d65d58918109030d1339306ec5032e3625d"
+    signed: true
+
+  "0.130.3":
+    digest: "sha256:4334c6b2fb874b95e3148f33f59e9f76c286e5170a2c457cb3f56646d7672daf"
+    signed: true
+
+  "0.131.0":
+    digest: "sha256:2e0c31f7b95cf89fb0aa2395ece10a76f472c242387e5c1119139a55bdcadf93"
+    signed: true
+
+  "0.132.0":
+    digest: "sha256:daa068825dddce6048d7926eaeb0512af2306405d29fa7cc81c333c9e84f8a02"
+    signed: true
+
+  "0.132.1":
+    digest: "sha256:848aedbd841edba329f77d4c0015160e4ba8fccdb34c1e3dd94a71ef7388d6fe"
+    signed: true
+
+  "0.132.2":
+    digest: "sha256:53b8e79fe7a9ded9c0e57ab09e604a5647782dbe26622483a2f39fa1ce6d432e"
+    signed: true
+
+  "0.132.3":
+    digest: "sha256:519293aa8f5165f65a6eb1a862d4f4b905c5880045aeeec456b773b2e5078186"
+    signed: true
+
+  "0.132.4":
+    digest: "sha256:b2c4047d4a08d99086ab356b700f49d4e149ddafd6a07043acd8fe87cc4c5e91"
+    signed: true
+
+  "0.132.5":
+    digest: "sha256:bd77d0ce2423711db0143cb73f013ac353e3852c2f14f942bf33ceac40eca944"
+    signed: true
+
+  "0.132.6":
+    digest: "sha256:ba5e2b774e9b85bd7d232df7e14f5ea97412074b4041e465ec208be05e5ef326"
+    signed: true
+
+  "0.132.7":
+    digest: "sha256:737c929a45af98653fadf52dc3bf4bae561cecc474e9600fcd586f8508893c19"
+    signed: true
+
+  "0.132.8":
+    digest: "sha256:6d64b57883dd777bc7c928c14c27e3504342686d80f060ae6f638c2f58779b43"
+    signed: true
+
+  "0.132.9":
+    digest: "sha256:f13ae57d3772cd214d848422809d49deff2debfd92f0740f99db5dc208fa4e8e"
+    signed: true
+
+  "0.132.11":
+    digest: "sha256:0e688226daf78004462c10b9a19c7a3588ca7d5472b3f198dd0e655975677470"
+    signed: true
+
+  "0.132.12":
+    digest: "sha256:52bc7f0d2d0888151df13f067ea3e8ed7746794b12f45198cffa3eab77b0faea"
+    signed: true
+
+  "0.132.13":
+    digest: "sha256:91d92d02d7c43466e134bd03c264fa21f1c79627a40927156e74504985de7f0b"
+    signed: true
+
+  "0.132.14":
+    digest: "sha256:2af1d7f9e1344e1af5dbce39f6e4f2a25ae3c11fd4ef1a4c28d5990877cd5eba"
+    signed: true
+
+  "0.132.15":
+    digest: "sha256:efecac9522c20b1d9dd2e3d8a2c0fd34733f82c748e20b4ac2428057653b006d"
+    signed: true
+
+  "0.132.17":
+    digest: "sha256:6ba2f5f19bae9072ce28c75bb31a97b41b9d670501450f89f2b8b3b7f6b66941"
+    signed: true
+
+  "0.132.18":
+    digest: "sha256:1a89110bcbf8e160d65aaf0579222455ad56bad299279dadb6a358c534f4d3de"
+    signed: true
+
+  "0.132.19":
+    digest: "sha256:f893adee7fdc9941ca8624ca49f91a079551e651d4a5680616853e20bc584d22"
+    signed: true
+
+  "0.132.20":
+    digest: "sha256:fd66620fd77375056cc6b126d7db5c31ea6a320cc25f82c8342f4b4ba6330629"
+    signed: true
+
+  "0.132.21":
+    digest: "sha256:11c1cb35fccdb3c7e3619650b2d02beaec2e27291bdfb16875fc3e05dfa65813"
+    signed: true
+
+  "0.132.22":
+    digest: "sha256:20b9bab456d01a71926236a708aea2b6370edd26851f79830d69799e3028f477"
+    signed: true
+
+  "0.132.23":
+    digest: "sha256:bc6985b393839d83aa2fb79236abeac9597f6d577421d99dd38467a3fefe06e8"
+    signed: true
+
+  "0.132.24":
+    digest: "sha256:422804ae4926a9bd9cd6552b86d8086142955d49ab02889c1d01b0785113dc96"
+    signed: true
+
+  "0.132.25":
+    digest: "sha256:200bc35f3020f2f601fda5de8874427c14aa9516f64018bd5edce437f3bfba9c"
+    signed: true
+
+  "0.133.0":
+    digest: "sha256:bbf2fd21e2c3c0ae7f32c317f04fc5e79077ed00b750abf83a1aee7301834330"
+    signed: true
+
+  "0.133.1":
+    digest: "sha256:0a675db5ffb4a2f498548d9d9e2c4e24e924417e2dc167f530ecfbb6a9a742fc"
+    signed: true
+
+  "0.133.2":
+    digest: "sha256:f5aacdbeedfda2aecaf7b1c5cfa32b018f47d6992e878f95b86fccaf9a816943"
+    signed: true
+
+  "0.133.3":
+    digest: "sha256:f61bc4807e6e313633487051bc13d190435df953ef989e2685ceb2a4e08088df"
+    signed: true
+
+  "0.133.4":
+    digest: "sha256:983afcc2767072592462ed038b46bb8032eba1b5556a7fbf69d42576ff2cf813"
+    signed: true
+
+  "0.133.5":
+    digest: "sha256:006fdd4d39587c90cfcda97f4f8ced0fe00efbc8824bfc9410fc0ecfd654da27"
+    signed: true
+
+  "0.133.6":
+    digest: "sha256:e92d87702dd551d57a8fbdcfaac1daaea16569a3ae5746fc2b8c5138bdf3f4fd"
+    signed: true
+
+  "0.133.7":
+    digest: "sha256:e2bda37507769e26e267fbe4ca2d5a227035fa760b1526f88d2185fc2dcee110"
+    signed: true
+
+  "0.133.8":
+    digest: "sha256:4b7b40173200ab3231f445ce0d10f461b91e9aaf7ba5476d915c6510fe125068"
+    signed: true
+
+  "0.133.9":
+    digest: "sha256:56da625ac9fcfd697aea96eadc3bd62ad153ac8b84f1bbd20879dad6c77ea442"
+    signed: true
+
+  "0.133.10":
+    digest: "sha256:6c0a0348782753957907723fa839bc5d72051df8912e56b9ea40856240f4a517"
+    signed: true
+
+  "0.133.11":
+    digest: "sha256:a4325ade0640b06addd06df66db984a39fb0e4ed0755d7e5e0f436ec7186a119"
+    signed: true
+
+  "0.133.12":
+    digest: "sha256:3e9b537feb6fcbc8647f9329ee66f4fd6c020f8f7c68d6fa8f61006add8e081c"
+    signed: true
+
+  "0.133.13":
+    digest: "sha256:9250c714b0097469dd005f86dc5cabfdec4c15cb9f391ebc731f2396d6acdac2"
+    signed: true
+
+  "0.133.14":
+    digest: "sha256:44ed7526c0d6bac9ad0d7f62187706478f18536b9f654c708587ded9ce595f04"
+    signed: true
+
+  "0.134.0":
+    digest: "sha256:dfbc0fa9ef5d15bdcca395d7e0d318301b0db58327089cdc5a8c2e6b84cdfb3a"
+    signed: true
+
+  "0.134.1":
+    digest: "sha256:fdc56bfb8db324a7f84850609ce95b76f6732d091747bebec513532206c3e9e5"
+    signed: true
+
+  "0.135.0":
+    digest: "sha256:1b7be988351b561c13fd9271e3140146df30d3ecb32387d671589955a083317c"
+    signed: true
+
+  "0.135.2":
+    digest: "sha256:bac656d342372c909b9ef471617b37cdc34932c49f8350b362cdf16ea97733bf"
+    signed: true
+
+  "0.135.3":
+    digest: "sha256:8ca7662623129fe11461ddeba9213bb3678a1dc5ed20db5d6cd707ab8b388c2e"
+    signed: true
+
+  "0.135.4":
+    digest: "sha256:8bd2b0e85452e88f6ce0a2bb1eb3c770d6c5d8cff0b27b8ae157d6f5cbf2f97c"
+    signed: true
+
+  "0.136.1":
+    digest: "sha256:29064a6ed6163d19bfd6c6bcae0d0fcf23749c394392089cadf265bd5b429697"
+    signed: true
+
+  "0.136.2":
+    digest: "sha256:3588e644909318abae0bdf4f4808486eee36ae4a4c701a39bd6aca2d58d90e83"
+    signed: true
+
+  "0.136.6":
+    digest: "sha256:0a19306c1eb1699abb2aa422549df47b75d8c600e98dec149c4c45de0b9001d0"
+    signed: true
+
+  "0.136.8":
+    digest: "sha256:446adcf078777acfc1229411a5a67241db251171b966f3ac06dbe6647783d07b"
+    signed: true
+
+  "0.142.0":
+    digest: "sha256:812c407a7d1889a1369dcd5cb8e1d3e4d4c770c9891b8447768659bb9b0222fb"
+    signed: true
+
+  "0.144.0":
+    digest: "sha256:d9c8f8d023b8e3f89c9b7d6595d7ef928189785fb507a86e5231acc66e96c4f8"
+    signed: true
+
+  "0.145.1":
+    digest: "sha256:442539ea9f95239dfbd615259ac4f95b3cf069e4ff44e645a7b3135399377c47"
+    signed: true
+
+  "0.145.2":
+    digest: "sha256:60baaea53eac76157d1bdc5e413c4196ed0136a3ac85051f60b38736abf491f4"
+    signed: true
+
+  "0.146.0":
+    digest: "sha256:3407128071eb25fcb9446f2092465d7845e9084ec8f87c2926f35c1b1c12b652"
+    signed: true
+
+  "0.146.1":
+    digest: "sha256:f7bd92b04130f97a1aa2efdaa81ceac9e594e92273d4d1502ad870cb5e3ca3e0"
+    signed: true
+
+  "0.147.0":
+    digest: "sha256:04af8cbbd1c7398cba4968b5480b028ecdc39971db519f7ad452e3c2050c9c35"
+    signed: true
+
+  "0.148.0":
+    digest: "sha256:00fa68568a4eda236da0fb9abbf798d24d96e15b16ea7013276bc826ef721870"
+    signed: true
+
+  "0.149.0":
+    digest: "sha256:d4979cd6e5dd3f323219c697f0f58b21f753ebcec67556225844512a0853cd5c"
+    signed: true
+
+  "0.149.1":
+    digest: "sha256:61f12b36f7cd6541448e2d58ea55c8b543cee5d2cf749b3a46b273199e006999"
+    signed: true
+
+  "0.150.0":
+    digest: "sha256:541145601824e693cce309b6a001ad542b8832e149a138b9224fb739407b1186"
+    signed: true
+
+  "0.151.0":
+    digest: "sha256:93723e9ad4e623973abe0700ef5dfaa8a55515775c7928cb2175bcf95e880cc9"
+    signed: true
+
+  "0.151.1":
+    digest: "sha256:54b6e169084ac5bd8350107071b5303c6a8253d6d4d8936d54635b8b3afd9194"
+    signed: true

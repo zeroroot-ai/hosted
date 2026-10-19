@@ -1,0 +1,52 @@
+# SaaS overlay: billing-webhook values for the prod environment.
+#
+# Deployed as a separate Argo Application (envs/prod/apps/billing-webhook.yaml), not as part of the core umbrella.
+# ADR-0074 / deploy#1132 (gibson#798/#800).
+#
+# The receiver verifies Stripe subscription events and writes each tenant's
+# subscription_status into tenant_quotas, where entitlements-svc reads it to
+# payment-gate plan limits. Until this Application existed, NO environment ran
+# one: the Envoy route resolved to zero endpoints and subscription state never
+# reached the platform at all (gitops#357).
+#
+# Stripe delivers to the public edge, which rewrites /api/billing/webhook onto
+# the receiver's /webhook. The browser reaches /signup-step, /account and
+# /account/callback on the app host. From charts 0.140.0 each of these routes
+# is an envoy.extraRoutes entry in this env's values.yaml (charts#375).
+
+# No image override: the overlay chart's digest pin applies (ADR-0072).
+
+imagePullSecrets:
+  - name: ghcr-credentials
+
+replicas: 1
+
+# Cross-chart contract with the edge: the envoy.extraRoutes entry in this
+# env's values.yaml dials this exact Service:port (charts#375). A rename on either side silently 503s the route.
+port: 8090
+fullnameOverride: "gibson-billing-webhook"
+
+postgres:
+  host: "platform-postgres-rw.gibson.svc.cluster.local"
+  port: 5432
+  database: "gibson_platform"
+  passwordSecretName: "gibson-platform-postgres-credentials"
+  passwordSecretKey: "password"
+  sslMode: "require"
+
+stripe:
+  # The ExternalSecret of the overlay chart reads the OpenBao key
+  # gibson-stripe-credentials into this Secret. The webhook_secret member must
+  # be the signing secret of the Stripe endpoint configured for THIS
+  # environment: a mismatch fails every delivery with only a WARN in the
+  # receiver's log.
+  secretName: "gibson-billing-stripe"
+  remoteKey: "gibson-stripe-credentials"
+  storeName: "gibson-secrets"
+
+spiffe:
+  # The trust domain comes from global.spire.trustDomain in values.yaml of
+  # this env, which the Application loads first (ADR-0164). The SPIRE
+  # controller-manager in this env watches className "gibson-gibson", the
+  # same class the entitlements-svc overlay of this env names (gitops#355).
+  controllerManagerClassName: "gibson-gibson"

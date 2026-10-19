@@ -1,0 +1,251 @@
+# ----------------------------------------------------------------------------
+# recreate — the recreate verb as a workflow (ADR-0083, deploy#1745).
+#
+# Same name and inputs as `make recreate ENV=<env> [RESTORE_FROM=<name>]`,
+# and the job runs exactly that target: preflight, stage 1, stage 2, then a
+# restore ONLY when `restore_from` names a backup. An empty `restore_from`
+# means every store bootstraps empty, even if the bucket holds a hundred
+# backups (ADR-0083). There is no auto-detect and no `latest`. The GitHub
+# environment named by the `env` input gates the run: `prod` waits for the
+# one named reviewer (docs/bringup.md § Who may run what).
+#
+# THE INPUT DOES NOT OFFER STAGING (ADR-0095, hosted#403). Staging stays up,
+# and no workflow rebuilds it. An operator who must rebuild staging runs
+# `make recreate ENV=staging` from a workstation, after the serverName pull
+# request. scripts/check-staging-not-ephemeral.py fails when the option comes
+# back.
+#
+# Stage 0 state reaches the runner the same way as preflight.yml: keyring
+# from the environment secret BRINGUP_KEYRING (mode 0600, never echoed),
+# substrate.env from the environment variable SUBSTRATE_ENV_FILE.
+#
+# The bringup body for the AWS envs is scripts/recreate-aws.sh (deploy#1746).
+# A `restore_from` puts the secret store back BEFORE the platform Application
+# exists: the verb holds the app-of-apps back, creates the CRDs and the backup
+# plane straight from the gitops overlay, restores, and only then applies the
+# root again so the platform appears.
+#
+# The cloud credential is an OIDC session on the eks-bringup role
+# (bootstrap/eks/aws-org github-oidc.tf), trusted only for this repo's staging and prod
+# environments and only for the verb workflows.
+#
+# Guard: scripts/check-verb-workflows.py (the verb-workflow-guard CI job)
+# with failing fixtures under scripts/testdata/verb-workflows/.
+# ----------------------------------------------------------------------------
+name: recreate
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: Environment. The GitHub environment of the same name gates the run.
+        required: true
+        type: choice
+        options: [prod]
+      restore_from:
+        description: Backup name to restore. Empty means every store bootstraps empty (ADR-0083).
+        required: false
+        type: string
+
+# One bringup verb at a time per environment, across all three verb
+# workflows (the group is repo-scoped). Never cancel a running verb: a
+# half-cancelled teardown is a half-destroyed estate.
+concurrency:
+  group: bringup-${{ inputs.env }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # OIDC — aws-actions/configure-aws-credentials
+
+jobs:
+  recreate:
+    name: recreate (${{ inputs.env }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    timeout-minutes: 90
+    env:
+      ENV: ${{ inputs.env }}
+      RESTORE_FROM: ${{ inputs.restore_from }}
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # Same step as preflight.yml. The keyring file lands on disk mode 0600
+      # and is never echoed; every member value is registered with the
+      # runner's masker on top of GitHub's own per-line masking.
+      - name: Materialize stage 0 state from the environment
+        env:
+          BRINGUP_KEYRING: ${{ secrets.BRINGUP_KEYRING }}
+          SUBSTRATE_ENV_FILE: ${{ vars.SUBSTRATE_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          SUBSTRATE_DIR="${RUNNER_TEMP}/substrate"
+          echo "SUBSTRATE_DIR=${SUBSTRATE_DIR}" >> "$GITHUB_ENV"
+          state="${SUBSTRATE_DIR}/${ENV}"
+          mkdir -p "$state"
+          if [ -z "${BRINGUP_KEYRING}" ]; then
+            echo "::error::Environment secret BRINGUP_KEYRING is empty or missing for environment '${ENV}'."
+            echo "Load it from the operator keyring file: gh secret set BRINGUP_KEYRING --env ${ENV} -R ${{ github.repository }} < keyring.env"
+            exit 2
+          fi
+          if [ -z "${SUBSTRATE_ENV_FILE}" ]; then
+            echo "::error::Environment variable SUBSTRATE_ENV_FILE is empty or missing for environment '${ENV}'."
+            echo "Load it: gh variable set SUBSTRATE_ENV_FILE --env ${ENV} -R ${{ github.repository }} < substrate.env"
+            exit 2
+          fi
+          umask 077
+          printf '%s\n' "${BRINGUP_KEYRING}" > "$state/keyring.env"
+          chmod 0600 "$state/keyring.env"
+          while IFS= read -r line; do
+            case "$line" in ''|'#'*) continue ;; esac
+            v="${line#*=}"
+            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          done < "$state/keyring.env"
+          printf '%s\n' "${SUBSTRATE_ENV_FILE}" \
+            | sed "s|^KEYRING_FILE=.*|KEYRING_FILE=$state/keyring.env|" > "$state/substrate.env"
+          test "$(grep -c '^KEYRING_FILE=' "$state/substrate.env")" = 1
+
+      # THE SEAL KEY IS NEVER PRINTED, AND IS REGISTERED WITH THE MASKER.
+      #
+      # This step used to print the key and then say, in prose, that the line
+      # above ought to read ***. It asserted nothing: if the value was not
+      # masked the key went to the log in clear and the step still passed.
+      #
+      # Worse, the property it was testing is not one anything established. The
+      # runner masks repository and environment secrets. This value is read
+      # from a keyring file that stage 0 writes ON the runner, so nothing had
+      # taught the masker about it — the check could only pass by accident,
+      # when the key happened to have arrived from a secret.
+      #
+      # So: add-mask it, which is what actually makes it unprintable for the
+      # rest of the job, and prove identity with a short sha256 rather than the
+      # value. A 12-hex prefix of a sha256 is not reversible.
+      - name: The keyring's seal key is present, and masked from here on
+        run: |
+          set -euo pipefail
+          v="$(scripts/keyring.sh get "${SUBSTRATE_DIR}/${ENV}/keyring.env" OPENBAO_SEAL_KEY)"
+          if [ -z "$v" ]; then
+            echo "::error::the keyring holds no OPENBAO_SEAL_KEY. Stage 0 did not write one, or this run is pointed at the wrong keyring (README.md, Rotation)."
+            exit 1
+          fi
+          echo "::add-mask::$v"
+          printf '✓ OPENBAO_SEAL_KEY present and now masked (sha256 %s)\n' \
+            "$(printf '%s' "$v" | sha256sum | cut -c1-12)"
+
+      # RESTORE_FROM is passed only when the input names a backup, so the
+      # make target sees no empty-but-set variable (ADR-0083).
+      # The cloud credential the verb needs. A bringup verb applies and
+      # destroys a whole EKS estate, so the role is admin-equivalent in the
+      # workload account, bounded by PB-OperatorMaxPermissions and trusted
+      # only for this repo's `staging` and `prod` environments and only for
+      # these two workflows (bootstrap/eks/aws-org/github-oidc.tf, eks_bringup).
+      #
+      # configure-aws-credentials treats an unset role-to-assume as "look for
+      # credentials elsewhere", then retries 12 times over 100 seconds and
+      # reports "Could not load credentials from any providers" — which reads
+      # like a broken OIDC trust rather than an unset variable. Say which.
+      - name: The bringup role ARN variable must be set
+        env:
+          ROLE_ARN: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROLE_ARN}" ]; then
+            echo "::error::Repo variable EKS_BRINGUP_ROLE_ARN is not set." >&2
+            echo "The eks-bringup role is defined in bootstrap/eks/aws-org/github-oidc.tf." >&2
+            echo "Apply that workspace, then set the variable to the role ARN:" >&2
+            echo "  gh variable set EKS_BRINGUP_ROLE_ARN -R ${{ github.repository }} \\" >&2
+            echo "    --body arn:aws:iam::<account-id>:role/eks-bringup" >&2
+            exit 1
+          fi
+          echo "OK — role ARN is configured."
+
+      - name: Configure AWS credentials (OIDC role assumption)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+        with:
+          role-to-assume: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-session-name: gh-actions-recreate-${{ github.run_id }}
+          aws-region: us-east-1
+          role-duration-seconds: 14400
+
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Install Terraform
+        uses: ./.github/actions/install-terraform
+
+      - name: Install Helm and kubectl
+        run: |
+          set -euo pipefail
+          if ! command -v helm >/dev/null; then
+            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
+          fi
+          if ! command -v kubectl >/dev/null; then
+            curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+          fi
+          for t in terraform helm kubectl aws; do command -v "$t" >/dev/null || { echo "::error::$t is required"; exit 1; }; done
+
+      - name: make recreate
+        # The org GitHub App has one job: the Argo clone of the repositories
+        # (ADR-0084). keyring-to-cluster.sh (run inside make recreate) reads
+        # these values from the environment and writes one Secret, the Argo
+        # repo-creds Secret argocd/zeroroot-ai-creds. The values are not
+        # keyring members. The keyring fingerprint contract is shared with
+        # kind, so the App must not touch it. The App id and the installation
+        # id are not secret (vars). The private-key PEM is a secret. When an
+        # env has no App configured, keyring-to-cluster.sh skips the Secret.
+        env:
+          GITHUB_APP_ID: ${{ vars.ARGOCD_GITHUB_APP_ID }}
+          GITHUB_APP_INSTALLATION_ID: ${{ vars.ARGOCD_GITHUB_APP_INSTALLATION_ID }}
+          GITHUB_APP_PRIVATE_KEY: ${{ secrets.ARGOCD_GITHUB_APP_PRIVATE_KEY }}
+          # A restore writes the catch-up bundle here and opens no PR itself:
+          # the catch-up job below does, with the write token (D91, hosted#687).
+          RESTORE_CATCH_UP_PR: later
+          RESTORE_CATCH_UP_DIR: ${{ runner.temp }}/restore-catch-up
+        run: |
+          set -euo pipefail
+          if [ -n "${RESTORE_FROM}" ]; then
+            make recreate ENV="${ENV}" RESTORE_FROM="${RESTORE_FROM}"
+          else
+            make recreate ENV="${ENV}"
+          fi
+
+      # The bundle of the catch-up PR: the overlay with the new archive name,
+      # the body, and the branch. Only a restore writes one.
+      - name: Upload the catch-up bundle
+        if: ${{ inputs.restore_from != '' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: restore-catch-up
+          path: ${{ runner.temp }}/restore-catch-up
+          if-no-files-found: error
+          retention-days: 7
+
+  # Git catches up (D91). This job holds the write token and runs no verb: it
+  # pushes one branch with one changed line and opens the PR. The recreate
+  # job above, which holds the bringup role, keeps contents: read
+  # (hosted#687). A PR that github.token opens starts no workflow, so its
+  # reviewer starts the merge gate.
+  catch-up:
+    name: catch-up PR (${{ inputs.env }})
+    needs: recreate
+    if: ${{ inputs.restore_from != '' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+      - name: Download the catch-up bundle
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: restore-catch-up
+          path: ${{ runner.temp }}/restore-catch-up
+      - name: Open the catch-up PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/restore-catch-up.sh "${RUNNER_TEMP}/restore-catch-up"

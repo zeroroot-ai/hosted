@@ -1,0 +1,29 @@
+# ci-2core-metrics-server.values.yaml — request overlay for the
+# metrics-server add-on the recreate verb installs into kube-system.
+#
+# WHY THIS FILE EXISTS
+#   The upstream chart requests 100m / 200Mi. On the 2-vCPU runner that is
+#   one tenth of the node for an add-on that samples one kubelet. Measured on
+#   hosted run 34124471104 (2026-09-07): the node held 1715m of requests on
+#   ~2000m and the umbrella's neo4j (500m floor) could not schedule.
+#
+# WHAT THIS FILE DOES
+#   Lowers REQUESTS only. The chart sets no limits, so nothing else changes.
+#
+# WHY THIS ONE STAYS HERE, WHEN ITS TWO SIBLINGS BECAME CHART RUNGS.
+#   The umbrella's and Velero's 2-vCPU overlays moved into the chart as
+#   values-developer.yaml and values-ci.yaml (zeroroot-ai/charts#93), so the
+#   verb names a rung instead of carrying a copy. metrics-server is not a
+#   chart in that repository — this repo's recreate verb installs it directly
+#   from upstream — so there is no rung for it to be part of, and its overlay
+#   has nowhere else to live.
+#
+# SCOPE — Reaches the install when RUNG=ci on
+#   `make recreate ENV=kind` (scripts/recreate-kind.sh). The workstation kind
+#   keeps the upstream defaults.
+#
+# BUDGET — counted by scripts/check-2core-overlay.py.
+resources:
+  requests:
+    cpu: 10m
+    memory: 50Mi

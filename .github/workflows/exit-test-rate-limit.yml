@@ -1,0 +1,69 @@
+# exit-test-rate-limit — launch blocker 4 (deploy#1241, zeroroot-ai/.github#284).
+#
+# The exit test, in plain words: ONE CLIENT HITS THE RATE LIMIT WHILE A SECOND
+# CLIENT KEEPS WORKING.
+#
+# It runs entirely under Docker on the runner — the chart's own rendered Envoy
+# edge, the chart's own ratelimit service (envoyproxy/ratelimit on Redis), and
+# two client containers with distinct source addresses, so the peer Envoy sees
+# is real (ADR-0079 Client-IP contract). No cluster, no AWS, no staging.
+# test/edge/transform.py prints the two substitutions a cluster-less run needs
+# (the client_id placeholder, and plaintext instead of SPIFFE mTLS to the
+# quota service); everything else is the rendered bytes.
+#
+# The scorecard reads the latest run of THIS workflow by name. It must stay
+# `exit-test-rate-limit.yml`.
+# ADR-0080: never on pull_request. This is an exit test — it measures state on
+# main for the launch scorecard and runs on push to main and on its schedule.
+# The merge gate is the ten-minute set in ci.yml.
+name: exit-test-rate-limit
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    # Daily, so the scorecard's "last run" is never older than a day.
+    - cron: '40 5 * * *'
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: exit-test-rate-limit-${{ github.ref }}
+  # A run that started finishes. On main an exit test is the proof (ADR-0080),
+  # so a newer push queues behind it and does not cancel it (hosted#585).
+  cancel-in-progress: false
+
+jobs:
+  rate-limit:
+    name: one client hits the limit, a second keeps working
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout hosted
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Edge harness up
+        id: harness
+        uses: ./.github/actions/edge-harness
+
+      - name: EXIT TEST — one client hits the limit while a second keeps working
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "${{ steps.harness.outputs.env-file }}"
+          test/edge/exit-test-rate-limit.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "--- transform summary ---"; cat "${RUNNER_TEMP}/edge-harness/harness.json" || true
+          for c in edge-envoy gibson-ratelimit gibson-workloads-dashboard; do
+            echo "--- docker logs $c ---"; docker logs "$c" 2>&1 | tail -80 || true
+          done
+
+      - name: Harness down
+        if: always()
+        run: test/edge/harness.sh down

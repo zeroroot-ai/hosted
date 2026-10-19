@@ -1,0 +1,45 @@
+{{/*
+SaaS overlay: ClusterSPIFFEID for entitlements-svc.
+
+Registers the entitlements-svc workload with the SPIRE controller-manager so
+pods receive their SVID over the Workload API socket. The daemon peer-pins its
+mTLS calls against this SPIFFE ID.
+
+The SPIRE controller-manager is owned by the standalone hardened `spire`
+Argo Application (same as the core umbrella — deploy#751). This CR is
+overlay-owned because the entitlements-svc pod only exists in the SaaS
+deployment.
+
+WORKLOAD SELECTORS — every entry in workloadSelectorTemplates MUST be a
+Helm-rendered LITERAL. A Go template referencing `.PodSpec`/`.PodMeta` is a
+provable no-op: spire-controller-manager mints one registration entry per
+matching pod, already pinned by `k8s:pod-uid:<uid>`, then renders the
+selector templates against THAT SAME pod — so a pod-derived selector is
+satisfied by construction and can never fail. Only a literal is re-derived
+from kubelet by the agent at attestation time. The long-form argument lives
+in the core chart at
+gibson-workloads/templates/spire-server/clusterspiffeids.yaml.
+
+These selectors do not stop a principal that can create pods in this
+namespace — Kubernetes has no `serviceaccounts/use` verb — which is what
+identity-admission.yaml alongside this file is for.
+*/}}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: gibson-platform-entitlements-svc
+  labels:
+    {{- include "entitlements-svc.labels" . | nindent 4 }}
+    app.kubernetes.io/component: spire-controller-manager
+spec:
+  className: {{ .Values.spiffe.controllerManagerClassName | default "gibson-gibson-spire" | quote }}
+  spiffeIDTemplate: {{ printf "spiffe://%s/platform/entitlements-svc" (include "entitlements-svc.trustDomain" .) | quote }}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: entitlements-svc
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  workloadSelectorTemplates:
+    - "k8s:ns:{{ .Release.Namespace }}"
+    - "k8s:sa:{{ include "entitlements-svc.serviceAccountName" . }}"

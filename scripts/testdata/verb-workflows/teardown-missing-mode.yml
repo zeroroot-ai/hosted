@@ -1,0 +1,26 @@
+# Fixture: no mode input at all. The guard must REJECT this.
+name: teardown
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        type: choice
+        options: [prod]
+concurrency:
+  group: bringup-${{ inputs.env }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    steps:
+      - name: Materialize stage 0 state from the environment
+        env:
+          BRINGUP_KEYRING: ${{ secrets.BRINGUP_KEYRING }}
+        run: |
+          printf '%s\n' "${BRINGUP_KEYRING}" > keyring.env
+      - name: make teardown
+        run: make teardown ENV="${{ inputs.env }}" MODE="${{ inputs.mode }}"

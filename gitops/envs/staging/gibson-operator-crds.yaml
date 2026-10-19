@@ -1,0 +1,59 @@
+# gibson-operator-crds — the CustomResourceDefinitions of the operators the
+# umbrella owns as subcharts: cert-manager, External Secrets and CloudNativePG.
+#
+# ITS OWN RELEASE SINCE charts#82, and the reason is a hard limit rather than
+# taste. A Helm release record is one Secret and the apiserver caps a Secret at
+# 1 MiB. With these CRDs inside gibson-crds the record was 1131 KB — ten
+# percent over — and `helm install gibson-crds` failed outright on every
+# cluster. Apart they are 136 KB and 699 KB.
+#
+# Argo never noticed, because Argo renders and applies server-side and writes
+# no release record. This Application exists so that a chart version carrying
+# the split still ships the operator CRDs: without it, moving the pin to
+# 0.127.2 or later silently drops cert-manager, External Secrets and
+# CloudNativePG CRDs from the cluster, and the platform renders CRs of kinds
+# the apiserver does not know.
+#
+# Wave -11, one ahead of gibson-crds, so every CRD is established before
+# anything that instantiates one.
+
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gibson-operator-crds
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-11"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    # Versioned OCI chart, published beside the umbrella at the same version
+    # by deploy's publish-umbrella-chart workflow (deploy#1777/#1785).
+    - repoURL: ghcr.io/zeroroot-ai/charts
+      chart: gibson-operator-crds
+      targetRevision: "0.151.1"
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gibson
+  syncPolicy:
+    automated:
+      # prune:false matches the platform Application in this env. Pruning stays
+      # a deliberate, reviewed action rather than something a fast auto-sync
+      # path can do on a transient or misread diff.
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 2
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # CRDs are large; Argo must not refuse them for exceeding the
+      # last-applied-configuration annotation limit. ServerSideApply above is
+      # what makes that safe (deploy#1751 vendored CRD experience).
+      - Replace=true

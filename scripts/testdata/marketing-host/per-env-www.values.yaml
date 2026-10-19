@@ -1,0 +1,11 @@
+# Failing fixture for scripts/check-marketing-host.py --selftest.
+#
+# This is gitops/envs/staging/values.yaml as it stood on 2026-09-14: a
+# per-environment marketing host that has no DNS record, because ADR-0077
+# gives the marketing site one production-only deployment and no env fork.
+# A signup that reached plan selection redirected here and died.
+#
+# Not an overlay. `values.yaml` only because the guard globs `*/values.yaml`.
+gibson-workloads:
+  dashboard:
+    wwwUrl: "https://www.staging.zeroroot.ai"

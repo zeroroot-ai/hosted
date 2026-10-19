@@ -1,0 +1,350 @@
+#!/usr/bin/env bash
+# ----------------------------------------------------------------------------
+# Node init for the kubernetes-goat target. Cloud-init runs this once, on the
+# first boot.
+#
+# It does five things, in this order:
+#   0. raise the kernel's inotify limits, so the SSM agent keeps its budget;
+#   1. install git and helm, which the reconcile needs;
+#   2. install k3s, so a reboot returns a working cluster with no operator;
+#   3. write the reconcile script, which pulls the goat repository and applies
+#      it;
+#   4. start a systemd timer that runs the reconcile every ${reconcile_interval}.
+#
+# It is idempotent. Cloud-init reruns on some replacement paths, and a rerun on
+# a node that already has this release must be a no-op.
+#
+# THERE IS NO SANDBOX RUNTIME HERE, and that is the one deliberate difference
+# from bootstrap/ec2/gibson. On the platform node a sandbox contains a tenant's
+# code. On this node the escape is the exercise, and the separate instance is
+# what contains it.
+#
+# EVERY DOWNLOAD RETRIES A RESET, not only a timeout. curl retries a timeout by
+# default but NOT a connection reset, which is how the first staging bringup
+# failed three times seconds into its boot (2026-09-22).
+# ----------------------------------------------------------------------------
+set -euo pipefail
+exec > >(tee -a /var/log/node-init.log) 2>&1
+
+echo "node-init: start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# ---------------------------------------------------------------------------
+# 0. Kernel limits.
+#
+# fs.inotify.max_user_instances is 128 on a stock AL2023 kernel and is counted
+# per uid, so every root process on this node shares one budget. When root runs
+# out, the SSM agent's session worker is the first to lose and every
+# port-forward ends with "Plugin with name Port not found" (measured on the
+# platform node, 2026-09-29). A port-forward is the only way in here.
+# ---------------------------------------------------------------------------
+cat > /etc/sysctl.d/90-zeroroot-node.conf <<'SYSCTL'
+fs.inotify.max_user_instances = 8192
+fs.inotify.max_user_watches = 1048576
+SYSCTL
+sysctl --system >/dev/null
+echo "node-init: inotify limits $(sysctl -n fs.inotify.max_user_instances) instances"
+
+# ---------------------------------------------------------------------------
+# 1a. git, and the host iptables k3s wants.
+#
+# AL2023 carries the AWS CLI v2 already, which is what reads the deploy token.
+# It ships no iptables: k3s then warns that it cannot find the host tools and
+# falls back to its own, which an operator reading the rules cannot see.
+# ---------------------------------------------------------------------------
+dnf install -y git >/dev/null
+if ! command -v iptables >/dev/null 2>&1; then
+  dnf install -y iptables-nft >/dev/null 2>&1 || dnf install -y iptables >/dev/null 2>&1 || true
+fi
+echo "node-init: git $(git --version | awk '{print $3}')"
+
+# ---------------------------------------------------------------------------
+# 1b. helm, pinned.
+#
+# The goat installs one chart, metadata-db. A pinned helm keeps a rebuild from
+# changing the tool under a published finding.
+# ---------------------------------------------------------------------------
+HELM_VERSION="${helm_version}"
+if command -v helm >/dev/null 2>&1 && helm version --short 2>/dev/null | grep -q "$HELM_VERSION"; then
+  echo "node-init: helm $HELM_VERSION is already installed"
+else
+  tmp="$(mktemp -d)"
+  curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 20 \
+    "https://get.helm.sh/helm-$HELM_VERSION-linux-amd64.tar.gz" -o "$tmp/helm.tgz"
+  tar -xzf "$tmp/helm.tgz" -C "$tmp"
+  install -m 0755 "$tmp/linux-amd64/helm" /usr/local/bin/helm
+  rm -rf "$tmp"
+  echo "node-init: installed helm $HELM_VERSION"
+fi
+
+# ---------------------------------------------------------------------------
+# 2. k3s.
+#
+# --disable traefik    the goat's scenarios are reached through a kubectl
+#                      port-forward over an SSM session. An ingress controller
+#                      would be a second way in, on a node whose whole point is
+#                      that there is only one.
+# --disable servicelb  nothing here is published, so nothing needs a load
+#                      balancer.
+#
+# THERE IS NO --node-external-ip and no --tls-san. k3s puts the node's own
+# private address in the apiserver certificate, which is the address the
+# platform node dials. Advertising the public address would send every
+# in-cluster client out to the internet and back in on 6443, a port this
+# security group closes to everything but the platform node.
+#
+# A pinned version, never a channel: an unattended rebuild must not move the
+# Kubernetes version under a finding an agent already filed.
+# ---------------------------------------------------------------------------
+if systemctl is-active --quiet k3s; then
+  echo "node-init: k3s is already running"
+else
+  curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 20 \
+    https://get.k3s.io -o /tmp/k3s-install.sh
+  INSTALL_K3S_VERSION="${k3s_version}" sh /tmp/k3s-install.sh \
+    --disable traefik \
+    --disable servicelb \
+    --write-kubeconfig-mode 0600 \
+    --node-label "zeroroot.ai/target=${target_name}"
+  echo "node-init: installed k3s ${k3s_version}"
+fi
+
+# The kubeconfig k3s writes names 127.0.0.1. The platform node and the operator
+# both reach the API on the private address, so write a second copy that names
+# it. The address comes from the metadata service, because Terraform cannot put
+# an instance's own address into the user data that creates it.
+IMDS_TOKEN="$(curl -fsS --retry 5 --retry-all-errors -X PUT \
+  http://169.254.169.254/latest/api/token \
+  -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')"
+PRIVATE_IP="$(curl -fsS --retry 5 --retry-all-errors \
+  -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  http://169.254.169.254/latest/meta-data/local-ipv4)"
+install -d -m 0700 /var/lib/rancher/k3s/server
+sed "s#https://127.0.0.1:6443#https://$PRIVATE_IP:6443#" \
+  /etc/rancher/k3s/k3s.yaml > /var/lib/rancher/k3s/server/kubeconfig-external.yaml
+chmod 0600 /var/lib/rancher/k3s/server/kubeconfig-external.yaml
+echo "node-init: kubeconfig-external.yaml names https://$PRIVATE_IP:6443"
+
+# ---------------------------------------------------------------------------
+# 3a. The git credential helper.
+#
+# The deploy token never lands on disk and never enters a remote URL, because a
+# URL with a password in it is written straight into .git/config. git asks this
+# helper instead, and it answers from the environment the reconcile sets for the
+# one process. Root-only, because root is the only account on this node that
+# should hold the token.
+# ---------------------------------------------------------------------------
+cat > /usr/local/bin/goat-git-askpass <<'ASKPASS'
+#!/bin/sh
+# git calls this with the prompt as $1: "Username for '...'" or "Password for ...".
+case "$1" in
+  Username*) printf '%s' "$GOAT_GIT_USER" ;;
+  Password*) printf '%s' "$GOAT_GIT_PASS" ;;
+  *)         exit 1 ;;
+esac
+ASKPASS
+chmod 0700 /usr/local/bin/goat-git-askpass
+
+# ---------------------------------------------------------------------------
+# 3b. The reconcile.
+#
+# IT APPLIES THE MANIFESTS DIRECTLY AND DOES NOT RUN setup-kubernetes-goat.sh.
+# That script installs the metadata-db chart with `helm install`, which fails on
+# every run after the first with "cannot re-use a released name", and it has no
+# `set -e`, so it would report success while half of the scenarios never
+# applied. A timer must converge on every run, so this script reads the WHAT out
+# of the goat's own setup script — the manifest paths and the chart — and owns
+# the HOW: `kubectl apply` and `helm upgrade --install`. The goat repository
+# stays the single source of truth for which scenarios exist, so a merge request
+# that adds one is picked up with no change here.
+# ---------------------------------------------------------------------------
+cat > /usr/local/bin/goat-reconcile <<'RECONCILE'
+#!/usr/bin/env bash
+set -euo pipefail
+
+REPO_DIR=/var/lib/kubernetes-goat
+REPO_URL="${goat_repo_url}"
+REPO_REF="${goat_repo_ref}"
+TOKEN_PARAM="${token_parameter}"
+AWS_REGION="${aws_region}"
+SETUP=setup-kubernetes-goat.sh
+
+exec > >(tee -a /var/log/goat-reconcile.log) 2>&1
+log() { printf '%s goat-reconcile: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; }
+
+# -- the credential, read fresh on every run and never written to disk --------
+#
+# get-parameterS, PLURAL. AmazonSSMManagedInstanceCore grants ssm:GetParameters
+# and NOT ssm:GetParameter, and this role carries that policy and nothing else.
+# The singular call fails with AccessDenied. The SecureString is encrypted with
+# the AWS managed alias/aws/ssm key, whose key policy grants kms:Decrypt to any
+# principal in the account calling through SSM, so the plural call decrypts
+# without an inline KMS policy on this role.
+cred="$(aws ssm get-parameters \
+  --region "$AWS_REGION" \
+  --names "$TOKEN_PARAM" \
+  --with-decryption \
+  --query 'Parameters[0].Value' \
+  --output text 2>/dev/null || true)"
+
+if [ -z "$cred" ] || [ "$cred" = "None" ]; then
+  log "FAILED: SSM parameter $TOKEN_PARAM holds no readable value. The fix loop is dead until it exists as a SecureString."
+  exit 1
+fi
+
+GOAT_GIT_USER="$${cred%%:*}"
+GOAT_GIT_PASS="$${cred#*:}"
+if [ -z "$GOAT_GIT_USER" ] || [ -z "$GOAT_GIT_PASS" ] || [ "$GOAT_GIT_USER" = "$GOAT_GIT_PASS" ]; then
+  log "FAILED: $TOKEN_PARAM is not in the form username:token."
+  exit 1
+fi
+export GOAT_GIT_USER GOAT_GIT_PASS
+unset cred
+export GIT_ASKPASS=/usr/local/bin/goat-git-askpass
+export GIT_TERMINAL_PROMPT=0
+
+# -- the pull -----------------------------------------------------------------
+if [ ! -d "$REPO_DIR/.git" ]; then
+  log "cloning $REPO_URL at $REPO_REF"
+  git clone --quiet --branch "$REPO_REF" --single-branch "$REPO_URL" "$REPO_DIR"
+fi
+cd "$REPO_DIR"
+
+before="$(git rev-parse HEAD)"
+git fetch --quiet origin "$REPO_REF"
+git reset --quiet --hard "origin/$REPO_REF"
+after="$(git rev-parse HEAD)"
+
+if [ "$before" = "$after" ]; then
+  log "no change: $REPO_REF is $after"
+else
+  log "PULLED $REPO_REF: $before -> $after"
+  git --no-pager log --oneline --no-decorate "$before..$after" | sed 's/^/    /'
+fi
+
+# -- what to apply, read out of the goat's own setup script -------------------
+#
+# COMMENTED LINES ARE DROPPED FIRST. The script keeps a commented
+# `kubectl apply -f scenarios/helm2-rbac/setup.yaml` from the retired helm2
+# scenario, and a grep that reads it applies a manifest the goat deliberately
+# does not.
+if [ ! -f "$SETUP" ]; then
+  log "FAILED: $REPO_DIR/$SETUP does not exist. The repository is not kubernetes-goat."
+  exit 1
+fi
+live="$(grep -vE '^[[:space:]]*#' "$SETUP")"
+
+mapfile -t MANIFESTS < <(printf '%s\n' "$live" \
+  | grep -oE 'apply +-f +scenarios/\S+' | awk '{print $NF}' | sort -u)
+mapfile -t CHARTS < <(printf '%s\n' "$live" \
+  | grep -oE 'install +[a-z0-9-]+ +scenarios/\S+' | sed -E 's/^install +//' | sort -u)
+
+if [ "$${#MANIFESTS[@]}" -eq 0 ]; then
+  log "FAILED: $SETUP declares no kubectl apply. Refusing to report a converged cluster after applying nothing."
+  exit 1
+fi
+log "applying $${#MANIFESTS[@]} manifests and $${#CHARTS[@]} charts from $after"
+
+# -- apply --------------------------------------------------------------------
+#
+# A Job's spec is immutable, so `kubectl apply` on scenarios/batch-check
+# succeeds while nothing changed and fails the moment a merge request changes
+# it. Replacing is what converges, and the log names every time it happened.
+failed=0
+for m in "$${MANIFESTS[@]}"; do
+  if [ ! -f "$m" ]; then
+    log "  skip $m: this revision does not carry it"
+    continue
+  fi
+  if ! kubectl apply -f "$m" >/dev/null 2>&1; then
+    log "  $m: apply refused the change, replacing"
+    kubectl replace --force -f "$m" >/dev/null || { log "  FAILED $m"; failed=1; }
+  fi
+done
+
+for c in "$${CHARTS[@]}"; do
+  # shellcheck disable=SC2086
+  set -- $c
+  release="$1"
+  chart="$2"
+  if [ ! -d "$chart" ]; then
+    log "  skip chart $release: $chart does not exist in this revision"
+    continue
+  fi
+  helm upgrade --install "$release" "$chart" >/dev/null || { log "  FAILED chart $release"; failed=1; }
+done
+
+# -- what the cluster looks like now, so a demo can read it -------------------
+pods="$(kubectl get pods --all-namespaces --no-headers 2>/dev/null | wc -l)"
+notready="$(kubectl get pods --all-namespaces --no-headers 2>/dev/null \
+  | grep -cvE ' (Running|Completed) ' || true)"
+log "reconciled $after: $pods pods, $notready not Running or Completed"
+
+if [ "$failed" -ne 0 ]; then
+  log "FAILED: at least one scenario did not converge at $after"
+  exit 1
+fi
+RECONCILE
+chmod 0700 /usr/local/bin/goat-reconcile
+
+# ---------------------------------------------------------------------------
+# 4. The timer.
+#
+# OnUnitInactiveSec counts from the END of the last run, so two reconciles can
+# never overlap and a slow image pull does not queue a second apply behind it.
+# ---------------------------------------------------------------------------
+cat > /etc/systemd/system/goat-reconcile.service <<'UNIT'
+[Unit]
+Description=Reconcile the kubernetes-goat target from its repository
+After=k3s.service network-online.target
+Wants=k3s.service
+
+[Service]
+Type=oneshot
+Environment=KUBECONFIG=/etc/rancher/k3s/k3s.yaml
+Environment=HOME=/root
+ExecStart=/usr/local/bin/goat-reconcile
+UNIT
+
+cat > /etc/systemd/system/goat-reconcile.timer <<TIMER
+[Unit]
+Description=Reconcile the kubernetes-goat target every ${reconcile_interval}
+
+[Timer]
+OnBootSec=1min
+OnUnitInactiveSec=${reconcile_interval}
+AccuracySec=10s
+Unit=goat-reconcile.service
+
+[Install]
+WantedBy=timers.target
+TIMER
+
+# The log a demo reads, kept from growing without bound.
+cat > /etc/logrotate.d/goat-reconcile <<'ROTATE'
+/var/log/goat-reconcile.log {
+    daily
+    rotate 7
+    size 10M
+    compress
+    missingok
+    notifempty
+    copytruncate
+}
+ROTATE
+
+systemctl daemon-reload
+systemctl enable --now goat-reconcile.timer
+echo "node-init: goat-reconcile.timer runs every ${reconcile_interval}"
+
+# The first reconcile runs now rather than at OnBootSec, so the readiness
+# marker below means the scenarios are applied, not merely scheduled.
+for _ in $(seq 1 60); do
+  if KUBECONFIG=/etc/rancher/k3s/k3s.yaml kubectl get node >/dev/null 2>&1; then break; fi
+  sleep 5
+done
+systemctl start goat-reconcile.service || echo "node-init: the first reconcile failed, see /var/log/goat-reconcile.log"
+
+# The readiness marker. It is written last, so its presence means every step
+# above finished.
+touch /var/lib/rancher/k3s/server/node-init.done
+echo "node-init: done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

@@ -1,0 +1,28 @@
+# Terraform working directories and run output.
+#
+# This repository had no ignore file until hosted#159. A `terraform init` in
+# any root writes a provider cache of several hundred megabytes, and one
+# `git add <dir>` then tries to push it. GitHub refuses the push, which is the
+# good case; the bad case is a repository nobody can clone.
+#
+# The provider lock file is NOT ignored. No root commits one today, so it stays
+# visible in `git status` rather than hidden by a rule.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfplan
+
+# The terraform exit test writes both of these into the root it plans, and
+# uploads them as run artifacts.
+plan.json
+plan.log
+
+# Python bytecode that a guard or a probe writes when it imports a sibling
+# module. hosted#513 committed two files by accident.
+__pycache__/
+*.pyc
+
+# The S3 backend of stage 0 for an env that keeps it in AWS (drill).
+# scripts/stage0-store.sh writes it before each init and removes it for an env
+# that keeps stage 0 on the workstation.
+substrate/gibson-bootstrap/backend_override.tf

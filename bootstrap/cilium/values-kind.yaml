@@ -1,0 +1,5 @@
+# Cilium on kind (hosted#446). kind starts with no kube-proxy
+# (kubeProxyMode: none in scripts/recreate-kind.sh). The API server is the
+# control-plane container on port 6443. scripts/recreate-kind.sh passes the
+# host, because the container name carries the cluster name.
+k8sServicePort: 6443

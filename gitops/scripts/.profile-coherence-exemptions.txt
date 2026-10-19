@@ -1,0 +1,9 @@
+# Sanctioned deployment-profile debt (gitops#356).
+#
+# Format: <env>:<check>:<reason, including the tracking issue>
+#
+# An entry downgrades that check from failure to warning for that env. A STALE
+# entry — one whose check now passes — fails the guard, so a line cannot outlive
+# the debt it covers. MONOTONIC SHRINK ONLY: every entry removed is a real fix,
+# and a new entry should be a deliberate, reviewed decision, not a way past a
+# red gate.

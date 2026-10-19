@@ -1,0 +1,33 @@
+{{/*
+SaaS overlay: ClusterSPIFFEID for billing.
+
+billing dials the connection points of the daemon over SPIFFE mTLS
+(billing internal/daemon). The daemon accepts CompleteSignupStep only from the
+SPIFFE ID that gibson.connectionPoints.signupStepCompleterPath names, so this
+ID is the one caller that can end a signup step (ADR-0060, D54).
+
+Every workload selector is a Helm-rendered literal. A selector template that
+reads `.PodSpec` or `.PodMeta` is satisfied by construction and checks
+nothing (see the entitlements-svc overlay and the core chart's
+clusterspiffeids.yaml). The literals do not stop a principal that can create
+pods in this namespace; identity-admission.yaml next door does that.
+*/}}
+apiVersion: spire.spiffe.io/v1alpha1
+kind: ClusterSPIFFEID
+metadata:
+  name: gibson-platform-billing
+  labels:
+    {{- include "billing-webhook.labels" . | nindent 4 }}
+    app.kubernetes.io/component: spire-controller-manager
+spec:
+  className: {{ .Values.spiffe.controllerManagerClassName | default "gibson-gibson-spire" | quote }}
+  spiffeIDTemplate: {{ printf "spiffe://%s/%s" (include "billing-webhook.trustDomain" .) (required "spiffe.path is required" .Values.spiffe.path | trimPrefix "/") | quote }}
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/component: billing-webhook
+  namespaceSelector:
+    matchLabels:
+      kubernetes.io/metadata.name: {{ .Release.Namespace }}
+  workloadSelectorTemplates:
+    - "k8s:ns:{{ .Release.Namespace }}"
+    - "k8s:sa:{{ include "billing-webhook.serviceAccountName" . }}"

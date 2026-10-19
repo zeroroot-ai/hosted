@@ -1,0 +1,191 @@
+{{/*
+SaaS overlay: entitlements-svc Deployment.
+
+Runs ghcr.io/zeroroot-ai/billing cmd/entitlements-svc on :9091 over SPIFFE
+mTLS. This is the ZeroRoot-hosted implementation of the EntitlementsService
+gRPC seam (ADR-0074 / ADR-0060, deploy#1032).
+
+Self-hosted installs NEVER deploy this chart.
+
+The core gibson-workloads chart carries only the daemon's seam knob
+(gibson.entitlementsEndpoint) which is set by the gitops SaaS overlay
+composition (envs/{staging,prod}/saas-overlay.yaml). The closed billing image
+reference lives exclusively here, never in the core umbrella.
+
+Env contract (ground truth: billing/cmd/entitlements-svc/main.go):
+  ENTITLEMENTS_GRPC_ADDR  — listen address (default :9091)
+  ENTITLEMENTS_PROBE_ADDR — probe HTTP listen address (default :9092)
+  BILLING_SVID            — daemon SPIFFE ID to pin as authorized peer; MUST
+                            be set or mTLS never activates (deploy#1005)
+  PGHOST/PGPORT/...       — libpq env vars for postgres (quota data)
+  PLANS_FILE              — path to plans.yaml
+  SPIFFE_ENDPOINT_SOCKET  — workload API socket path
+
+Plans ConfigMap: gibson-tenant-operator-plans (rendered by the core
+gibson-operators sub-chart into the same release namespace).
+*/}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "entitlements-svc.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "entitlements-svc.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "entitlements-svc.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "entitlements-svc.selectorLabels" . | nindent 8 }}
+        {{- /*
+          The network labels of the pod (D76, charts gibson.netLabels). The
+          Cilium policies of the core umbrella select pods by these labels.
+          net-role platform lets the edge and the daemon reach this pod, and
+          client-postgres lets it reach the platform Postgres on :5432. The
+          overlay writes no policy on the core pods: a label adds no
+          isolation to a pod that this chart does not own (the 2026-09-14
+          deadlock).
+        */}}
+        gibson.zeroroot.ai/net-role: platform
+        gibson.zeroroot.ai/client-postgres: "true"
+      annotations:
+        {{- /*
+          The login role of the platform Postgres changes every 24 hours
+          (ADR-0171). The service reads it at start, so Reloader restarts it
+          (charts gibson-operators reloader.rollouts.extraDeployments names
+          this Deployment).
+        */}}
+        secret.reloader.stakater.com/reload: {{ .Values.postgres.passwordSecretName | quote }}
+    spec:
+      {{- /* Dedicated ServiceAccount (serviceaccount.yaml). This is a
+             workload-attestation attribute, not an API credential: the
+             ClusterSPIFFEID carries a literal `k8s:sa:` selector the SPIRE
+             agent re-derives from kubelet at attestation time, and the
+             overlay's ValidatingAdmissionPolicy keys on this name. Before
+             this line the pod ran as the namespace `default` SA. */}}
+      serviceAccountName: {{ include "entitlements-svc.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        {{- include "entitlements-svc.waitForSpireSocket" . | nindent 8 }}
+      containers:
+        - name: entitlements-svc
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "Always" }}
+          command: ["/usr/local/bin/entitlements-svc"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: grpc
+              containerPort: {{ .Values.port | default 9091 }}
+              protocol: TCP
+            - name: probe
+              containerPort: {{ .Values.probePort | default 9092 }}
+              protocol: TCP
+          env:
+            - name: ENTITLEMENTS_GRPC_ADDR
+              value: ":{{ .Values.port | default 9091 }}"
+            - name: ENTITLEMENTS_PROBE_ADDR
+              value: ":{{ .Values.probePort | default 9092 }}"
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///run/spire/sockets/api.sock"
+            # Daemon's SPIFFE ID — entitlements-svc pins the calling peer to
+            # this SVID. CRITICAL: if unset, the binary serves plain gRPC
+            # with no mTLS (deploy#1005). Always set in SaaS deployments.
+            - name: BILLING_SVID
+              value: {{ printf "spiffe://%s/platform/daemon" (include "entitlements-svc.trustDomain" .) | quote }}
+            # Platform Postgres (libpq env vars).
+            - name: PGHOST
+              value: {{ required ".Values.postgres.host is required" .Values.postgres.host | quote }}
+            - name: PGPORT
+              value: {{ .Values.postgres.port | default 5432 | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.postgres.database | default "gibson_platform" | quote }}
+            # The login role of gibson_platform, from the same Secret as its
+            # password: the OpenBao database engine issues a new login role
+            # every 24 hours (ADR-0171, row postgres-role-passwords), and
+            # Reloader restarts this Deployment.
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required ".Values.postgres.passwordSecretName is required" .Values.postgres.passwordSecretName | quote }}
+                  key: "username"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required ".Values.postgres.passwordSecretName is required" .Values.postgres.passwordSecretName | quote }}
+                  key: {{ .Values.postgres.passwordSecretKey | default "password" | quote }}
+            - name: PGSSLMODE
+              value: {{ .Values.postgres.sslMode | default "require" | quote }}
+            - name: PLANS_FILE
+              value: "/etc/gibson/plans/plans.yaml"
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+            - name: plans
+              mountPath: /etc/gibson/plans
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: probe
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: spire-agent-socket
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        # Plans ConfigMap from the core gibson-operators sub-chart (same
+        # namespace as the core umbrella release). Name is fixed by the
+        # operators chart convention.
+        - name: plans
+          configMap:
+            name: {{ .Values.plansCmName | default "gibson-tenant-operator-plans" }}
+        - name: tmp
+          emptyDir: {}

@@ -1,0 +1,187 @@
+# promote-bump — open the one-line chart-version promotion PR (ADR-0080,
+# gitops#251, hosted#116).
+#
+# A promotion is a single-number bump: staging first, then the SAME version to
+# prod. This workflow opens that PR. It moves the OCI targetRevision in the
+# env's platform Application and its sibling releases, records the version in
+# gitops/chart-digests.yaml, and nothing else. It never touches
+# envs/<env>/values.yaml: writing the $values file in the same commit as the
+# Application spec is the gitops#448 promotion race, and the merge gate refuses
+# it.
+#
+# WHO CALLS IT
+#
+#   staging  a human or agent, after release-please cuts the charts release.
+#            Then promote-staging.yml proves the version on a real staging.
+#   prod     promote-staging.yml, through gitops/scripts/prod-on-green.sh,
+#            after a green smoke. The PR merges after an independent review
+#            names its head, like every agent PR (hosted#719). This workflow
+#            never merges and never arms auto-merge; prod-on-green.sh
+#            --selftest fails if it does.
+#
+# THE GUARDS ON THE WAY IN
+#
+# The PR this opens is an ordinary PR. ci.yml runs `make check` (every guard
+# selftest, the offline ordering check) and `make check-promotion-pr` (prod
+# moves only to the staging version, no pin moves with its values.yaml). This
+# workflow also refuses early, before it opens anything, in two places: prod
+# must be the version staging pins, and the chart must be signed by
+# zeroroot-ai/charts. REQUIRE_SIGNED=1 means an automated promotion can never
+# mint a `signed: false` exemption on its own.
+#
+# THE TOKEN
+#
+# The PR is opened with a GitHub App token, not GITHUB_TOKEN. A PR authored by
+# github-actions[bot] gets its workflow runs held at action_required, so the
+# required check never reports and the PR never merges (zeroroot-ai/.github#263,
+# the release-please stall). The App is zeroday-sdk-fanout, the same one every
+# release-please job in the org mints from.
+name: promote-bump
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: "Target env to promote"
+        type: choice
+        options: [staging, prod]
+        required: true
+      chart_version:
+        description: "Umbrella chart version to pin (bare semver, e.g. 0.128.0). A release of zeroroot-ai/charts."
+        required: true
+        type: string
+
+permissions:
+  # The PR is opened with the App token. The workflow token only reads the
+  # repository. It read check rollups for the old auto-merge step, which is
+  # gone (hosted#719).
+  contents: read
+
+concurrency:
+  group: promote-bump-${{ inputs.env }}
+  cancel-in-progress: false
+
+jobs:
+  open-bump-pr:
+    name: promote ${{ inputs.env }} to ${{ inputs.chart_version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ENV: ${{ inputs.env }}
+      CHART_VERSION: ${{ inputs.chart_version }}
+    steps:
+      - name: Mint App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510  # v3
+        with:
+          app-id: ${{ secrets.SDK_FANOUT_APP_ID }}
+          private-key: ${{ secrets.SDK_FANOUT_APP_PRIVATE_KEY }}
+          owner: zeroroot-ai
+          repositories: hosted
+
+      - name: Checkout hosted
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install guard dependencies
+        run: python3 -m pip install -r requirements-ci.txt
+
+      - name: The version is a release of zeroroot-ai/charts
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          [[ "$CHART_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::chart_version must be bare semver, got '$CHART_VERSION'"; exit 2; }
+          if ! gh release view "v${CHART_VERSION}" --repo zeroroot-ai/charts --json tagName >/dev/null 2>&1; then
+            echo "::error::no release v${CHART_VERSION} in zeroroot-ai/charts. release-please has not cut it, or the version is wrong."; exit 2
+          fi
+          echo "v${CHART_VERSION} is a release of zeroroot-ai/charts"
+
+      # Prod gate, before anything is opened: prod may only move to the
+      # version staging pins. Staging reaches a version only through
+      # promote-staging, so the staging pin is the proof the version was
+      # tested. check-prod-promotion.sh holds the same rule on the PR.
+      - name: Prod follows staging
+        if: ${{ inputs.env == 'prod' }}
+        run: |
+          set -euo pipefail
+          . gitops/scripts/lib/chart-version.sh
+          staging_v="$(env_chart_version staging)"
+          if [ "$staging_v" != "$CHART_VERSION" ]; then
+            echo "::error::cannot promote prod to ${CHART_VERSION}: staging pins ${staging_v}. Promote staging first and prove it with promote-staging."
+            exit 1
+          fi
+          echo "staging pins ${CHART_VERSION}"
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
+        with:
+          version: v3.16.2
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
+        with:
+          cosign-release: "v2.4.1"
+
+      # Resolves the tag to its digest, verifies the cosign signature against
+      # the zeroroot-ai/charts publish identity, and writes the ledger entry
+      # the PR carries. No registry login: the packages are public.
+      - name: Verify the signature and record the digest
+        env:
+          REQUIRE_SIGNED: "1"
+        run: bash gitops/scripts/verify-chart-signature.sh --record "$CHART_VERSION"
+
+      - name: Bump the pins
+        run: bash gitops/scripts/bump-chart-version.sh "$ENV" "$CHART_VERSION"
+
+      # hosted vendors the secret contract at the staging pin (hosted#422).
+      # The copy moves with the pin in the same pull request, and
+      # scripts/check-secret-contract.py fails when the two disagree.
+      - name: Vendor the secret contract of the new chart
+        if: ${{ inputs.env == 'staging' }}
+        run: bash scripts/vendor-secret-contract.sh "$CHART_VERSION"
+
+      - name: Open the promotion PR
+        id: pr
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -euo pipefail
+          . gitops/scripts/lib/chart-version.sh
+          branch="promote/${ENV}-v${CHART_VERSION}"
+          git config user.name "zeroday-sdk-fanout[bot]"
+          git config user.email "zeroday-sdk-fanout[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          # The Application, its sibling releases, and the ledger. NEVER
+          # envs/<env>/values.yaml (gitops#448).
+          # A staging promotion also carries the drill pins (follower_envs,
+          # ADR-0095). check-promotion-order.py refuses a drill pin that
+          # differs from the staging pin.
+          git add gitops/chart-digests.yaml
+          if [ "$ENV" = staging ]; then
+            git add vendor/charts/secret-contract.yaml vendor/charts/secret-contract.version
+          fi
+          for e in "$ENV" $(follower_envs "$ENV"); do
+            git add "$(resolve_app "$e")"
+            while IFS= read -r sib; do
+              [ -n "$sib" ] && git add "$sib"
+            done < <(sibling_apps "$e")
+          done
+          git diff --cached --name-only | sed 's/^/  /'
+          git commit -m "chore(${ENV}): promote umbrella chart to ${CHART_VERSION}"
+          git push -u origin "$branch"
+          url="$(gh pr create \
+            --base main --head "$branch" \
+            --title "chore(${ENV}): promote umbrella chart to ${CHART_VERSION}" \
+            --body "$(printf '%s\n' \
+              "One-line chart-version promotion (ADR-0080, hosted#116)." "" \
+              "- env: \`${ENV}\`" \
+              "- chart version: \`${CHART_VERSION}\`" \
+              "- ledger: \`gitops/chart-digests.yaml\` records the digest and the zeroroot-ai/charts signature" "" \
+              "Rollback: run promote-bump again with the previous version." "" \
+              "Merge only after an \`Independent review:\` comment names the head SHA. Nothing merges this PR automatically (hosted#719).")")"
+          echo "opened $url"
+

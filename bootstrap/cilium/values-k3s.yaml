@@ -1,0 +1,11 @@
+# Cilium on one EC2 instance with k3s (hosted#446). k3s starts with
+# --disable-kube-proxy. The agent runs in the host network of the server
+# node, so the API server is on the loopback address.
+k8sServiceHost: 127.0.0.1
+k8sServicePort: 6443
+
+# The edge NodePort is 443 (ADR-0079). k3s permits the range 80-32767
+# (service-node-port-range in node-init.sh.tftpl), and Cilium serves the
+# NodePorts now, so it must permit the same range.
+nodePort:
+  range: "80,32767"

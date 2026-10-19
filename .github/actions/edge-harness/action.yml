@@ -1,0 +1,46 @@
+name: edge-harness
+description: >-
+  Bring the edge harness up on the runner (test/edge/harness.sh up) for the
+  edge exit tests. Checks out zeroroot-ai/charts, vendors its sub-charts,
+  renders the umbrella with the baseline profile, and starts the chart's own
+  Envoy, ratelimit and Redis under Docker (ADR-0079). Writes the env file the
+  assertion scripts source. hosted#2 filed the missing action and was closed
+  without it; the exit tests failed at this step on every run since the reset.
+outputs:
+  env-file:
+    description: Path of the env file the exit-test scripts source.
+    value: ${{ steps.up.outputs.env-file }}
+runs:
+  using: composite
+  steps:
+    # The chart source (ADR-0086): this repo holds none. Same checkout shape
+    # as ci.yml and the recreate verb.
+    - name: Check out zeroroot-ai/charts
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      with:
+        repository: zeroroot-ai/charts
+        path: charts
+
+    - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5
+      with:
+        version: v3.16.2
+
+    - name: Vendor the sub-charts
+      shell: bash
+      run: make -C "$GITHUB_WORKSPACE/charts" chart-deps
+
+    - name: Harness up
+      id: up
+      shell: bash
+      env:
+        CHARTS_ROOT: ${{ github.workspace }}/charts
+        WORK: ${{ runner.temp }}/edge-harness
+      run: |
+        set -euo pipefail
+        rm -rf "$WORK"; mkdir -p "$WORK"
+        test/edge/harness.sh up
+        test -s "$WORK/env.sh"
+        echo "env-file=$WORK/env.sh" >> "$GITHUB_OUTPUT"
+        # Later steps (the assertions, the diagnostics, harness down) see the
+        # same work dir and chart root.
+        { echo "WORK=$WORK"; echo "CHARTS_ROOT=$CHARTS_ROOT"; } >> "$GITHUB_ENV"

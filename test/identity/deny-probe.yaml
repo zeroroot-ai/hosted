@@ -1,0 +1,23 @@
+# The deny fixture of the identity exit test (hosted#428). The test owns it:
+# test/identity/deny-probe.sh applies it in its own namespace and deletes it.
+# It permits DNS and nothing else, so the OIDC discovery call from that namespace
+# must fail while this policy is in place. A cluster whose network plugin does
+# not enforce NetworkPolicy lets the call through, and the test fails.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: deny-identity-calls
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }

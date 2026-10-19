@@ -1,0 +1,5 @@
+# Failing fixture of scripts/check-spiffe-literal.py (hosted#435). A full
+# SPIFFE ID with the SaaS domain in a values file. The guard must report it.
+gibson-workloads:
+  spiffe:
+    envoyID: "spiffe://zeroroot.ai/platform/envoy"

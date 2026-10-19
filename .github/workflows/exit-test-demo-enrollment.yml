@@ -1,0 +1,306 @@
+# exit-test-demo-enrollment — the enrollment half of the demo
+# (zerocool-plugins#10, the spine of gibson#21).
+#
+# In plain words: A PERSON LOGS IN ONCE AND ENROLLS A CODING AGENT ONCE. THE
+# AGENT THEN RUNS WITH NO PERSON, AND WHAT IT DOES SHOWS UP IN THE PLATFORM
+# UNDER ITS OWN NAME AND THE NAME OF THE PERSON WHO ENROLLED IT.
+#
+# The venue is the baseline install that charts exit-test-baseline-install.yml proves
+# daily: `make recreate ENV=kind` with the CI rung on a 2-vCPU runner, charts
+# main, the seeded first admin. Each job below brings that install up the
+# same way (.github/actions/demo-enrollment-install, one recreate, no
+# overlay) and runs test/demo/exit-test-enrollment.sh, the demo script as a
+# program:
+#
+#   1. gibson login (the adk CLI) as the seeded first admin. The device flow
+#      is approved with no browser through the cluster's own login-client
+#      credential and the Zitadel session API, the API the login page calls.
+#   2. gibson agent enroll mints a one-time bootstrap token.
+#   3. The zerocool-agent image, pinned by digest, starts with the token and
+#      persists a host key under /tmp.
+#   4. A second start with no token registers on the host key.
+#   5. The daemon lists the agent as healthy with a fresh heartbeat.
+#   6. A completion goes through the SDK shim and the daemon records it. The
+#      baseline profile ships no model slot, so the step first registers a
+#      provider from the EXIT_TEST_ANTHROPIC_API_KEY secret.
+#   7. The agent submits a finding, reads it back from the tenant graph, and
+#      the person's own view lists it: finding -> agent -> person.
+#   8. The admin enables the GitLab connector and authorizes it with OAuth.
+#      A person grants access at the GitLab consent page.
+#   9. The agent calls one read-only GitLab tool against the owner's project.
+#  10. The audit trail resolves the call to the agent, and the identity to
+#      the person.
+#  11. The admin revokes the grant, and the agent's next call is refused.
+#
+# TWO CLUSTERS, ONE GATE. A finding needs no model, so `enrollment` runs
+# steps 1 to 5 and 7 on every run. `completion` runs steps 1 to 3 and 6 on
+# its own cluster, and only when a person has set the repository variable
+# EXIT_TEST_DEMO_COMPLETION_ENABLED=true and the secret
+# EXIT_TEST_ANTHROPIC_API_KEY (the shape exit-test-bank.yml in gibson uses:
+# GitHub allows no secrets context in a job-level `if`, so the variable is
+# the gate and a set variable with an empty secret fails and says so). Until
+# a person sets both, that job is skipped and the job summary says why. The
+# run never reads red for a key nobody has added (hosted#123), and never
+# reads green with the completion untested.
+#
+# NO JOB RUNS STEPS 8 TO 11. GitLab refuses a personal access token on its
+# MCP endpoint (run 37355956639), so the connector needs an OAuth grant, and
+# an OAuth grant needs a person at the GitLab consent page. A person runs
+# `test/demo/exit-test-enrollment.sh --phase gitlab` in the final session
+# (gibson#21, docs/demo/enrollment.md). The daemon side of the OAuth flow
+# has its own tests in gibson internal/platform/connectorauth.
+
+# Every step is a hard assertion. The steps that ran and the ones that
+# failed are the record docs/demo/enrollment.md is derived from.
+#
+# THE FAILING FIXTURE, offline: `--selftest` proves every assertion in the
+# drill and in the in-image probe can refuse. A gate that cannot refuse
+# proves nothing.
+#
+# ADR-0080: never on pull_request. It measures state on main and runs on push
+# to main and on its schedule. The merge gate is ci.yml, which runs the guards
+# through `make check`.
+name: exit-test-demo-enrollment
+
+on:
+  workflow_dispatch:
+    inputs:
+      charts_ref:
+        description: The zeroroot-ai/charts ref to install (branch, tag or SHA)
+        required: false
+        type: string
+        default: main
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap/kind/**'
+      - 'scripts/**'
+      - 'test/demo/**'
+      - 'Makefile'
+      - '.github/workflows/exit-test-demo-enrollment.yml'
+      - '.github/actions/demo-enrollment-install/**'
+  schedule:
+    # Daily, after the baseline install (04:00), the signup drill (04:30),
+    # chart signing (05:20) and the rate limit (05:40).
+    - cron: '0 6 * * *'
+
+concurrency:
+  group: exit-test-demo-enrollment-${{ github.ref }}
+  # A run that started finishes. On main an exit test is the proof (ADR-0080),
+  # so a newer push queues behind it and does not cancel it (hosted#585).
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NS: gibson
+  RELEASE: gibson
+  # The chart source, checked out by the install action. Every verb reads it
+  # from here.
+  CHARTS_ROOT: ${{ github.workspace }}/charts
+  # The agent under test: ghcr.io/zeroroot-ai/zerocool-agent, the digest
+  # zerocool-plugins main (967aaf6) published on 2026-09-20. Pinned by digest
+  # so a run measures one known build; bump it on purpose.
+  AGENT_IMAGE: ghcr.io/zeroroot-ai/zerocool-agent@sha256:e48e2e79ad8b084c09f15ecb0b995e80276d1931fceecc849295a7f30f3c8ce7
+  # The adk CLI (gibson login, gibson agent enroll), pinned to the adk main
+  # commit that carries sdk v0.179.0 (adk#39).
+  ADK_COMMIT: 27b31b7d99ad9b1a23f7277ac2ba74fd5195ff9e
+
+jobs:
+  guards:
+    name: guards (no cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: shellcheck
+        run: shellcheck -x test/demo/exit-test-enrollment.sh
+
+      # Proves the drill's assertions can fail: a login with no code, an
+      # enroll with no token, an absent or stale agent, a missing finding, an
+      # identity attributed to another person, a completion with no daemon
+      # record, a rewritten host key, and the probe's own refusals. Offline.
+      - name: exit-test selftest
+        run: bash test/demo/exit-test-enrollment.sh --selftest
+
+  enrollment:
+    name: enroll once, run unattended, report a finding (steps 1 to 5 and 7)
+    needs: guards
+    runs-on: ubuntu-latest
+    # One recreate on a 2-vCPU runner takes up to 90 minutes (WAIT_APPS_TIMEOUT
+    # in the install action), then the drill.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: The baseline install (CI rung) and the drill's tools
+        uses: ./.github/actions/demo-enrollment-install
+        with:
+          charts_ref: ${{ inputs.charts_ref || 'main' }}
+          ghcr_pull_token: ${{ secrets.GHCR_RO_PAT }}
+          github_token: ${{ github.token }}
+          # dashboard#107 diagnostics only: a heap snapshot near the limit.
+          overlay: demo
+          adk_commit: ${{ env.ADK_COMMIT }}
+
+      # dashboard#107 diagnostics. The heap is a normal ~50 MB before the drill
+      # (run 36382636545) and climbs past 500 MB after the Owner signs in. A
+      # background watcher reads the container's cgroup memory every 5s and,
+      # once it passes 250 MB, has Node write a heap snapshot (SIGUSR2, to
+      # /tmp) and copies it out, while the process is still alive. SPDY for
+      # exec and cp: the WebSocket path drops output (#253).
+      - name: Start the dashboard heap watcher (dashboard#107)
+        env:
+          KUBECTL_REMOTE_COMMAND_WEBSOCKETS: "false"
+        run: |
+          out="${{ runner.temp }}/dashboard-heap"
+          mkdir -p "$out"
+          cat > "$out/watch.sh" <<'WATCH'
+          #!/usr/bin/env bash
+          export KUBECTL_REMOTE_COMMAND_WEBSOCKETS=false
+          ns="$1" out="$2"
+          for _ in $(seq 1 720); do
+            pod="$(kubectl -n "$ns" get pods -l app.kubernetes.io/component=dashboard -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
+            mem="$(kubectl -n "$ns" exec "$pod" -c dashboard -- cat /sys/fs/cgroup/memory.current 2>/dev/null || echo 0)"
+            echo "$(date -u +%T) $pod memory.current=$mem" >> "$out/memory.log"
+            if [ "${mem:-0}" -gt 262144000 ]; then
+              kubectl -n "$ns" exec "$pod" -c dashboard -- kill -USR2 1
+              last=-1
+              for _ in $(seq 1 30); do
+                sleep 3
+                size="$(kubectl -n "$ns" exec "$pod" -c dashboard -- sh -c 'cat /tmp/*.heapsnapshot 2>/dev/null | wc -c' || echo 0)"
+                [ "$size" -gt 0 ] && [ "$size" = "$last" ] && break
+                last="$size"
+              done
+              f="$(kubectl -n "$ns" exec "$pod" -c dashboard -- sh -c 'ls -t /tmp/*.heapsnapshot' | head -1)"
+              kubectl -n "$ns" cp -c dashboard "$pod:$f" "$out/$(basename "$f")" && echo "copied $f" >> "$out/memory.log"
+              exit 0
+            fi
+            sleep 5
+          done
+          WATCH
+          chmod +x "$out/watch.sh"
+          nohup "$out/watch.sh" "$NS" "$out" > "$out/watch.out" 2>&1 &
+          echo "watcher started"
+
+      # EXIT TEST: steps 1 to 5 and 7, each a hard assertion.
+      - name: EXIT TEST — enroll once, run unattended, report a finding
+        env:
+          DIAG_DIR: ${{ runner.temp }}/enrollment-diag
+          GIBSON_SRC: ${{ github.workspace }}/gibson
+        run: |
+          mkdir -p "$DIAG_DIR"
+          bash test/demo/exit-test-enrollment.sh --phase enroll
+
+      - name: Upload the dashboard heap snapshot
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: dashboard-heap
+          path: ${{ runner.temp }}/dashboard-heap
+          if-no-files-found: warn
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: enrollment-diag
+          path: ${{ runner.temp }}/enrollment-diag
+          if-no-files-found: ignore
+
+      - name: Diagnose a failure
+        if: failure()
+        run: |
+          kubectl describe node | sed -n '/Allocated resources:/,/Events:/p' || true
+          kubectl -n "$NS" get pods -o wide || true
+          kubectl get tenants.gibson.zeroroot.ai -o wide || true
+          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40 || true
+          sts="$(kubectl -n "$NS" get sts -l app.kubernetes.io/component=daemon -o name | head -1)"
+          if [ -n "$sts" ]; then kubectl -n "$NS" logs "$sts" -c gibson --tail=200 | grep -iE 'capabilitygrant|register|heartbeat|complete|finding|identity|error' | tail -80 || true; fi
+          kubectl -n "$NS" logs deploy/gibson-ext-authz --tail=80 || true
+          kubectl -n "$NS" logs deploy/gibson-envoy -c envoy --tail=60 || true
+          kubectl -n "$NS" logs deploy/gibson-zitadel --tail=60 || true
+          docker ps -a --filter name=zerocool-demo || true
+          # A restarted container hides its last words unless asked for them
+          # (demo run 36346338176: the dashboard hung after sign-in, the
+          # liveness probe restarted it, and nothing showed why).
+          kubectl -n "$NS" get pods -o jsonpath='{range .items[*]}{range .status.containerStatuses[?(@.restartCount>0)]}{..name} restarts={.restartCount} last={.lastState.terminated.reason} exit={.lastState.terminated.exitCode}{"\n"}{end}{end}' || true
+          kubectl -n "$NS" logs deploy/gibson-dashboard --tail=120 || true
+          kubectl -n "$NS" logs deploy/gibson-dashboard --previous --tail=200 || true
+
+  completion:
+    name: a completion through the shim (steps 1 to 3 and 6)
+    needs: guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    # The gate. Until a person sets the variable, this job is skipped and the
+    # job list says so. It never reads PASS with nothing tested.
+    if: ${{ vars.EXIT_TEST_DEMO_COMPLETION_ENABLED == 'true' }}
+    env:
+      EXIT_TEST_ANTHROPIC_API_KEY: ${{ secrets.EXIT_TEST_ANTHROPIC_API_KEY }}
+    steps:
+      # The variable says the test is on. If the key is missing, the test
+      # cannot run, and saying so with a failure is the honest report.
+      - name: The key the completion runs on
+        run: |
+          if [ -z "${EXIT_TEST_ANTHROPIC_API_KEY}" ]; then
+            echo "::error title=exit-test-demo-enrollment cannot run the completion::EXIT_TEST_DEMO_COMPLETION_ENABLED is true but the repository secret EXIT_TEST_ANTHROPIC_API_KEY is empty. Add the key under Settings > Secrets and variables > Actions, or unset the variable (hosted#123)."
+            exit 1
+          fi
+          echo "the key is set"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: The baseline install (CI rung) and the drill's tools
+        uses: ./.github/actions/demo-enrollment-install
+        with:
+          charts_ref: ${{ inputs.charts_ref || 'main' }}
+          ghcr_pull_token: ${{ secrets.GHCR_RO_PAT }}
+          github_token: ${{ github.token }}
+          adk_commit: ${{ env.ADK_COMMIT }}
+
+      # EXIT TEST: a session, an enrolled agent, and one completion through
+      # the shim on the tenant's default provider.
+      - name: EXIT TEST — a completion through the shim
+        env:
+          DIAG_DIR: ${{ runner.temp }}/completion-diag
+          GIBSON_SRC: ${{ github.workspace }}/gibson
+        run: |
+          mkdir -p "$DIAG_DIR"
+          bash test/demo/exit-test-enrollment.sh --phase completion
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: completion-diag
+          path: ${{ runner.temp }}/completion-diag
+          if-no-files-found: ignore
+
+      - name: Diagnose a failure
+        if: failure()
+        run: |
+          kubectl -n "$NS" get pods -o wide || true
+          sts="$(kubectl -n "$NS" get sts -l app.kubernetes.io/component=daemon -o name | head -1)"
+          if [ -n "$sts" ]; then kubectl -n "$NS" logs "$sts" -c gibson --tail=200 | grep -iE 'provider|complete|llm|slot|error' | tail -80 || true; fi
+          kubectl -n "$NS" logs deploy/gibson-ext-authz --tail=60 || true
+
+  # The gate, written where the board and a reader look: a skipped job has
+  # no summary of its own, so this one names the reason.
+  completion-gate:
+    name: why the completion did not run
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    if: ${{ vars.EXIT_TEST_DEMO_COMPLETION_ENABLED != 'true' }}
+    steps:
+      - name: Record the reason
+        run: |
+          {
+            echo "### completion (step 6) SKIPPED"
+            echo
+            echo "The repository variable \`EXIT_TEST_DEMO_COMPLETION_ENABLED\` is not \`true\`. The baseline profile ships no model slot, so the completion needs the secret \`EXIT_TEST_ANTHROPIC_API_KEY\` and that variable, set by a person (hosted#123). Steps 1 to 5 and 7 ran in the enrollment job."
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "::notice title=completion skipped::EXIT_TEST_DEMO_COMPLETION_ENABLED is not true; step 6 did not run (hosted#123)"
+

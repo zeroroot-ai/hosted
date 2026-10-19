@@ -1,0 +1,32 @@
+{{/*
+SaaS overlay: entitlements-svc ClusterIP Service.
+
+Exposes gRPC :9091 (the EntitlementsService, SPIFFE mTLS) and the probe
+HTTP :9092 (/healthz only, billing#7) in-cluster so the daemon can reach
+the EntitlementsService. The daemon's ENTITLEMENTS_ENDPOINT seam knob in the
+core gibson-workloads chart is set to point at this Service by the gitops
+SaaS overlay composition.
+
+ClusterIP only (deploy#188) — no external surface.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "entitlements-svc.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "entitlements-svc.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "entitlements-svc.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: grpc
+      port: {{ .Values.port | default 9091 }}
+      targetPort: grpc
+      protocol: TCP
+      appProtocol: grpc
+    - name: probe
+      port: {{ .Values.probePort | default 9092 }}
+      targetPort: probe
+      protocol: TCP

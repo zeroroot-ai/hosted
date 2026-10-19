@@ -1,0 +1,27 @@
+{{/*
+SaaS overlay: billing ClusterIP Service.
+
+CROSS-CHART CONTRACT: each envoy.extraRoutes entry of the billing routes in
+the env's values.yaml names `gibson-billing-webhook` on port 8090
+(charts#375). The Service name and port here MUST match. The overlay render
+test checks each env.
+
+ClusterIP only (deploy#188): Stripe and the browser reach it
+through the Envoy edge, never directly.
+*/}}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "billing-webhook.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "billing-webhook.labels" . | nindent 4 }}
+spec:
+  type: ClusterIP
+  selector:
+    {{- include "billing-webhook.selectorLabels" . | nindent 4 }}
+  ports:
+    - name: http
+      port: {{ .Values.port | default 8090 }}
+      targetPort: http
+      protocol: TCP

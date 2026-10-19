@@ -1,0 +1,40 @@
+# DRILL env overlay. Derived from envs/staging/ and kept close to it on purpose
+# (ADR-0095): a drill that proves a bringup on a shape staging does not use is
+# not evidence about staging. Every path, host, bucket and address here follows
+# `drill`; where a comment below still says "staging" it is describing the
+# permanent environment as a different thing, not this file.
+#
+# What differs from staging, and only this:
+#   - global.domain and every host derive from drill.zeroroot.ai
+#   - the durable bucket is zeroroot-ai-drill-durable-<account>
+#   - the owner and from addresses are +drill
+#   - the self-hosted ARC runners and their manifests are absent: a drill proves
+#     the platform and the backup chain, not an add-on staging happens to carry
+#
+# THIS ENVIRONMENT IS DESTROYED AFTER EVERY RUN. Its stage 1 instance also arms
+# its own termination (self_terminate_after_minutes), so nothing here should be
+# treated as state that survives.
+# gibson-velero values for staging. Read by envs/drill/gibson-velero.yaml
+# through the $values source.
+#
+# The chart refuses to render without bucket.name: "Velero writes to the
+# durable bucket stage 0 created. There is no default that is safe to invent."
+# Before this file, the Application passed no values at all, so it could not
+# render. Staging showed the app as Unknown with that error, installed no
+# Velero, and took no backups (hosted#226).
+#
+# These are env facts and belong in git, for the same reason as
+# platformPostgres.backup in values.yaml: the AWS path reads its Applications
+# from git and has no per-bringup values seam. The bucket is stage 0's durable
+# bucket (substrate.env BUCKET_NAME), the same bucket the Postgres archive
+# writes to. An empty endpoint means real AWS S3 for the bucket's region.
+# scripts/check-overlay-velero-bucket.py fails CI when this file is missing,
+# names no bucket, or names a different bucket from the Postgres archive.
+#
+# The credentials are not here. scripts/keyring-to-cluster.sh writes
+# velero/velero-bucket-credential and velero/velero-repo-credentials from the
+# bringup keyring.
+bucket:
+  name: "zeroroot-ai-drill-durable-447184491447"
+  endpoint: ""
+  region: "us-east-1"

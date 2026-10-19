@@ -1,0 +1,138 @@
+# The Prometheus stack of staging (D26, hosted#423).
+#
+# `hosted` installs the stack as a seam. The chart keeps its ServiceMonitor and
+# PrometheusRule objects and installs no stack, so on prem a customer's own
+# stack reads the same objects. This Application installs the Prometheus
+# operator, Prometheus, Alertmanager and Grafana into `monitoring`.
+#
+#   - Prometheus selects each ServiceMonitor, PodMonitor and PrometheusRule
+#     of the cluster, not only the ones of this release, so the objects of
+#     the chart in `gibson` are loaded.
+#   - Alertmanager sends each alert by email through the SMTP relay of stage
+#     0. Its configuration is the Secret alertmanager-config, which the
+#     ExternalSecret in manifests/monitoring/ renders from the relay
+#     credential in the secret store. A paging service comes with an on-call
+#     rotation, not now.
+#   - Retention is 2d, with strict memory limits: this environment is one node.
+#   - No component reads a Secret outside `monitoring` (hosted#505). The
+#     chart's own RBAC is off (global.rbac.create: false), and
+#     gitops/monitoring-rbac/ holds the narrowed RBAC. The operator watches
+#     `monitoring` and `gibson` only. Grafana watches ConfigMaps only.
+#     kube-state-metrics runs without the secrets collector. The admission
+#     webhook gets its certificate from cert-manager, so no patch Job needs
+#     RBAC. scripts/check-monitoring-rbac.py holds each of these.
+#   - The control plane components are not scraped: k3s runs them in one process.
+#
+# Sync wave -10: the stack and its CRDs land before the umbrella, so the
+# chart renders its monitor and rule objects on the first sync.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: https://prometheus-community.github.io/helm-charts
+      chart: kube-prometheus-stack
+      targetRevision: 91.9.0
+      helm:
+        releaseName: monitoring
+        valuesObject:
+          global:
+            rbac:
+              create: false
+          kubeEtcd: { enabled: false }
+          kubeScheduler: { enabled: false }
+          kubeControllerManager: { enabled: false }
+          kubeProxy: { enabled: false }
+          prometheusOperator:
+            namespaces:
+              releaseNamespace: true
+              additional: [gibson]
+            # Prometheus and Alertmanager live in `monitoring` only, so the
+            # operator watches Secrets there only.
+            prometheusInstanceNamespaces: [monitoring]
+            alertmanagerInstanceNamespaces: [monitoring]
+            alertmanagerConfigNamespaces: [monitoring]
+            thanosRulerInstanceNamespaces: [monitoring]
+            admissionWebhooks:
+              certManager:
+                enabled: true
+            resources:
+              requests: { cpu: 20m, memory: 64Mi }
+              limits: { memory: 256Mi }
+          prometheus:
+            prometheusSpec:
+              # Every monitor and rule of the cluster, not only this release's.
+              serviceMonitorSelectorNilUsesHelmValues: false
+              podMonitorSelectorNilUsesHelmValues: false
+              ruleSelectorNilUsesHelmValues: false
+              probeSelectorNilUsesHelmValues: false
+              retention: 2d
+              resources:
+                requests: { cpu: 50m, memory: 1Gi }
+                limits: { memory: 1536Mi }
+          alertmanager:
+            alertmanagerSpec:
+              # Rendered by manifests/monitoring/alertmanager-config.yaml.
+              configSecret: alertmanager-config
+              resources:
+                requests: { cpu: 10m, memory: 32Mi }
+                limits: { memory: 128Mi }
+          grafana:
+            rbac:
+              useExistingClusterRole: monitoring-grafana-configmaps
+            sidecar:
+              dashboards: { resource: configmap }
+              datasources: { resource: configmap }
+              alerts: { resource: configmap }
+              plugins: { resource: configmap }
+              notifiers: { resource: configmap }
+            persistence: { enabled: false }
+            resources:
+              requests: { cpu: 20m, memory: 96Mi }
+              limits: { memory: 256Mi }
+          kube-state-metrics:
+            collectorsExclude: [secrets]
+            resources:
+              requests: { cpu: 10m, memory: 32Mi }
+              limits: { memory: 128Mi }
+          prometheus-node-exporter:
+            resources:
+              requests: { cpu: 10m, memory: 16Mi }
+              limits: { memory: 64Mi }
+    - repoURL: https://github.com/zeroroot-ai/hosted
+      targetRevision: main
+      path: gitops/envs/staging/manifests/monitoring
+    - repoURL: https://github.com/zeroroot-ai/hosted
+      targetRevision: main
+      path: gitops/monitoring-rbac
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  # The Grafana chart makes a random admin password on each render. Argo
+  # renders offline, so without this rule each refresh rewrites the Secret and
+  # the Application never settles. The first sync writes it, and it stays.
+  # Grafana has no ingress: an operator reaches it with a port-forward.
+  ignoreDifferences:
+    - group: ""
+      kind: Secret
+      name: monitoring-grafana
+      namespace: monitoring
+      jsonPointers:
+        - /data
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - RespectIgnoreDifferences=true
+      # The CRDs of the operator are larger than the annotation limit of a
+      # client-side apply.
+      - ServerSideApply=true

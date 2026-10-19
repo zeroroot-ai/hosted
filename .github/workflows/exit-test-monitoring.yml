@@ -1,0 +1,77 @@
+# exit-test-monitoring: a test alert leaves Alertmanager by email, and the
+# monitoring stack fits its memory limits (hosted#509, ADR-0083).
+#
+# The script is test/monitoring/exit-test-alert-delivery.sh. It runs on the
+# cluster through the SSM forward of `make with-cluster`, in one step,
+# because the forward lives as long as the command that owns it.
+#
+# WHEN IT RUNS (ADR-0080): on main each day against staging, and on dispatch
+# against a named env. Never on a pull request.
+#
+# The mailbox is Google Workspace, which no CI credential reads. The run
+# proves that the relay accepted the message. The owner confirms the message
+# in alerts@zeroroot.ai in the final session (docs: release/final-session.md).
+name: exit-test-monitoring
+
+on:
+  schedule:
+    - cron: '20 7 * * *'
+  workflow_dispatch:
+    inputs:
+      env:
+        description: The env whose monitoring stack is proved
+        required: true
+        type: choice
+        # No prod: scripts/with-cluster.sh reaches EC2 envs only, and the role
+        # exit-test-node-access trusts staging and drill only (hosted#656).
+        options: [staging, drill]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: exit-test-monitoring-${{ inputs.env || 'staging' }}
+  cancel-in-progress: false
+
+jobs:
+  monitoring:
+    name: a test alert leaves by email on ${{ inputs.env || 'staging' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env || 'staging' }}
+    timeout-minutes: 20
+    env:
+      ENV: ${{ inputs.env || 'staging' }}
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Configure AWS credentials (OIDC role assumption)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+        with:
+          role-to-assume: ${{ vars.EXIT_TEST_NODE_ROLE_ARN }}
+          role-session-name: gh-actions-exit-test-monitoring-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Install kubectl and the SSM session-manager plugin
+        run: |
+          set -euo pipefail
+          if ! command -v kubectl >/dev/null; then
+            curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+          fi
+          if ! command -v session-manager-plugin >/dev/null; then
+            curl -fsSL -o /tmp/ssm.deb "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+            sudo dpkg -i /tmp/ssm.deb
+          fi
+          for t in kubectl aws session-manager-plugin; do command -v "$t" >/dev/null || { echo "$t required"; exit 1; }; done
+
+      - name: The check can fail
+        run: |
+          scripts/install-bats.sh "$HOME/.local"
+          "$HOME/.local/bin/bats" tests/harness/alert-delivery.bats
+
+      - name: EXIT TEST — a test alert leaves by email, and the stack fits its limits
+        env:
+          PROBE_ID: run-${{ github.run_id }}
+        run: make with-cluster ENV="${ENV}" CMD="test/monitoring/exit-test-alert-delivery.sh"

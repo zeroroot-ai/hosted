@@ -1,0 +1,30 @@
+name: smoke-prereqs
+description: >-
+  What the signup smoke needs on a fresh runner (scripts/smoke-signup.sh,
+  test/signup/driver.mjs): Node 20 or later, the driver's packages from the
+  committed lockfile (npm ci), the Chromium of Playwright, and DIAG_DIR, where
+  the driver writes the page it stopped on. Every job that runs the smoke uses
+  this one action: the drill up and restore jobs, promote-staging and the
+  signup exit test. The cluster tools (helm, kubectl, the SSM plugin) are
+  pinned in .github/actions/install-cluster-tools, which each of those jobs
+  runs already.
+inputs:
+  diag-dir:
+    description: The directory for the page evidence of the driver.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Node, the driver packages, Chromium and the evidence directory
+      shell: bash
+      env:
+        DIAG: ${{ inputs.diag-dir }}
+      run: |
+        set -euo pipefail
+        command -v node >/dev/null || { echo "::error::node is not on PATH; the signup driver needs Node 20 or later"; exit 1; }
+        major="$(node -p 'process.versions.node.split(".")[0]')"
+        [ "$major" -ge 20 ] || { echo "::error::node ${major} is too old; the signup driver needs Node 20 or later"; exit 1; }
+        npm --prefix test/signup ci --no-audit --no-fund
+        npx --prefix test/signup playwright install --with-deps chromium
+        mkdir -p "$DIAG"
+        echo "DIAG_DIR=${DIAG}" >> "$GITHUB_ENV"

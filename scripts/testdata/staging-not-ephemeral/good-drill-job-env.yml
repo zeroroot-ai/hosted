@@ -1,0 +1,16 @@
+# The drill shape. The job env is drill, so each verb acts on drill.
+on:
+  schedule:
+    - cron: "10 4 * * *"
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    env:
+      ENV: drill
+    steps:
+      - name: Recreate
+        run: make recreate ENV="${ENV}"
+      - name: Tear down
+        run: make teardown ENV="${ENV}" MODE=wipe
+      - name: Read staging, which is not a verb
+        run: make with-cluster ENV=staging CMD='kubectl get nodes'

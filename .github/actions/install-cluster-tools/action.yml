@@ -1,0 +1,15 @@
+name: install-cluster-tools
+description: >-
+  Install the pinned helm, kubectl and SSM session-manager plugin, each checked
+  against its pinned sha256 before use. The pins live in pins.env and nowhere
+  else. The binary that the runner image ships is never used: an unpinned tool
+  makes a run depend on the day it ran (hosted drill row 29). The offline suite
+  is tests/harness/install-cluster-tools.bats.
+runs:
+  using: composite
+  steps:
+    - name: Install helm, kubectl and the SSM session-manager plugin
+      shell: bash
+      env:
+        CLUSTER_TOOLS_DIR: ${{ runner.temp }}/cluster-tools
+      run: "$GITHUB_ACTION_PATH/install.sh"

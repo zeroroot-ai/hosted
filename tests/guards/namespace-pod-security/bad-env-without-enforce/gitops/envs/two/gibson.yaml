@@ -1,0 +1,17 @@
+# Fixture of scripts/check-namespace-pod-security.py.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gibson
+  namespace: argocd
+spec:
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gibson
+  syncPolicy:
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
+    syncOptions:
+      - CreateNamespace=true

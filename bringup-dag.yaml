@@ -1,0 +1,150 @@
+# =============================================================================
+# bringup-dag.yaml — the single declared platform bringup order (deploy#757 /
+# PRD deploy#750; rewritten for the single-umbrella topology, deploy#1166).
+#
+# One place that declares the order the platform comes up in, what each stage
+# depends on, and the readiness gate that says it is up. Two consumers:
+#
+#   - scripts/bringup-status.sh reads this file and reports the FIRST stage
+#     that is not yet ready — so an opaque Init/CrashLoop points at the real
+#     upstream cause instead of requiring manual archaeology.
+#   - cross-chart-check Check 25 asserts the graph invariants
+#     (no dangling depends_on, acyclic, order consistent with dependencies)
+#     AND, against the gitops repo, Application parity: every `argo:<app>`
+#     owner must name an Application that really exists in the reference env's
+#     Argo surface (envs/<env>/apps/*.yaml + envs/<env>/gibson.yaml), with a
+#     matching effective sync-wave, and every such Application must be
+#     declared here. Repointed from the retired apps/<env> tree in deploy#1167
+#     — it had been self-skipping since the single-main collapse, which is why
+#     the deploy#1166 breakage (12 argo: owners naming retired Applications)
+#     reached main unguarded.
+#
+# Topology (post open-core consolidation + single-main gitops collapse):
+# the platform is ONE ArgoCD Application (`gibson`, the umbrella chart from
+# oci://ghcr.io/zeroroot-ai/charts). The former per-component Applications
+# (gibson-crds, cert-manager, external-secrets, spire, neo4j, openfga,
+# zitadel, gibson-workloads, ...) are umbrella subchart dependencies ordered
+# by IN-CHART sync-waves, or Terraform helm_releases applied by the recreate apply
+# before ArgoCD exists (module.bootstrap-addons: LB controller,
+# Karpenter). cert-manager, external-secrets and external-dns are
+# umbrella subcharts since deploy#1728 (ADR-0083). The SaaS overlay
+# Applications (entitlements-svc, billing-webhook) remain real, separate
+# Applications reconciled from gitops/envs/<env>/apps.
+#
+# `wave` semantics: `pre-argo` for Terraform stages (applied by the recreate apply
+# before ArgoCD); an integer for `argo:` stages (the Application's own
+# EFFECTIVE sync-wave, which is 0 when it carries no
+# argocd.argoproj.io/sync-wave annotation — ArgoCD's own default); `in-chart`
+# for substages that come up inside the umbrella release (ordered by in-chart
+# sync-waves + operator-reconcile conditions + init-container socket-waits).
+#
+# A sync-wave orders Applications only WITHIN one parent sync. The umbrella
+# (envs/<env>/gibson.yaml) and the SaaS overlays (envs/<env>/apps, reconciled
+# by envs/<env>/root.yaml) sit in two different Argo trees, so NO annotation
+# on the overlays can express "come up after the umbrella". `depends_on` is
+# what carries that here, and validateBringupDeps enforces it. Do not invent
+# a sync-wave to imply cross-tree ordering it cannot deliver (deploy#1167).
+# =============================================================================
+
+stages:
+  # --- pre-Argo (Terraform, the recreate apply) -----------------------------
+  # Aurora and the Secrets Manager seed are GONE (ADR-0083, deploy#1744):
+  # platform Postgres is CNPG inside the umbrella, and OpenBao seeds itself
+  # (deploy#1759). Stage 1 mints no secret and hosts no database.
+  - name: bootstrap-addons
+    wave: pre-argo
+    owner: terraform:module.bootstrap-addons
+    depends_on: []
+    readiness: "AWS LB controller + Karpenter helm_releases applied and Deployments Available; EBS CSI + metrics-server EKS addons Active"
+    blocked_hint: "Terraform-owned, NOT ArgoCD. cert-manager, external-secrets and external-dns are NOT here any more: they are umbrella subcharts at sync-wave -20 (deploy#1728), so the umbrella orders them ahead of its own ExternalSecrets and Certificates."
+
+  - name: argocd
+    wave: pre-argo
+    owner: terraform:module.argocd
+    depends_on: [bootstrap-addons]
+    readiness: "argocd server + repo-server Available; repo-creds + ghcr-charts OCI creds Secrets present; app-of-apps Application created"
+    blocked_hint: "Needs TF_VAR_argocd_github_pat at apply time (deploy#1107) — without it the repo-creds/ghcr-charts Secrets are never created and the umbrella 401s into ComparisonError."
+
+  # --- ArgoCD (envs/<env>) --------------------------------------------------
+  - name: gibson-umbrella
+    wave: 0
+    owner: argo:gibson
+    depends_on: [argocd]
+    readiness: "Application gibson Synced + Healthy (the umbrella aggregates every subchart: crds, spire, datastores, zitadel, operators, workloads)"
+    blocked_hint: "The whole platform is inside this one Application, ordered by in-chart sync-waves. Localise with the substages below + `kubectl get pods -n gibson` + `kubectl get application gibson -n argocd -o yaml | yq '.status.resources'`."
+
+  - name: entitlements-svc
+    wave: 0
+    owner: argo:gibson-entitlements-svc
+    depends_on: [gibson-umbrella]
+    readiness: "gibson-entitlements-svc Application Healthy; daemon dials the seam over SPIFFE mTLS"
+    blocked_hint: "SaaS overlay (envs/<env>/apps). Needs the ClusterSPIFFEID class gibson-gibson (gitops#355) and umbrella chart >= 0.105.0 for the seam env vars (gitops#359)."
+
+  - name: billing-webhook
+    wave: 0
+    owner: argo:gibson-billing-webhook
+    depends_on: [gibson-umbrella]
+    readiness: "gibson-billing-webhook Application Healthy; Stripe deliveries to /api/billing/webhook return 2xx"
+    blocked_hint: "SaaS overlay. The Envoy /api/billing/webhook -> /webhook rewrite ships in umbrella chart >= 0.108.0; earlier pins 404 every delivery."
+
+  # --- CI runners (deploy#1515) ---------------------------------------------
+  # Staging only (hosted#407). The `staging-ephemeral` runners serve the e2e
+  # workflows of `gibson` and `setec`, which must reach a Service in the
+  # cluster. The two Applications are parked in gitops/envs/staging/pending/.
+  # Prod has no runner: no workflow needs one.
+  #
+  # NOT on the critical path: nothing waits on ARC to come up, and no stage
+  # depends on it. It is declared here because the DAG must be COMPLETE — an
+  # undeclared Application is one nothing describes when bringup stalls.
+  - name: arc-controller
+    wave: 0
+    owner: argo:arc-controller
+    depends_on: [argocd]
+    readiness: "arc-controller Application Healthy; the gha-runner-scale-set-controller Deployment is Available in arc-systems"
+    blocked_hint: "Needs the argocd stage only. Not on the bringup critical path — a stalled bringup is never waiting on this."
+
+  - name: arc-runners
+    wave: 0
+    owner: argo:arc-runners-zeroroot
+    depends_on: [arc-controller]
+    readiness: "arc-runners-zeroroot Application Healthy; the <env>-ephemeral scale-set registers against the org and its listener is Running"
+    blocked_hint: "Needs the GitHub credential at arc-github-app in the platform OpenBao KV (operator-supplied — a PAT has no Terraform-manageable material) and an org runner group named <env>-ephemeral. Without the explicit group the scale-set registers into Default, the broker never assigns jobs, and the symptom is a healthy listener with work queued forever (gitops#348)."
+
+# In-chart substages of the gibson umbrella (the deep tail). These are ordered
+# by in-chart sync-waves + operator-reconcile conditions + init-container
+# socket waits, NOT by separate Applications, so they carry no `argo:`/`wave`.
+# bringup-status.sh observes each with a direct kubectl gate.
+substages:
+  - name: zitadel-admin-token
+    wave: in-chart
+    owner: operator:platform-operator
+    depends_on: [gibson-umbrella]
+    readiness: "PlatformBootstrap condition AdminTokenReady=True (the iam-admin PAT is minted and valid)"
+    blocked_hint: "PlatformBootstrap condition AdminTokenReady is not True: read its reason (WaitingForAdminToken => Zitadel is up but the iam-admin-pat Secret is not written yet)."
+
+  - name: platform-bootstrap
+    wave: in-chart
+    owner: operator:platform-operator
+    depends_on: [zitadel-admin-token]
+    readiness: "PlatformBootstrap condition Ready=True; gibson-master-key Secret minted (via OpenBao transit)"
+    blocked_hint: "Daemon Init blocks on gibson-master-key until PlatformBootstrap reconcile mints it."
+
+  - name: daemon
+    wave: in-chart
+    owner: chart:gibson-workloads/daemon
+    depends_on: [platform-bootstrap]
+    readiness: "the daemon StatefulSet (app.kubernetes.io/component=daemon) has a ready replica"
+    blocked_hint: "Init waits for the SPIRE agent socket (60s fail-fast) and the master-key Secret."
+
+  - name: edge
+    wave: in-chart
+    owner: chart:gibson-workloads/edge
+    depends_on: [daemon]
+    readiness: "ext-authz + envoy Ready; envoy edge Certificate Issued; dashboard Ready"
+    blocked_hint: "Edge cert must request app/api/www/apex (NOT the internal .svc SAN) from LE (deploy#728)."
+
+# The signup->run-mission smoke is NOT a bringup substage: it is asserted by
+# `make eks-smoke` (the post-recreate verification step) and is not
+# observable from cluster state. Declaring it here made bringup-status.sh
+# structurally unable to exit 0 (the pseudo-substage always read not-ready),
+# so eks-acceptance's converge poll could never pass (deploy#1166).

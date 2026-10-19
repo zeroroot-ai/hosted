@@ -1,0 +1,10 @@
+# The instance types that a drill cluster can use (hosted#448).
+# `make recreate ENV=drill INSTANCE_TYPE=<type>` and the dispatch input of
+# drill.yml accept a type from this list only. The first type is the default
+# of envs/drill.tfvars.
+#
+# Each type supports nested virtualization (hosted#446). Terraform turns it on
+# for the family (local.nested_virtualization in main.tf), and the recreate
+# verb then proves that /dev/kvm exists on the node.
+m8i.2xlarge
+m8i.4xlarge

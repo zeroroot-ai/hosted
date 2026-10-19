@@ -1,0 +1,25 @@
+# Fixture: a verb on a schedule is an unattended teardown or bringup. The
+# guard must REJECT any trigger beyond workflow_dispatch.
+name: recreate
+on:
+  schedule:
+    - cron: '0 5 * * *'
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        type: choice
+        options: [prod]
+      restore_from:
+        required: false
+        type: string
+concurrency:
+  group: bringup-${{ inputs.env }}
+  cancel-in-progress: false
+jobs:
+  recreate:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    steps:
+      - name: make recreate
+        run: make recreate ENV="${{ inputs.env }}"

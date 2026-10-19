@@ -1,0 +1,4 @@
+# The node counts the drill environment accepts (hosted#453). One per line.
+# 2 gives a proof that needs a second node of the same class a cluster (D57).
+1
+2

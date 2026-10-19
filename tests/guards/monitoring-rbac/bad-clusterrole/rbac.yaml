@@ -1,0 +1,9 @@
+# The upstream operator ClusterRole: it reads every Secret of the cluster.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring-kube-prometheus-operator
+rules:
+  - apiGroups: [""]
+    resources: [configmaps, secrets]
+    verbs: [get, list, watch, create, update, delete]

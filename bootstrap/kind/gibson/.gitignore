@@ -1,0 +1,9 @@
+# Terraform local state — source of idempotency for credential generation.
+# Do NOT commit. If lost, re-running `terraform apply` regenerates new
+# credentials (which breaks seed-credential services). Back up or use an
+# S3 remote backend for multi-developer teams.
+.terraform/
+.terraform.lock.hcl
+terraform.tfstate
+terraform.tfstate.backup
+terraform.tfvars

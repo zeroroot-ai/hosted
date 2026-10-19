@@ -1,0 +1,8 @@
+# Self-test fixture for scripts/check-2core-overlay.py: one request raised past
+# the whole 2-vCPU budget. Layered after the clean overlays, it MUST make the
+# guard fail. Never applied to a cluster.
+gibson-workloads:
+  gibson:
+    resources:
+      requests:
+        cpu: 2500m

@@ -1,0 +1,242 @@
+# exit-test-signup — launch blocker 2 (hosted#122).
+#
+# The exit test, in plain words: A NEW CUSTOMER TYPES THEIR ADDRESS INTO THE
+# SIGNUP FORM, RECEIVES THE VERIFICATION MAIL, CLICKS THE LINK, AND GETS A
+# WORKING WORKSPACE, WITH NOBODY TOUCHING THE DATABASE BY HAND.
+#
+# Measured as: an address receives the verification mail and the account
+# reaches a Ready workspace with no manual DB touch. The scorecard reads the
+# latest run of THIS workflow by name. It must stay `exit-test-signup.yml`,
+# in this repo.
+#
+# WHY kind + Mailpit, NOT SES. The production transport is SES, and SES
+# production access sits with the owner (hosted#123). The board's rule allows
+# a fake mail sink, and the chart ships one: Mailpit, a real SMTP server with
+# a read API. The daemon crosses a real SMTP transport either way; only the
+# relay behind it differs, so this test keeps measuring the same chain when
+# SES lands. The estate is torn down, so the test brings up its own cluster:
+# `make recreate ENV=kind`, the verb an operator runs, with the CI rung that
+# fits a 2-vCPU runner (the same shape charts exit-test-baseline-install proves
+# daily) plus ONE overlay, test/signup/values.yaml, that swaps the baseline
+# profile's non-delivering "log" transport for the Mailpit sink.
+#
+# WHAT THE DRILL PROVES (test/signup/exit-test-signup.sh):
+#   - the signup form accepts a unique per-run address;
+#   - a verification mail is DELIVERED, and the token is taken from the
+#     delivered body, never from the database;
+#   - following the mailed link and setting a password completes signup;
+#   - the Tenant CR reaches phase=Ready, the tenant namespace exists, and
+#     the founding member reaches Active (gibson#1510);
+#   - no kubectl or SQL write anywhere in the path. The only cluster writes
+#     are the platform's own.
+#
+# THE FAILING FIXTURE, in the same run: completion with the verification
+# step skipped must bounce, a forged token must bounce, and the drill's
+# consumed token must not redeem twice. If any of those reaches
+# /signup/complete, the run goes red. A gate that cannot refuse proves
+# nothing.
+#
+# TWO JOBS:
+#   guards  offline, no cluster, no credential. Proves the drill's own
+#           assertions (mail parsing, member-Active check) can fail.
+#   state   the exit test proper, on a kind cluster this job creates.
+#
+# A skip is a failure: the driver has no code path that exits 0 without the
+# drill having run against a delivered mail.
+#
+# ADR-0080: never on pull_request. It measures state on main for the board
+# and runs on push to main and on its schedule. The merge gate is ci.yml,
+# which runs the guards through `make check`.
+name: exit-test-signup
+
+on:
+  workflow_dispatch:
+    inputs:
+      charts_ref:
+        description: The zeroroot-ai/charts ref to install (branch, tag or SHA)
+        required: false
+        type: string
+        default: main
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap/kind/**'
+      - 'scripts/**'
+      - 'test/signup/**'
+      - 'test/platform-owner/**'
+      - 'Makefile'
+      - '.github/workflows/exit-test-signup.yml'
+  schedule:
+    # Daily, ahead of the launch scorecard run. 04:00 is the baseline install,
+    # 05:20 chart signing, 05:40 the rate limit; this one takes the slot between.
+    - cron: '30 4 * * *'
+
+concurrency:
+  group: exit-test-signup-${{ github.ref }}
+  # A run that started finishes. On main an exit test is the proof (ADR-0080),
+  # so a newer push queues behind it and does not cancel it (hosted#585).
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NS: gibson
+  RELEASE: gibson
+  # The chart source, checked out below. Every verb reads it from here.
+  CHARTS_ROOT: ${{ github.workspace }}/charts
+
+jobs:
+  guards:
+    name: guards (no cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: shellcheck
+        run: shellcheck -x test/signup/exit-test-signup.sh
+
+      # Proves the drill's assertions can fail: a mail with no token is
+      # refused, a link off the product origin is refused, a duplicate
+      # delivery is an error, and a founding member stuck Invited is
+      # rejected. Offline: no cluster, no network, no sudo.
+      - name: exit-test selftest
+        run: bash test/signup/exit-test-signup.sh --selftest
+
+  state:
+    name: signup on a plain Kubernetes cluster
+    needs: guards
+    runs-on: ubuntu-latest
+    # One recreate on a 2-vCPU runner takes up to 90 minutes (WAIT_APPS_TIMEOUT
+    # below), then the drill and its provisioning wait.
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # The chart source. A dispatch names the ref; push and schedule install
+      # charts main: the exit test measures the platform as it ships today.
+      - name: Check out zeroroot-ai/charts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: zeroroot-ai/charts
+          ref: ${{ inputs.charts_ref || 'main' }}
+          path: charts
+
+      - name: Record the chart source under test
+        run: |
+          echo "charts: $(git -C "$CHARTS_ROOT" rev-parse HEAD) ($(git -C "$CHARTS_ROOT" describe --tags --always))"
+          test -d "$CHARTS_ROOT/helm/gibson" || { echo "::error::no chart source at $CHARTS_ROOT/helm/gibson"; exit 1; }
+
+      # The mirror images stage 0 and the kind node pull live on ghcr.io
+      # packages of this org. The job's own token reads them.
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # The install needs more disk than the runner's root volume has free
+      # (charts exit-test-baseline-install.yml carries the measurement).
+      - name: Free runner disk
+        uses: ./.github/actions/free-runner-disk
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
+        with:
+          version: v3.16.2
+
+      # kind + kubectl only. `make recreate ENV=kind` creates the cluster
+      # itself (with /dev/kvm of the host mounted into the node).
+      - name: Install kind + kubectl
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
+        with:
+          install_only: true
+
+      - name: Install Terraform
+        uses: ./.github/actions/install-terraform
+
+      # The one fact every scheduling failure hangs on.
+      - name: Runner facts
+        run: |
+          echo "runner cpus: $(nproc)"
+          free -h | head -2
+
+      # Stage 0 (ADR-0083): the durable bucket, the stage 0 relay, the DNS
+      # sub-zone and the bringup keyring, on the runner's kind Docker network.
+      # GHCR_RO_PAT, not GITHUB_TOKEN: the first-party images live on packages
+      # owned by OTHER repos. The token becomes the keyring member
+      # GHCR_PULL_TOKEN; the sidecar seeds ghcr-pull-secret from it.
+      - name: Stage 0 (make substrate ENV=kind)
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_RO_PAT }}
+        run: |
+          if [ -z "${GHCR_PULL_TOKEN}" ]; then
+            echo "::error::GHCR_RO_PAT is not available. The keyring member GHCR_PULL_TOKEN stays empty, first-party images will not pull and the install cannot succeed."
+            exit 1
+          fi
+          SUBSTRATE_DIR="$RUNNER_TEMP/substrate" make substrate ENV=kind
+
+      # ONE PATH: the verb an operator runs, with the CI rung and the one
+      # overlay this test adds. The rung lowers scheduling REQUESTS so the
+      # platform fits the 2-vCPU runner; scripts/check-2core-overlay.py keeps
+      # the rung plus this overlay under budget on every PR.
+      - name: Stand the platform up (make recreate ENV=kind + the Mailpit overlay)
+        run: |
+          SUBSTRATE_DIR="$RUNNER_TEMP/substrate" \
+            RUNG=ci \
+            OVERLAY=signup \
+            WAIT_APPS_TIMEOUT=5400 make recreate ENV=kind
+
+      - name: Workloads reach Ready
+        run: |
+          set -euo pipefail
+          kubectl -n "$NS" wait --for=condition=Available deploy --all --timeout=15m
+          for sts in $(kubectl -n "$NS" get sts -o name); do
+            kubectl -n "$NS" rollout status "$sts" --timeout=10m
+          done
+
+      # The install's own seeded tenant must be Ready before the drill: a
+      # broken provisioning chain would otherwise surface as a confusing
+      # signup timeout instead of as the bringup failure it is.
+      - name: The seeded tenant reaches Ready
+        run: |
+          set -euo pipefail
+          TENANT=$(kubectl get tenants.gibson.zeroroot.ai -o jsonpath='{.items[0].metadata.name}')
+          if [ -z "$TENANT" ]; then
+            echo "::error::the install seeded no Tenant CR"
+            exit 1
+          fi
+          kubectl wait --for=jsonpath='{.status.phase}'=Ready "tenant/${TENANT}" --timeout=15m
+
+      - name: The smoke prerequisites (browser driver, evidence directory)
+        uses: ./.github/actions/smoke-prereqs
+        with:
+          diag-dir: ${{ runner.temp }}/signup-diag
+      # The owner's first sign-in runs through test/platform-owner/driver.mjs,
+      # which needs otpauth for the TOTP enrollment.
+      - name: The packages of the platform-owner driver (the owner's first sign-in)
+        run: npm --prefix test/platform-owner ci --no-audit --no-fund
+
+      # EXIT TEST: the drill and the failing fixture, in one script.
+      - name: EXIT TEST — the mail arrives and the workspace reaches Ready
+        run: bash test/signup/exit-test-signup.sh
+
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: signup-diag
+          path: ${{ runner.temp }}/signup-diag
+          if-no-files-found: ignore
+
+      - name: Diagnose a failure
+        if: failure()
+        run: |
+          kubectl describe node | sed -n '/Allocated resources:/,/Events:/p' || true
+          kubectl -n "$NS" get pods -o wide || true
+          kubectl get tenants.gibson.zeroroot.ai -o wide || true
+          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -40 || true
+          sts="$(kubectl -n "$NS" get sts -l app.kubernetes.io/component=daemon -o name | head -1)"
+          if [ -n "$sts" ]; then kubectl -n "$NS" logs "$sts" -c gibson --tail=120 || true; fi
+          kubectl -n "$NS" logs deploy/gibson-dashboard --tail=60 || true
+          kubectl -n "$NS" logs "deploy/${RELEASE}-mailpit" --tail=30 || true
+          kubectl -n "$NS" logs deploy/gibson-tenant-operator --tail=60 || true

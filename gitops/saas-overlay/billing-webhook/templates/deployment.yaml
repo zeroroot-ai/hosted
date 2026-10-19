@@ -1,0 +1,240 @@
+{{/*
+SaaS overlay: the billing Deployment.
+
+Runs ghcr.io/zeroroot-ai/billing cmd/billing-webhook on :8090 as plain
+HTTP/1.1 behind the Envoy edge. The edge reaches it through the
+envoy.extraRoutes entries in each env's values.yaml (charts#375). It serves:
+
+  POST /webhook           the Stripe webhook. Stripe signs each delivery and
+                          the handler verifies the signature.
+  GET  /signup-step       the redirect endpoint of the signup step. The opaque
+                          step token is the credential; the daemon checks it.
+  GET  /account           the redirect endpoint to the Customer Portal. billing
+  GET  /account/callback  signs the user in as its own sign-in client.
+  GET  /healthz           the probes.
+
+Self-hosted installs NEVER deploy this chart.
+
+Env contract (ground truth: billing cmd/billing-webhook/main.go). The binary
+exits 1 at boot when a required value is empty:
+  BILLING_WEBHOOK_ADDR          listen address
+  STRIPE_WEBHOOK_SECRET         required, Stripe signing secret (whsec_)
+  STRIPE_SECRET_KEY             required, Stripe API key
+  PLANS_FILE                    the plan registry (Stripe lookup key, trial)
+  GIBSON_CONNECTION_ADDR        required, the daemon connection points (mTLS)
+  GIBSON_DAEMON_SVID            required, the SPIFFE ID the daemon must present
+  GIBSON_API_ADDR               required, the public daemon API on the edge
+  BILLING_SIGNUP_RETURN_URL     required, where Checkout returns the browser
+  BILLING_ACCOUNT_RETURN_URL    required, where the Customer Portal returns it
+  OIDC_ISSUER                   required, the sign-in issuer
+  OIDC_CLIENT_ID                required, from the operator-minted Secret
+  OIDC_CLIENT_SECRET            required, from the operator-minted Secret
+  OIDC_SCOPES                   the sign-in scopes
+  BILLING_ACCOUNT_CALLBACK_URL  required, the public /account/callback URL
+  SPIFFE_ENDPOINT_SOCKET        the workload API socket (the SVID of billing)
+  PGHOST/PGPORT/...             libpq env vars for the platform database
+*/}}
+{{- if not (hasPrefix "/account/" (toString .Values.accountCallbackPath)) -}}
+{{- fail "accountCallbackPath must be a path under /account/: the sign-in cookies of billing carry Path=/account, so a callback outside it never sees them (billing internal/redirect)" -}}
+{{- end -}}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "billing-webhook.fullname" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "billing-webhook.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicas }}
+  selector:
+    matchLabels:
+      {{- include "billing-webhook.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "billing-webhook.selectorLabels" . | nindent 8 }}
+        {{- /*
+          The network labels of the pod (D76, charts gibson.netLabels). The
+          Cilium policies of the core umbrella select pods by these labels.
+          net-role platform lets the edge and the daemon reach this pod, and
+          client-postgres lets it reach the platform Postgres on :5432. The
+          overlay writes no policy on the core pods: a label adds no
+          isolation to a pod that this chart does not own (the 2026-09-14
+          deadlock).
+        */}}
+        gibson.zeroroot.ai/net-role: platform
+        gibson.zeroroot.ai/client-postgres: "true"
+        {{- /*
+          billing calls the payment provider API, the sign-in issuer and the
+          API on the public edge, and no other outside host. The label puts
+          it in the egress host group "billing" of the core chart (D76,
+          hosted#525). Each env values.yaml names the hosts of the group in
+          global.networkPolicy.egressHostGroups.billing, and
+          tests/env_wiring.py checks that the group opens each host that the
+          pod calls. The pod never gets egress-internet.
+        */}}
+        gibson.zeroroot.ai/egress-fqdn: billing
+      annotations:
+        {{- /*
+          Each secret is read into env at pod start. Rotating one without a
+          roll leaves billing on the old value: the webhook then fails each
+          delivery, or the sign-in fails. Reloader watches the named Secrets
+          and rolls this Deployment when one changes (deploy#1144).
+        */}}
+        secret.reloader.stakater.com/reload: {{ printf "%s,%s,%s" .Values.stripe.secretName .Values.oidc.secretName .Values.postgres.passwordSecretName | quote }}
+    spec:
+      serviceAccountName: {{ include "billing-webhook.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        fsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      initContainers:
+        {{- include "billing-webhook.waitForSpireSocket" . | nindent 8 }}
+      containers:
+        - name: billing-webhook
+          image: {{ printf "%s:%s" .Values.image.repository .Values.image.tag | quote }}
+          imagePullPolicy: {{ .Values.image.pullPolicy | default "Always" }}
+          command: ["/usr/local/bin/billing-webhook"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            runAsNonRoot: true
+            runAsUser: 65532
+            capabilities:
+              drop:
+                - ALL
+          ports:
+            - name: http
+              containerPort: {{ .Values.port | default 8090 }}
+              protocol: TCP
+          env:
+            - name: BILLING_WEBHOOK_ADDR
+              value: ":{{ .Values.port | default 8090 }}"
+            # The Stripe account, from the ExternalSecret of this chart.
+            - name: STRIPE_WEBHOOK_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.stripe.secretName | quote }}
+                  key: STRIPE_WEBHOOK_SECRET
+            - name: STRIPE_SECRET_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.stripe.secretName | quote }}
+                  key: STRIPE_SECRET_KEY
+            - name: PLANS_FILE
+              value: "/etc/gibson/plans/plans.yaml"
+            # The daemon connection points, over SPIFFE mTLS. billing presents
+            # its own SVID from the workload API and checks the daemon's.
+            - name: SPIFFE_ENDPOINT_SOCKET
+              value: "unix:///run/spire/sockets/api.sock"
+            - name: GIBSON_CONNECTION_ADDR
+              value: {{ required "daemon.connectionAddress is required" .Values.daemon.connectionAddress | quote }}
+            - name: GIBSON_DAEMON_SVID
+              value: {{ printf "spiffe://%s/%s" (include "billing-webhook.trustDomain" .) (.Values.daemon.spiffePath | trimPrefix "/") | quote }}
+            # WhoAmI goes through the public edge with the user's token, so
+            # the daemon answers for that user.
+            - name: GIBSON_API_ADDR
+              value: {{ printf "api.%s:443" (include "billing-webhook.domain" .) | quote }}
+            - name: BILLING_SIGNUP_RETURN_URL
+              value: {{ printf "%s%s" (include "billing-webhook.appOrigin" .) .Values.returnPaths.signup | quote }}
+            - name: BILLING_ACCOUNT_RETURN_URL
+              value: {{ printf "%s%s" (include "billing-webhook.appOrigin" .) .Values.returnPaths.account | quote }}
+            # The sign-in client of billing (D54). The issuer is the app
+            # origin, as for every other client of this install.
+            - name: OIDC_ISSUER
+              value: {{ include "billing-webhook.appOrigin" . | quote }}
+            - name: OIDC_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "oidc.secretName is required" .Values.oidc.secretName | quote }}
+                  key: client_id
+            - name: OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.oidc.secretName | quote }}
+                  key: client_secret
+            - name: OIDC_SCOPES
+              value: {{ .Values.oidc.scopes | default "openid profile" | quote }}
+            - name: BILLING_ACCOUNT_CALLBACK_URL
+              value: {{ printf "%s%s" (include "billing-webhook.appOrigin" .) .Values.accountCallbackPath | quote }}
+            # Platform Postgres (libpq env vars).
+            - name: PGHOST
+              value: {{ required ".Values.postgres.host is required" .Values.postgres.host | quote }}
+            - name: PGPORT
+              value: {{ .Values.postgres.port | default 5432 | quote }}
+            - name: PGDATABASE
+              value: {{ .Values.postgres.database | default "gibson_platform" | quote }}
+            # The login role of gibson_platform, from the same Secret as its
+            # password: the OpenBao database engine issues a new login role
+            # every 24 hours (ADR-0171, row postgres-role-passwords), and
+            # Reloader restarts this Deployment.
+            - name: PGUSER
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required ".Values.postgres.passwordSecretName is required" .Values.postgres.passwordSecretName | quote }}
+                  key: "username"
+            - name: PGPASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required ".Values.postgres.passwordSecretName is required" .Values.postgres.passwordSecretName | quote }}
+                  key: {{ .Values.postgres.passwordSecretKey | default "password" | quote }}
+            - name: PGSSLMODE
+              value: {{ .Values.postgres.sslMode | default "require" | quote }}
+            {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          volumeMounts:
+            - name: spire-agent-socket
+              mountPath: /run/spire/sockets
+              readOnly: true
+            - name: plans
+              mountPath: /etc/gibson/plans
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+      volumes:
+        - name: spire-agent-socket
+          csi:
+            driver: csi.spiffe.io
+            readOnly: true
+        # The plan registry of the core gibson-operators sub-chart, in the
+        # release namespace.
+        - name: plans
+          configMap:
+            name: {{ .Values.plansCmName | default "gibson-tenant-operator-plans" }}
+        - name: tmp
+          emptyDir: {}

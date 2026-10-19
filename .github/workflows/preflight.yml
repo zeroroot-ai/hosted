@@ -1,0 +1,126 @@
+# ----------------------------------------------------------------------------
+# preflight — the preflight verb as a workflow (ADR-0083, deploy#1745).
+#
+# Same name and inputs as `make preflight ENV=<env>`, and the job runs exactly
+# that target. The GitHub environment named by the `env` input gates the run:
+# `staging` has no reviewers, `prod` requires one named reviewer for the
+# destructive verbs (docs/bringup.md § Who may run what). Preflight itself is
+# read-only against the substrate, but it still runs on the environment so the
+# keyring secret is scoped to it.
+#
+# Stage 0 state reaches the runner from the environment, never from a cloud
+# role: the whole keyring file is the environment secret BRINGUP_KEYRING
+# (written to disk mode 0600 and NEVER echoed), and substrate.env is the
+# environment variable SUBSTRATE_ENV_FILE (no secrets in it by design).
+# preflight then proves the substrate live with the keyring's platform
+# credential only — no OIDC role, no shared credentials file (ADR-0083,
+# scripts/preflight.sh).
+#
+# Guard: scripts/check-verb-workflows.py (the verb-workflow-guard CI job)
+# with failing fixtures under scripts/testdata/verb-workflows/.
+# ----------------------------------------------------------------------------
+name: preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: Environment. The GitHub environment of the same name gates the run.
+        required: true
+        type: choice
+        options: [staging, prod]
+
+# One bringup verb at a time per environment, across all three verb
+# workflows (the group is repo-scoped). Never cancel a running verb: a
+# half-cancelled teardown is a half-destroyed estate.
+concurrency:
+  group: bringup-${{ inputs.env }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  preflight:
+    name: preflight (${{ inputs.env }})
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    timeout-minutes: 15
+    env:
+      ENV: ${{ inputs.env }}
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # The keyring file lands on disk mode 0600 and is never echoed. Every
+      # member value is also registered with the runner's masker, belt and
+      # braces on top of GitHub's own per-line masking of multi-line secrets.
+      # KEYRING_FILE inside substrate.env is a host-local path by design
+      # (docs/bringup.md: the keyring lives wherever its holder is), so it is
+      # repointed at this runner's copy.
+      - name: Materialize stage 0 state from the environment
+        env:
+          BRINGUP_KEYRING: ${{ secrets.BRINGUP_KEYRING }}
+          SUBSTRATE_ENV_FILE: ${{ vars.SUBSTRATE_ENV_FILE }}
+        run: |
+          set -euo pipefail
+          SUBSTRATE_DIR="${RUNNER_TEMP}/substrate"
+          echo "SUBSTRATE_DIR=${SUBSTRATE_DIR}" >> "$GITHUB_ENV"
+          state="${SUBSTRATE_DIR}/${ENV}"
+          mkdir -p "$state"
+          if [ -z "${BRINGUP_KEYRING}" ]; then
+            echo "::error::Environment secret BRINGUP_KEYRING is empty or missing for environment '${ENV}'."
+            echo "Load it from the operator keyring file: gh secret set BRINGUP_KEYRING --env ${ENV} -R ${{ github.repository }} < keyring.env"
+            exit 2
+          fi
+          if [ -z "${SUBSTRATE_ENV_FILE}" ]; then
+            echo "::error::Environment variable SUBSTRATE_ENV_FILE is empty or missing for environment '${ENV}'."
+            echo "Load it: gh variable set SUBSTRATE_ENV_FILE --env ${ENV} -R ${{ github.repository }} < substrate.env"
+            exit 2
+          fi
+          umask 077
+          printf '%s\n' "${BRINGUP_KEYRING}" > "$state/keyring.env"
+          chmod 0600 "$state/keyring.env"
+          while IFS= read -r line; do
+            case "$line" in ''|'#'*) continue ;; esac
+            v="${line#*=}"
+            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+          done < "$state/keyring.env"
+          printf '%s\n' "${SUBSTRATE_ENV_FILE}" \
+            | sed "s|^KEYRING_FILE=.*|KEYRING_FILE=$state/keyring.env|" > "$state/substrate.env"
+          test "$(grep -c '^KEYRING_FILE=' "$state/substrate.env")" = 1
+
+      # The printf below must render as OPENBAO_SEAL_KEY=*** in the log: the
+      # value was registered with ::add-mask:: in the step above, so the
+      # runner replaces it before the log is written. A readable value here
+      # means the masker never saw the keyring this run uses — stop and
+      # rotate the keyring (scripts/keyring.sh, README.md § Rotation).
+      # THE SEAL KEY IS NEVER PRINTED, AND IS REGISTERED WITH THE MASKER.
+      #
+      # This step used to print the key and then say, in prose, that the line
+      # above ought to read ***. It asserted nothing: if the value was not
+      # masked the key went to the log in clear and the step still passed.
+      #
+      # Worse, the property it was testing is not one anything established. The
+      # runner masks repository and environment secrets. This value is read
+      # from a keyring file that stage 0 writes ON the runner, so nothing had
+      # taught the masker about it — the check could only pass by accident,
+      # when the key happened to have arrived from a secret.
+      #
+      # So: add-mask it, which is what actually makes it unprintable for the
+      # rest of the job, and prove identity with a short sha256 rather than the
+      # value. A 12-hex prefix of a sha256 is not reversible.
+      - name: The keyring's seal key is present, and masked from here on
+        run: |
+          set -euo pipefail
+          v="$(scripts/keyring.sh get "${SUBSTRATE_DIR}/${ENV}/keyring.env" OPENBAO_SEAL_KEY)"
+          if [ -z "$v" ]; then
+            echo "::error::the keyring holds no OPENBAO_SEAL_KEY. Stage 0 did not write one, or this run is pointed at the wrong keyring (README.md, Rotation)."
+            exit 1
+          fi
+          echo "::add-mask::$v"
+          printf '✓ OPENBAO_SEAL_KEY present and now masked (sha256 %s)\n' \
+            "$(printf '%s' "$v" | sha256sum | cut -c1-12)"
+
+      - name: make preflight
+        run: make preflight ENV="${ENV}"

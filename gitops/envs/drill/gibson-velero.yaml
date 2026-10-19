@@ -1,0 +1,92 @@
+# DRILL env overlay. Derived from envs/staging/ and kept close to it on purpose
+# (ADR-0095): a drill that proves a bringup on a shape staging does not use is
+# not evidence about staging. Every path, host, bucket and address here follows
+# `drill`; where a comment below still says "staging" it is describing the
+# permanent environment as a different thing, not this file.
+#
+# What differs from staging, and only this:
+#   - global.domain and every host derive from drill.zeroroot.ai
+#   - the durable bucket is zeroroot-ai-drill-durable-<account>
+#   - the owner and from addresses are +drill
+#   - the self-hosted ARC runners and their manifests are absent: a drill proves
+#     the platform and the backup chain, not an add-on staging happens to carry
+#
+# THIS ENVIRONMENT IS DESTROYED AFTER EVERY RUN. Its stage 1 instance also arms
+# its own termination (self_terminate_after_minutes), so nothing here should be
+# treated as state that survives.
+# gibson-velero — a SIBLING release of the platform, not a dependency of it.
+#
+# gibson-crds exists because Helm cannot install a CRD and a CR that uses it in
+# one release (deploy CONTEXT.md § Umbrella chart). gibson-velero is a second
+# release in its own namespace because the Velero server reads its kopia
+# repository password through a namespace-scoped cache, so its namespace needs
+# list/watch on secrets — which in `gibson` would be every platform Secret
+# (deploy#1762).
+#
+# Neither is a dependency of the umbrella, so neither arrived with it. Before
+# gitops#563 NO env declared either, so a from-zero recreate brought up a
+# cluster with no CRDs and no backup plane: the gibson Application failed every
+# CRD-typed resource of its 45 with "Make sure the CRD is installed", measured
+# on staging while running deploy#1746.
+#
+# sync-wave "-5": the CRDs must be established before the platform
+# Application applies any custom resource. The platform carries no wave and so
+# defaults to 0.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gibson-velero
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-5"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    # Versioned OCI chart, published beside the umbrella at the same version
+    # by deploy's publish-umbrella-chart workflow (deploy#1777/#1785).
+    - repoURL: ghcr.io/zeroroot-ai/charts
+      chart: gibson-velero
+      targetRevision: "0.151.1"
+      helm:
+        valueFiles:
+          - $values/gitops/envs/drill/gibson-velero-values.yaml
+    # This repo as the $values ref, the same shape as gibson.yaml.
+    - repoURL: https://github.com/zeroroot-ai/hosted
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: velero
+  # The chart renders every Schedule with skipImmediately: true so a fresh
+  # install waits for its first cron tick instead of racing the node-agent
+  # rollout. Velero consumes that flag: its schedule controller writes
+  # spec.skipImmediately back to false the moment it has honored it. Without
+  # this ignore the Application reads OutOfSync forever, selfHeal re-applies
+  # true, Velero flips it again, and the bringup gate (wait-apps) never sees
+  # Synced (staging 2026-09-10, gibson-velero 0.124.2 on Velero's live
+  # Schedule platform-hourly). RespectIgnoreDifferences keeps the sync from
+  # re-applying the ignored field on top of Velero's write.
+  ignoreDifferences:
+    - group: velero.io
+      kind: Schedule
+      jsonPointers:
+        - /spec/skipImmediately
+  syncPolicy:
+    automated:
+      # prune:false matches the platform Application in this env. Pruning stays
+      # a deliberate, reviewed action rather than something a fast auto-sync
+      # path can do on a transient or misread diff.
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 2
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      - RespectIgnoreDifferences=true

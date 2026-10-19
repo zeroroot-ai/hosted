@@ -1,0 +1,42 @@
+apiVersion: v2
+name: gibson-billing-webhook
+description: |
+  SaaS overlay: the billing service (Deployment, Service, ExternalSecret,
+  SPIFFE identity) for the ZeroRoot-hosted (SaaS) deployment.
+
+  This chart is NOT part of the core `gibson` umbrella. It is composed by
+  ZeroRoot's private gitops as a separate Argo Application alongside the
+  core umbrella, following the SaaS overlay pattern defined in ADR-0074.
+
+  Self-hosted installs NEVER install this chart. The core chart holds no
+  billing route (charts#375). Each env adds the billing routes through
+  envoy.extraRoutes in its own values.yaml.
+
+  The service has no pages (ADR-0060, D53 to D55). It serves the Stripe
+  webhook and two redirect endpoints: the signup step, which sends the browser
+  to Stripe Checkout, and the account link, which signs the Owner in and sends
+  the browser to the Stripe Customer Portal.
+
+  Closed image reference: ghcr.io/zeroroot-ai/billing (cmd/billing-webhook).
+  Alongside the entitlements-svc overlay this is the ONLY place the closed
+  billing image is named. The core umbrella carries zero closed/SaaS image
+  references (enforced by the no-closed-refs render guard in
+  .github/workflows/chart-bats-tests.yml).
+
+  ADR-0074: self-hosted vs SaaS seam model.
+  Relates: gibson#798, gibson#800, billing#20, charts#375, hosted#440.
+type: application
+version: 0.2.0
+appVersion: "0.1.0"
+maintainers:
+  - name: ZeroRoot AI
+    email: team@zeroroot.ai
+keywords:
+  - gibson
+  - billing
+  - stripe
+  - webhook
+  - saas-overlay
+home: https://github.com/zeroroot-ai/hosted
+sources:
+  - https://github.com/zeroroot-ai/hosted

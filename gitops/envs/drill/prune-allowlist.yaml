@@ -1,0 +1,65 @@
+# DRILL env overlay. Derived from envs/staging/ and kept close to it on purpose
+# (ADR-0095): a drill that proves a bringup on a shape staging does not use is
+# not evidence about staging. Every path, host, bucket and address here follows
+# `drill`; where a comment below still says "staging" it is describing the
+# permanent environment as a different thing, not this file.
+#
+# What differs from staging, and only this:
+#   - global.domain and every host derive from drill.zeroroot.ai
+#   - the durable bucket is zeroroot-ai-drill-durable-<account>
+#   - the owner and from addresses are +drill
+#   - the self-hosted ARC runners and their manifests are absent: a drill proves
+#     the platform and the backup chain, not an add-on staging happens to carry
+#
+# THIS ENVIRONMENT IS DESTROYED AFTER EVERY RUN. Its stage 1 instance also arms
+# its own termination (self_terminate_after_minutes), so nothing here should be
+# treated as state that survives.
+# Deliberate-prune allowlist for the drill `gibson` Application.
+#
+# WHY THIS FILE EXISTS (gitops#498, gitops#507, gitops#522)
+#
+# staging runs `syncPolicy.automated.prune: false` on purpose — the gitops#448
+# blast-radius guard: a fast, frequent selfHeal path must never delete a live
+# resource on a transient or misread diff. The cost is that every object whose
+# chart source is retired stays live, keeps its `argocd.argoproj.io/tracking-id`,
+# and holds the Application `OutOfSync` forever. Nothing in the automated path
+# can ever remove it.
+#
+# The companion the `prune: false` comment promised — "pruning stays a
+# deliberate, reviewed action" — did not exist (gitops#507). This file IS the
+# review: an entry here is a merged, reviewed authorisation to delete exactly
+# one named live object, and `gitops/scripts/prune-orphans.sh` turns the entries into
+# the exact scoped `argocd app sync --prune --resource ...` an operator runs.
+# Nothing else may be pruned, and the app-wide policy stays `prune: false`.
+#
+# IT IS ALSO THE DETECTOR
+#
+# gitops#522's orphan was found by accident during a promotion, not by a check,
+# because `gitops/scripts/check-promotion-landed.sh` waved through ANY resource
+# carrying `requiresPruning`. It now tolerates only the ones named here, so an
+# unreviewed orphan fails promotion verification the first time it appears
+# instead of accumulating unseen.
+#
+# A STALE ENTRY IS A FAILURE
+#
+# Same contract as `chart-digests.yaml`'s `signed: false` exemptions: once the
+# prune has run, the entry matches nothing live and `prune-orphans.sh audit`
+# fails until it is deleted. No workflow audits drill: each drill run
+# installs from nothing, so a drill cluster holds no residue from an older
+# chart, and this list stays empty. The lint still requires the file,
+# because drill runs prune:false (hosted#748).
+#
+# ADDING AN ENTRY
+#
+#   1. prove the chart no longer renders it (`helm template` the pinned version)
+#   2. add it below with `retiredBy`, `reason`, `observed`
+#   3. merge — that is the review
+#   4. `gitops/scripts/prune-orphans.sh plan drill <app.json>` and run the printed
+#      command (`--dry-run` first)
+#   5. delete the entry once the object is gone
+#
+# Fields: group ("" for core), kind, namespace ("" for cluster-scoped), name,
+# retiredBy (the PR/issue that removed the source), reason, observed (the date
+# the orphan was verified live).
+
+resources: []

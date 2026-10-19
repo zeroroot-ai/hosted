@@ -1,0 +1,64 @@
+# exit-test-waf — deploy#1196 (launch blocker: no WAF on the customer edge).
+#
+# The exit test, in plain words: A SCANNER-SHAPED REQUEST TO THE BROWSER EDGE
+# IS BLOCKED, AND A REAL SIGNUP GETS THROUGH.
+#
+# Runs entirely under Docker on the runner — the chart's own rendered Envoy
+# edge with the Coraza WASM module from the mirrored image, on the same edge
+# harness as exit-test-rate-limit. No cluster, no AWS, no staging. Both halves
+# are asserted: a WAF that blocks everything is an outage, one that blocks
+# nothing is decoration.
+#
+# The scorecard reads the latest run of THIS workflow by name
+# (zeroroot-ai/.github#301). It must stay `exit-test-waf.yml`.
+# ADR-0080: never on pull_request. This is an exit test — it measures state on
+# main for the launch scorecard and runs on push to main and on its schedule.
+# The merge gate is the ten-minute set in ci.yml.
+name: exit-test-waf
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '50 5 * * *'
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: exit-test-waf-${{ github.ref }}
+  # A run that started finishes. On main an exit test is the proof (ADR-0080),
+  # so a newer push queues behind it and does not cancel it (hosted#585).
+  cancel-in-progress: false
+
+jobs:
+  waf:
+    name: scanner blocked, real signup passes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout hosted
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Edge harness up
+        id: harness
+        uses: ./.github/actions/edge-harness
+
+      - name: EXIT TEST — scanner-shaped requests are blocked, a real signup gets through
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "${{ steps.harness.outputs.env-file }}"
+          test/edge/exit-test-waf.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "--- transform summary ---"; cat "${RUNNER_TEMP}/edge-harness/harness.json" || true
+          echo "--- docker logs edge-envoy ---"; docker logs edge-envoy 2>&1 | tail -120 || true
+
+      - name: Harness down
+        if: always()
+        run: test/edge/harness.sh down

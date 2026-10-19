@@ -1,0 +1,8 @@
+# Corefile for the kind DNS sub-zone of stage 0 (ADR-0083, deploy#1736).
+# substrate.sh copies this file and the rendered zone into the substrate
+# state directory and mounts that directory at /etc/coredns. Only the zone
+# is served: any other name gets REFUSED, this server is not a resolver.
+kind.zeroroot.test {
+    file /etc/coredns/db.kind.zeroroot.test
+    errors
+}

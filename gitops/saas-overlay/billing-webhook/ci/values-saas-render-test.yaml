@@ -1,0 +1,15 @@
+# CI render fixture for the SaaS overlay billing-webhook chart.
+# Used by the bats no-closed-refs guard to verify the overlay renders cleanly
+# and that the closed billing image reference is confined to the overlay.
+#
+# NOTE: hostnames are GENERICIZED PLACEHOLDERS for OSS publication — this is a
+# CI render fixture only. In a real install the trust domain and the domain
+# arrive from the env's values.yaml.
+global:
+  domain: "fixture.example"
+  spire:
+    trustDomain: "fixture.example"
+postgres:
+  host: "platform-postgres-rw.gibson.svc.cluster.local"
+  passwordSecretName: "gibson-platform-postgres-credentials"
+# CI uses the digest-pinned default from values.yaml (no image override needed).

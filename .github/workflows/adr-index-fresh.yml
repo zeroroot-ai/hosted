@@ -1,0 +1,41 @@
+# docs/adr-index.md is a copy of docs/adr-index.md of zeroroot-ai/gibson
+# (hosted#433, ADR-0068). The citation guard reads the copy and never fetches
+# the source, so a pull request is checked against the file that this repo
+# holds. This job tells hosted when the copy is stale: a new live ADR in gibson
+# makes a correct citation here fail, and a retired ADR stays accepted here,
+# until the copy moves.
+#
+# It runs on main, daily and on dispatch, never on a pull request: a change in
+# gibson must not make an unrelated hosted pull request red (ADR-0080). To fix
+# a red run, copy the file from gibson again in a pull request.
+name: adr-index-fresh
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - docs/adr-index.md
+      - .github/workflows/adr-index-fresh.yml
+  schedule:
+    - cron: '30 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - name: The copy equals the index of gibson main
+        run: |
+          set -euo pipefail
+          curl -fsSL --retry 3 https://raw.githubusercontent.com/zeroroot-ai/gibson/main/docs/adr-index.md -o "$RUNNER_TEMP/source.md"
+          [ -s "$RUNNER_TEMP/source.md" ] || { echo "::error::the gibson index is empty: the comparison is blind"; exit 1; }
+          if ! diff -u docs/adr-index.md "$RUNNER_TEMP/source.md"; then
+            echo "::error::docs/adr-index.md differs from docs/adr-index.md of zeroroot-ai/gibson main. Copy the file again in a pull request."
+            exit 1
+          fi
+          echo "docs/adr-index.md equals the gibson index"

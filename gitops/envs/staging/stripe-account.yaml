@@ -1,0 +1,5 @@
+# The Stripe account of the staging env: the Stripe sandbox account, test mode.
+# scripts/stripe-webhook-preflight.sh reads this file and refuses a key of any
+# other account. An account id is not a secret. No Argo Application reads this
+# file: the root of the env recurses only apps/.
+expectedAccount: acct_1THSkk5tfZGVpph5

@@ -1,0 +1,10 @@
+terraform.tfvars
+*.tfstate
+*.tfstate.backup
+.terraform/
+.terraform.lock.hcl
+backend.hcl
+
+# Plan artifacts (may embed secret values — never commit).
+plan.out
+plan.json

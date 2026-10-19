@@ -1,0 +1,40 @@
+# test/platform-owner/values.yaml — the overlay the Platform owner exit test
+# (hosted#201) layers on the baseline profile (zeroroot-ai/charts
+# helm/gibson/values-baseline.yaml) and the CI rung, for the ONLINE leg of the
+# test (the setup link is emailed and read back from Mailpit).
+#
+# Same shape and same reasoning as test/signup/values.yaml: the baseline
+# profile ships global.email.provider="log" (a non-delivering
+# stub) and global.platformOwner.offlineSetup=true, on purpose (deploy#1631) —
+# no operator input is needed to install. This overlay swaps in the chart's
+# own Mailpit dev sink and turns offlineSetup off, so the ONE thing under
+# test (a delivered setup-link email) is observable. The OFFLINE leg of this
+# exit test runs against the baseline as shipped, with no overlay at all —
+# see exit-test-platform-owner.sh's --offline mode.
+#
+# global.platformOwner.email must differ from global.firstTenant.ownerEmail
+# (helm/gibson/templates/platform-owner-guard.yaml enforces this at render
+# time) — the baseline's two addresses already differ, so nothing to set here.
+gibson-workloads:
+  mailpit:
+    enabled: true
+# One mail value for the daemon, the tenant-operator and Zitadel (hosted#223,
+# charts feat/223-one-global-email). The chart fails the render on each old
+# per-sender block. The in-cluster Mailpit sink listens in plaintext, offers no
+# STARTTLS, and accepts any sender with no credential (MP_SMTP_AUTH_ACCEPT_ANY).
+# So tlsMode is plaintext and the credential source is none. The chart refuses
+# plaintext with a credential, so this pair cannot be copied into a cloud
+# overlay by accident.
+global:
+  email:
+    provider: "smtp"
+    from: "no-reply@localhost.zeroroot.ai"
+    fromName: "Gibson"
+    smtp:
+      host: "gibson-mailpit"
+      port: 1025
+      tlsMode: "plaintext"
+      credentials:
+        source: "none"
+  platformOwner:
+    offlineSetup: false

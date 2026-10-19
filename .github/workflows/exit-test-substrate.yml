@@ -1,0 +1,354 @@
+# exit-test-substrate — the one exit test that needs a cluster (deploy#1661,
+# ADR-0079 § Substrate, CONTEXT.md "Proof level").
+#
+# Installs the umbrella with the named substrate overlay on a REAL cluster and
+# runs the blocker 4 assertion against it through that provider's own load
+# balancer, from two source addresses. It is what turns an overlay's header
+# from `Proof: rendered in CI, not yet installed on a cluster` into a link.
+#
+# The supported substrates are kind and EKS (D36, hosted#432). The GKE and AKS
+# overlays leave the chart (charts#406). A cloud returns with its own stage 1
+# root and its own proof.
+#
+# WHEN IT RUNS (ADR-0080):
+#   kind  on a daily schedule and on dispatch. The run makes its own kind
+#         cluster with `make recreate ENV=kind`, so nothing has to stand first.
+#         kind has no substrate overlay in the chart: the run installs the CI
+#         rung and proves the contract through the kind node port.
+#   eks   on dispatch only. The run needs a running EKS cluster and the
+#         KUBECONFIG_EKS secret. It cannot make that cluster: prod is the only
+#         EKS cluster, and a test does not stand up prod.
+#
+# On a green EKS run it opens a PR that flips the overlay's Proof line to this
+# run's URL. That PR is created with GITHUB_TOKEN, which does not trigger CI;
+# close and reopen it (or push an empty commit) to get checks, then merge.
+name: exit-test-substrate
+
+on:
+  workflow_dispatch:
+    inputs:
+      substrate:
+        description: Which substrate overlay to install and prove
+        required: true
+        type: choice
+        options: [kind, eks]
+  schedule:
+    # Daily, after the other kind exit tests. A scheduled run has no inputs,
+    # so SUBSTRATE falls back to kind below.
+    - cron: '50 6 * * *'
+
+permissions:
+  contents: write
+  pull-requests: write
+  packages: read
+  id-token: write   # OIDC: the read-only AWS role of the NLB check (eks only)
+
+concurrency:
+  group: exit-test-substrate-${{ inputs.substrate || 'kind' }}
+  cancel-in-progress: false
+
+env:
+  NS: gibson
+  RELEASE: gibson
+  SUBSTRATE: ${{ inputs.substrate || 'kind' }}
+  # The chart source (ADR-0086), checked out below. The verbs read it here.
+  CHARTS_ROOT: ${{ github.workspace }}/charts
+
+jobs:
+  substrate:
+    name: install on ${{ inputs.substrate || 'kind' }} and prove the client-IP contract
+    runs-on: ubuntu-latest
+    # The job runs in the environment named by the substrate, so a kubeconfig
+    # can be an ENVIRONMENT secret rather than a repository one, and a
+    # required reviewer on that environment gates reaching a real cluster.
+    # Repository secrets still resolve, so this is additive.
+    #
+    # MEASURED 2026-09-16: `kind`, `staging` and `prod` exist and all three
+    # have ZERO required reviewers. The environment is the mechanism; setting
+    # the reviewers is hosted#108's separate finding on the OIDC role gate,
+    # and it is a GitHub setting Terraform cannot make.
+    environment: ${{ inputs.substrate || 'kind' }}
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # charts is public, so the job's own token reads it; actions/checkout
+      # cannot write outside the workspace, so it lands in charts/.
+      - name: Check out zeroroot-ai/charts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: zeroroot-ai/charts
+          path: charts
+
+      # The kubeconfig check that used to live here is gone with the input it
+      # read. It was a SECOND ${{ }} interpolation into a run: block, which the
+      # audit did not list, and the step below now reports a missing secret by
+      # its fixed name — a better message than "you forgot an input".
+      - name: Inputs are complete
+        if: env.SUBSTRATE != 'kind'
+        run: |
+          set -euo pipefail
+          test -f "$CHARTS_ROOT/helm/gibson/values-${SUBSTRATE}.yaml" || { echo "::error::no overlay helm/gibson/values-${SUBSTRATE}.yaml in charts"; exit 2; }
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
+        with:
+          version: v3.16.2
+
+      # kind: install kind + kubectl only. `make recreate ENV=kind` creates
+      # the cluster itself, exactly as charts exit-test-baseline-install.yml does —
+      # one bringup path, no drift.
+      - name: Install kind + kubectl (kind)
+        if: env.SUBSTRATE == 'kind'
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
+        with:
+          install_only: true
+
+      - name: Install Terraform (kind)
+        if: env.SUBSTRATE == 'kind'
+        uses: ./.github/actions/install-terraform
+
+      # THE KUBECONFIG SECRET IS CHOSEN HERE, NOT BY THE CALLER.
+      #
+      # This read `secrets[inputs.kubeconfig_secret]`, where kubeconfig_secret
+      # was a free-text workflow input. The secrets context indexed by an
+      # arbitrary string means anyone who can dispatch this workflow can name
+      # ANY repository secret and have it written to ~/.kube/config — a
+      # general secret-read primitive out of a test.
+      #
+      # The same input was interpolated into the run: block as ${{ }}, so a
+      # value like `"; curl evil; #` executed on the runner. Both are gone:
+      # there is no such input any more.
+      #
+      # The one name below is fixed. A substrate with no secret fails
+      # naming the one secret it wanted, which beats a lookup that silently
+      # resolves to something else.
+      - name: Use the target cluster (cloud substrates)
+        if: env.SUBSTRATE != 'kind'
+        env:
+          KUBECONFIG_EKS: ${{ secrets.KUBECONFIG_EKS }}
+          SUBSTRATE: ${{ inputs.substrate || 'kind' }}
+        run: |
+          set -euo pipefail
+          # SUBSTRATE is a choice input, so it is one of two known strings.
+          # It is still read from the environment, never interpolated.
+          case "$SUBSTRATE" in
+            eks) KUBECONFIG_CONTENT="$KUBECONFIG_EKS"; want=KUBECONFIG_EKS ;;
+            *)   echo "::error::no kubeconfig mapping for substrate '$SUBSTRATE'"; exit 2 ;;
+          esac
+          [ -n "$KUBECONFIG_CONTENT" ] || { echo "::error::repository secret $want is empty or missing, so substrate $SUBSTRATE cannot be reached"; exit 2; }
+          mkdir -p "$HOME/.kube"
+          printf '%s' "$KUBECONFIG_CONTENT" > "$HOME/.kube/config"
+          chmod 600 "$HOME/.kube/config"
+          kubectl cluster-info
+
+      - name: Log in to the image mirror
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # Run 38361259263 died with "Free space left: 0 MB" while the platform
+      # came up: this was the one kind exit test that freed no disk.
+      - name: Free runner disk (kind)
+        if: env.SUBSTRATE == 'kind'
+        uses: ./.github/actions/free-runner-disk
+
+      # Stage 0 for the kind run (ADR-0083, deploy#1730): the durable
+      # bucket the platform's Postgres archives to, plus relay, zone and
+      # keyring, on the runner's kind Docker network. A cloud substrate brings
+      # its own substrate.env (deploy#1742).
+      # The registry token becomes the keyring member GHCR_PULL_TOKEN
+      # (deploy#1732); the sidecar seeds ghcr-pull-secret from it.
+      - name: Stage 0 (make substrate ENV=kind, kind)
+        if: env.SUBSTRATE == 'kind'
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_RO_PAT }}
+        run: SUBSTRATE_DIR="$RUNNER_TEMP/substrate" make substrate ENV=kind
+
+      - name: Stand the platform up with the substrate overlay
+        run: |
+          set -euo pipefail
+          if [ "$SUBSTRATE" = kind ]; then
+            # kind: the recreate verb (deploy#1737). Fresh cluster, the
+            # bringup keyring written from the runner's stage 0, the umbrella
+            # synced by Argo, at the CI rung of the profile ladder. Same command
+            # as charts exit-test-baseline-install.yml.
+            SUBSTRATE_DIR="$RUNNER_TEMP/substrate" \
+              RUNG=ci \
+              WAIT_APPS_TIMEOUT=5400 make recreate ENV=kind
+          else
+            # A real cluster: the baseline profile plus this substrate's overlay.
+            # The seal is the static seal on every substrate; baseline-up.sh
+            # writes the bringup keyring through scripts/keyring-to-cluster.sh
+            # before the chart (ADR-0083, deploy#1737).
+            export EXTRA_VALUES="helm/gibson/values-${SUBSTRATE}.yaml"
+            make baseline-up
+          fi
+
+      # Hubble on (kind), so a failed Client-IP assertion shows the source
+      # address of each flow to the Envoy pod (hosted#613). The shared Cilium
+      # values keep Hubble off; this upgrade keeps every other value. Same
+      # step as the charts exit tests.
+      - name: Turn on Hubble in Cilium (kind)
+        if: env.SUBSTRATE == 'kind'
+        run: |
+          set -euo pipefail
+          # shellcheck source=/dev/null
+          . scripts/lib/cilium.sh
+          helm upgrade cilium "$CILIUM_CHART" --version "$(cilium_version)" \
+            --namespace kube-system --reuse-values --set hubble.enabled=true \
+            --wait --timeout "$CILIUM_TIMEOUT"
+          cilium_verify
+          echo "HUBBLE_SINCE=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
+
+      - name: Workloads reach Ready
+        run: |
+          set -euo pipefail
+          kubectl -n "$NS" wait --for=condition=Available deploy --all --timeout=15m
+          for sts in $(kubectl -n "$NS" get sts -o name); do
+            kubectl -n "$NS" rollout status "$sts" --timeout=10m
+          done
+
+      - name: The edge has an address
+        run: |
+          set -euo pipefail
+          if [ "$SUBSTRATE" = kind ]; then
+            kubectl -n "$NS" get svc gibson-envoy -o wide
+          else
+            for i in $(seq 1 60); do
+              addr="$(kubectl -n "$NS" get svc gibson-envoy -o jsonpath='{.status.loadBalancer.ingress[0].ip}{.status.loadBalancer.ingress[0].hostname}')"
+              [ -n "$addr" ] && { echo "edge at $addr"; break; }
+              sleep 10
+              [ "$i" -eq 60 ] && { echo "::error::gibson-envoy never got a load-balancer address"; exit 1; }
+            done
+          fi
+
+      - name: EXIT TEST — one client hits the limit while a second keeps working, through the substrate's load balancer
+        run: test/edge/exit-test-substrate.sh
+
+      # hosted#508: the NLB has its own security group, and the backend rule
+      # admits it by reference. values-eks.yaml asks the AWS Load Balancer
+      # Controller for this shape, and only AWS can show it. Read-only role.
+      - name: Read AWS as eks-plan-readonly (eks)
+        if: env.SUBSTRATE == 'eks'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+        with:
+          role-to-assume: ${{ vars.EKS_PLAN_READONLY_ROLE_ARN }}
+          aws-region: us-east-1
+
+      - name: EXIT TEST — the NLB has its own security group, and each target admits it by reference (eks)
+        if: env.SUBSTRATE == 'eks'
+        run: test/edge/assert-nlb-security-group.sh
+
+      - name: Flip the overlay's Proof line to this run
+        if: success() && env.SUBSTRATE != 'kind'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          f="helm/gibson/values-${SUBSTRATE}.yaml"
+          run_url="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          today="$(date -u +%Y-%m-%d)"
+          python3 - "$f" "$run_url" "$today" <<'PY'
+          import re, sys
+          p, url, day = sys.argv[1:]
+          s = open(p).read()
+          new = f"# Proof: installed and proven on a real cluster on {day}: {url}\n"
+          s2, n = re.subn(r"^# Proof:.*\n(?:#\s+\(.*\n)*", new, s, count=1, flags=re.M)
+          assert n == 1, "no Proof: line in the overlay header"
+          open(p, "w").write(s2)
+          PY
+          git config user.name "exit-test-substrate"
+          git config user.email "noreply@zeroroot.ai"
+          b="proof/${SUBSTRATE}-${{ github.run_id }}"
+          git checkout -b "$b"
+          git add "$f"
+          git commit -m "docs(chart): values-${SUBSTRATE}.yaml proven on a real cluster — exit-test-substrate run ${{ github.run_id }}"
+          git push -u origin "$b"
+          gh pr create --base main --head "$b" \
+            --title "docs(chart): values-${SUBSTRATE}.yaml proven on a real cluster (exit-test-substrate)" \
+            --body "Green run of \`exit-test-substrate.yml\` on **${SUBSTRATE}**: ${run_url}. This flips the overlay's Proof line (CONTEXT.md § Substrate). Opened with GITHUB_TOKEN, so CI did not trigger — close and reopen to get checks, then merge."
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          kubectl -n "$NS" get pods -o wide || true
+          kubectl -n "$NS" get svc gibson-envoy -o yaml || true
+          kubectl -n "$NS" logs deploy/gibson-envoy -c envoy --tail=100 || true
+          kubectl -n "$NS" logs deploy/gibson-ratelimit -c ratelimit --tail=50 || true
+          # C50 (run 38217511681): the 6th POST of client A got 200, not 429,
+          # with no error in the ratelimit log. The counters and the loaded
+          # config say whether ratelimit saw the hits and judged them, and
+          # under which key. Read through the API server proxy: the image
+          # has no shell tools.
+          rl_pod=$(kubectl -n "$NS" get pods -l app.kubernetes.io/component=ratelimit -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)
+          [ -n "$rl_pod" ] || rl_pod=$(kubectl -n "$NS" get pods -o name | sed -n 's#^pod/\(gibson-ratelimit-[^ ]*\)#\1#p' | head -1)
+          # The pinned ratelimit image flushes its stats store every 10 s
+          # (STATS_FLUSH_INTERVAL default, src/settings/settings.go). A read
+          # right after the POSTs misses the last hits, so wait one flush.
+          sleep 11
+          echo "=== ratelimit counters of ${rl_pod:-<no pod>} ==="
+          # Read into a variable first: a proxy error does not start with
+          # ratelimit_service_, so a filter alone would hide it.
+          rl_metrics=$(kubectl get --raw "/api/v1/namespaces/$NS/pods/${rl_pod}:9090/proxy/metrics" 2>&1 || true)
+          # Match the string, never `printf | grep -q` (SIGPIPE under pipefail).
+          if [[ $'\n'"$rl_metrics" == *$'\n'ratelimit_service_* ]]; then
+            printf '%s\n' "$rl_metrics" | grep -E '^ratelimit_service_(rate_limit|config|response_time|call)' \
+              | grep -v ' 0$' | head -60 || true
+          else
+            echo "(the counter read failed or holds no ratelimit_service_ line):"
+            printf '%s\n' "$rl_metrics" | head -20
+          fi
+          echo "=== ratelimit loaded config ==="
+          kubectl get --raw "/api/v1/namespaces/$NS/pods/${rl_pod}:6070/proxy/rlconfig" 2>&1 | head -40 || true
+          # C50 (run 38448170451): ratelimit counted 4 signup hits for 7
+          # POSTs. The Envoy counters say how many POSTs matched the signup
+          # route (its local limiter counts each one), and what the per-client
+          # filter got back from ratelimit for each call: ok, over limit, an
+          # error, or a timeout that failure_mode_deny=false lets through.
+          envoy_pod=$(kubectl -n "$NS" get pods -l app.kubernetes.io/component=envoy -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+          for ep in $envoy_pod; do
+            echo "=== Envoy rate limit counters of $ep ==="
+            envoy_stats=$(kubectl get --raw "/api/v1/namespaces/$NS/pods/${ep}:9901/proxy/stats/prometheus" 2>&1 || true)
+            if [[ $'\n'"$envoy_stats" == *$'\n'envoy_* ]]; then
+              printf '%s\n' "$envoy_stats" | grep -E 'ratelimit|rate_limit|app_signup_submit|public_per_client' \
+                | grep -v '^#' | grep -v ' 0$' | head -60 || true
+            else
+              echo "(the counter read failed or holds no envoy_ line):"
+              printf '%s\n' "$envoy_stats" | head -20
+            fi
+          done
+          if [ "$SUBSTRATE" = kind ]; then
+            # hosted#613: the address each client had when it reached Envoy.
+            # Two clients that show one source address here were rewritten
+            # on the NodePort path.
+            echo "=== flows to the Envoy pod, with their source address ==="
+            kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+              hubble observe --to-namespace "$NS" --to-label app.kubernetes.io/component=envoy \
+              --protocol tcp --since "${HUBBLE_SINCE:-1h}" --last 60 -o compact || true
+            # The DNS answers to Envoy filled the whole window of the first
+            # run (38195121798), so the TCP flows are read alone, and so are
+            # the flows from outside the cluster (the two curl clients).
+            echo "=== flows from outside the cluster to any pod of ${NS} ==="
+            kubectl -n kube-system exec ds/cilium -c cilium-agent -- \
+              hubble observe --to-namespace "$NS" --from-identity world --from-identity host \
+              --since "${HUBBLE_SINCE:-1h}" --last 40 -o compact || true
+            echo "=== NodePort service entries of the agent for gibson-envoy ==="
+            kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg service list 2>/dev/null \
+              | grep -E "NodePort|LoadBalancer" | head -20 || true
+            echo "=== kube-proxy replacement and masquerade state of the agent ==="
+            kubectl -n kube-system exec ds/cilium -c cilium-agent -- cilium-dbg status --verbose 2>/dev/null \
+              | sed -n '/KubeProxyReplacement/,/^Hubble/p' | head -60 || true
+            echo "=== SNAT and masquerade rules of the node ==="
+            docker exec "${KIND_CLUSTER:-gibson}-control-plane" iptables-save -t nat 2>/dev/null \
+              | grep -iE 'masq|snat' | head -40 || true
+          fi
+          echo "=== node allocatable vs requested (why a pod is Pending) ==="
+          kubectl describe nodes | grep -A9 'Allocated resources' || true
+          echo "=== pods with a container not ready — a CrashLoop pod is phase Running, so select on readiness ==="
+          for p in $(kubectl -n "$NS" get pods -o json | jq -r '.items[] | select(.status.phase != "Succeeded") | select([.status.containerStatuses[]?, .status.initContainerStatuses[]?] | any(.ready == false)) | .metadata.name'); do
+            echo "--- $p"; kubectl -n "$NS" describe pod "$p" | grep -A12 '^Events' || true
+            for c in $(kubectl -n "$NS" get pod "$p" -o json | jq -r '[.status.containerStatuses[]?, .status.initContainerStatuses[]?] | .[] | select(.ready == false) | .name'); do
+              echo "..... last log of $p/$c (previous instance if it restarted)"
+              kubectl -n "$NS" logs "$p" -c "$c" --previous --tail=30 2>/dev/null || kubectl -n "$NS" logs "$p" -c "$c" --tail=30 || true
+            done
+          done

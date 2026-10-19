@@ -1,0 +1,142 @@
+# The zeroroot-ai org's ephemeral runner scale-set — Epic: cicd-efficiency
+# (board #44), gitops slice of zeroroot-ai/deploy#1067.
+#
+# Registers the "staging-ephemeral" scale-set against the org
+# (githubConfigUrl: https://github.com/zeroroot-ai) so any repo can target it
+# with `runs-on: staging-ephemeral`. minRunners:0 => scale-to-zero between
+# jobs (no standing runner); maxRunners:4 caps concurrent
+# ephemeral pods. Every runner pod is EPHEMERAL by ARC design (one job, then
+# torn down) — this is the replacement for the removed persistent
+# `ec2-kind-standup` / `workstation-setec-kvm` self-hosted runners.
+#
+# Two sources:
+#   - source[0] — the gha-runner-scale-set chart (upstream ARC).
+#   - source[1] — this repo's manifests/arc-runners/ directory: the runner
+#     ServiceAccount, its cross-namespace RBAC into setec-system (Sandbox
+#     create/watch + pod-log read — see manifests/arc-runners/rbac.yaml for
+#     the exact rule set and the rationale), and the ExternalSecret
+#     projecting the GitHub App credentials ARC needs to register the
+#     scale-set (the charts secret contract entry: AWS SM key
+#     gibson/staging/arc-github-app).
+#
+# Fork PRs never reach this scale-set: the two migrated e2e workflows gate
+# `runs-on: staging-ephemeral` jobs behind the `merge_group` trigger (trusted
+# context only), never `pull_request` from a fork.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: arc-runners-zeroroot
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    - repoURL: ghcr.io/actions/actions-runner-controller-charts
+      chart: gha-runner-scale-set
+      # Verified live via `gh api
+      # /orgs/actions/packages/container/actions-runner-controller-charts%2Fgha-runner-scale-set/versions`
+      # on 2026-07-01 — keep in lockstep with envs/staging/arc-controller.yaml
+      # (both charts are versioned+released together upstream).
+      targetRevision: "0.14.2"
+      helm:
+        releaseName: arc-runners-zeroroot
+        valuesObject:
+          githubConfigUrl: https://github.com/zeroroot-ai
+          # Pre-defined K8s Secret (Variation C in the chart's values.yaml
+          # docs) delivered by manifests/arc-runners/external-secret.yaml —
+          # keys github_app_id / github_app_installation_id /
+          # github_app_private_key (GitHub App auth, not a PAT).
+          githubConfigSecret: arc-github-app
+          # The runs-on label every migrated workflow targets.
+          runnerScaleSetName: staging-ephemeral
+          # Dedicated org runner group (gitops#348): "Allow public
+          # repositories" is ON and visibility is restricted to setec +
+          # gibson. Without an explicit group the scale-set registers into
+          # the org Default group, which blocks public repos — the broker
+          # then never assigns jobs (healthy listener, queued forever).
+          runnerGroup: staging-ephemeral
+          minRunners: 0
+          maxRunners: 4
+          # Explicit because this controller watches more than its own
+          # namespace is not assumed — pins the RoleBinding the controller
+          # chart wires for this scale-set to the actual controller SA
+          # (see arc-controller.yaml: helm.releaseName=arc-controller =>
+          # fullname "arc-controller-gha-rs-controller").
+          controllerServiceAccount:
+            namespace: arc-systems
+            name: arc-controller-gha-rs-controller
+          # `template` is the pod template for the EPHEMERAL RUNNER pod — the
+          # pod that actually runs a job. The chart renders it into
+          # AutoscalingRunnerSet.spec.template; the controller copies it to
+          # EphemeralRunnerSet.spec.ephemeralRunnerSpec.podTemplateSpec, then
+          # to EphemeralRunner.spec, then onto the runner Pod's ObjectMeta.
+          # It is NOT the listener pod (that is `listenerTemplate`) and NOT
+          # the controller (that is the separate arc-controller Application).
+          template:
+            metadata:
+              annotations:
+                # gitops#532 — Karpenter must not consolidate the node out
+                # from under a runner that is mid-job.
+                #
+                # The `default` NodePool runs consolidationPolicy
+                # WhenEmptyOrUnderutilized with consolidateAfter 60s, so a
+                # runner pod on a lightly-loaded node is a routine
+                # consolidation candidate. When that fires the job dies with
+                # `exit 130` and "The runner has received a shutdown signal",
+                # which reads like a human cancellation — so the eviction is
+                # misfiled against the code under test every single time.
+                # Observed twice; see the PR for the Karpenter
+                # `reason: "underutilized"` log lines and the matching
+                # `Evicted pod/staging-ephemeral-*-runner-*` events.
+                #
+                # This annotation blocks VOLUNTARY disruption only
+                # (consolidation + drift). Involuntary/forceful paths are
+                # unaffected — see the PR for the residual. Spot interruption
+                # is not among them: the NodePool pins
+                # karpenter.sh/capacity-type=on-demand.
+                #
+                # Safe because these runners are ephemeral: JIT-registered
+                # (ACTIONS_RUNNER_INPUT_JITCONFIG), `restartPolicy: Never`,
+                # one pod per job, torn down on completion, and minRunners:0
+                # so nothing idles. The annotation therefore holds a node
+                # only for the length of one job and can never strand one
+                # indefinitely — which is the failure mode do-not-disrupt has
+                # on long-lived workloads.
+                karpenter.sh/do-not-disrupt: "true"
+            spec:
+              # Namespaced least-privilege SA — NOT cluster-admin, NOT the
+              # setec operator's own identity. See manifests/arc-runners/
+              # rbac.yaml for the exact grant (Sandbox create/watch +
+              # pod-log read, scoped to the setec-system namespace, plus a
+              # named-Secret read for the mTLS round-trip client cert).
+              serviceAccountName: arc-runner-sa
+              containers:
+                - name: runner
+                  # Default ARC runner image (chart default, restated
+                  # explicitly since the array form replaces rather than
+                  # merges). No dind / no privileged mode — this pod never
+                  # needs /dev/kvm; it only calls the K8s API + a Go test
+                  # binary / kubectl against the already-deployed setec.
+                  image: ghcr.io/actions/actions-runner:latest
+                  command: ["/home/runner/run.sh"]
+                  resources:
+                    requests:
+                      cpu: 500m
+                      memory: 1Gi
+                    limits:
+                      cpu: "2"
+                      memory: 4Gi
+    - repoURL: https://github.com/zeroroot-ai/hosted
+      targetRevision: main
+      path: gitops/envs/staging/manifests/arc-runners
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: arc-runners
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true

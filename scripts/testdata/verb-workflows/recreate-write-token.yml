@@ -1,0 +1,28 @@
+# Fixture: the job that runs the bringup verb holds a write token. The guard
+# must REJECT this: only the catch-up job of a restore may write (D91,
+# hosted#687), and it runs no verb.
+name: recreate
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        type: choice
+        options: [prod]
+      restore_from:
+        required: false
+        type: string
+concurrency:
+  group: bringup-${{ inputs.env }}
+  cancel-in-progress: false
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+jobs:
+  recreate:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    steps:
+      - name: make recreate
+        run: make recreate ENV="${{ inputs.env }}"

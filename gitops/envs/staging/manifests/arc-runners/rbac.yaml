@@ -1,0 +1,426 @@
+# RBAC for the arc-runners/arc-runner-sa ServiceAccount. Two grants live in
+# this file:
+#
+#   1. The original ROUND-TRIP grant (immediately below) — drive the
+#      ALREADY-DEPLOYED setec in setec-system (create a throwaway Sandbox,
+#      watch it to Completed, read the workload pod's logs for the result
+#      marker, clean up).
+#   2. The INSTALL-GRADE grant (arc-runner-setec-installer, bottom of file) —
+#      let setec's merge_group e2e shadow-install the PR's own chart into a
+#      throwaway setec-e2e-<run_id> namespace (gitops#320 / setec#113). See
+#      its own header for the escalate/bind and namespace-wildcard tradeoffs.
+#
+# Two RBAC objects for the round-trip grant, because Sandbox and SandboxClass
+# have different scopes
+# (api/v1alpha1 in the setec repo):
+#   - Sandbox is Namespaced (+kubebuilder:resource:scope=Namespaced) — a
+#     namespaced Role in setec-system, cross-namespace-bound to the SA.
+#   - SandboxClass is Cluster-scoped (+kubebuilder:resource:scope=Cluster) —
+#     requires a ClusterRole. Kept separate and narrow (sandboxclasses only)
+#     so this is the one genuinely cluster-wide grant, not a blanket
+#     cluster-admin-adjacent role.
+#
+# Epic: cicd-efficiency (board #44) / zeroroot-ai/deploy#1067.
+# ─────────────────────────────────────────────────────────────────────────────
+# READ THIS BEFORE APPLYING.
+#
+# This grant used to be cluster-admin-equivalent: it held `escalate` on
+# clusterroles and on roles, so the holder could mint itself any permission the
+# cluster can express and every other rule here was advisory. hosted#108
+# recorded it as a HIGH finding.
+#
+# `escalate` IS GONE. What replaced it is the pattern this estate's own chart
+# already uses for the tenant-operator (gibson-operators/templates/tenant-
+# operator/tenant-namespace-cluster-role.yaml): hold the permissions you
+# grant, and `bind` only by name. Kubernetes escalation prevention now bounds
+# this SA to the rules listed below — the ceiling is "what setec's operator
+# can do", enumerated, and a reviewer can read every line of it.
+#
+# NOTHING SYNCS THIS DIRECTORY TODAY. No Argo Application in
+# gitops/envs/staging points at manifests/, so this file is a staged intent
+# rather than a live grant. Verified 2026-09-16.
+#
+# WHY IT IS STILL BOUND CLUSTER-WIDE. The setec e2e creates a THROWAWAY
+# NAMESPACE PER RUN (`setec-e2e-<run id>`), and RBAC cannot pattern-match a
+# namespace. A grant that must work in a namespace nobody can name ahead of
+# time ends up bound cluster-wide. That is tradeoff 1, and it is why the
+# enumerated ceiling is held everywhere rather than in one place.
+#
+# THE NEXT STEP is to stop holding it at all: have Argo own setec's cluster
+# RBAC on staging and let the e2e install with the roles pre-provisioned, or
+# run the e2e on a cluster the runner owns. kata-fc/kata-qemu need real
+# nodes, so the second needs a leased throwaway node pool, not kind.
+# ─────────────────────────────────────────────────────────────────────────────
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: arc-runner-setec-driver
+  namespace: setec-system
+rules:
+  # Sandbox lifecycle for the round-trip smoke: create a throwaway Sandbox,
+  # watch/get its status, delete it on cleanup.
+  - apiGroups: ["setec.zeroroot.ai"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  # Health-check the operator + frontend Deployments before running the
+  # round-trip (fail fast with a clear "setec not deployed/healthy in
+  # staging" message instead of a confusing Sandbox-create timeout).
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    verbs: ["get", "list"]
+  # Read the workload pod's logs for the result marker, and list/get to find
+  # the pod the Sandbox controller creates for a given Sandbox CR (labeled
+  # setec.zeroroot.ai/sandbox=<name>, internal/podspec/builder.go).
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch"]
+  # gibson's e2e-setec-roundtrip health assert reads the frontend Service
+  # (`kubectl get svc setec-frontend`) before dialing it (run 31733409882
+  # died 403 here once everything else was green).
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+  # mTLS client cert for the direct-gRPC round-trip suite
+  # (gibson/e2e-setec-roundtrip.yml — SETEC_ROUNDTRIP_CERT/KEY/CA). Named
+  # explicitly (not a blanket `secrets` grant) to keep the RBAC surface
+  # minimal.
+  #
+  # Verified at setec-frontend-enablement time (deploy#1084): the Secret is
+  # issued by the cert-manager Certificate `setec-frontend-client-tls` in
+  # helm/gibson-workloads/templates/setec/frontend-tls.yaml in
+  # zeroroot-ai/charts,
+  # rendered into setec-system with keys tls.crt/tls.key/ca.crt — exactly
+  # what the workflow fetches.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["setec-frontend-client-tls"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: arc-runner-setec-driver
+  namespace: setec-system
+subjects:
+  - kind: ServiceAccount
+    name: arc-runner-sa
+    namespace: arc-runners
+roleRef:
+  kind: Role
+  name: arc-runner-setec-driver
+  apiGroup: rbac.authorization.k8s.io
+---
+# SandboxClass is cluster-scoped — the e2e jobs create a throwaway class per
+# run (setec-e2e-roundtrip-qemu-<run_id> / gibson-roundtrip-qemu) and delete
+# it in cleanup. Narrow to this one resource; everything else stays
+# namespace-scoped above.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: arc-runner-setec-sandboxclass-driver
+rules:
+  - apiGroups: ["setec.zeroroot.ai"]
+    resources: ["sandboxclasses"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: arc-runner-setec-sandboxclass-driver
+subjects:
+  - kind: ServiceAccount
+    name: arc-runner-sa
+    namespace: arc-runners
+roleRef:
+  kind: ClusterRole
+  name: arc-runner-setec-sandboxclass-driver
+  apiGroup: rbac.authorization.k8s.io
+---
+# ============================================================================
+# INSTALL-GRADE grant — setec e2e shadow install (gitops#320 / setec#113).
+#
+# setec's merge_group `roundtrip` job no longer smokes the live staging setec:
+# it `helm install`s the PR's OWN chart (charts/setec, with the sha-tagged
+# images build-images pushed) into a throwaway `setec-e2e-<run_id>` namespace,
+# round-trips a Sandbox against THAT install, then uninstalls and deletes the
+# namespace. This ClusterRole grants exactly what that flow needs on top of
+# the round-trip-only Role above. Derived from `helm template charts/setec`
+# rendered with the workflow's exact values (defaultClass.enabled=false,
+# runtimes.*.install=false, webhook/frontend off), which creates at install
+# time: 2 ServiceAccounts, 1 ConfigMap, 1 Deployment, 1 DaemonSet (namespaced)
+# and 2 release-prefixed ClusterRoles + 2 ClusterRoleBindings (cluster-scoped)
+# — NO Services (webhook/frontend/node-agent Service all gated off) and NO
+# RuntimeClasses (install=false; kata-deploy owns them). The chart's
+# preupgrade-runtime-check Job + its SA/CM/RBAC are `helm.sh/hook:
+# pre-upgrade` — never created on install — so no batch/jobs grant.
+#
+# Two deliberate, documented tradeoffs (both flagged in gitops#320):
+#
+#   1. NAMESPACE WILDCARD. Kubernetes RBAC cannot glob namespaces (no
+#      "setec-e2e-*" binding), and the per-run namespace cannot have a
+#      RoleBinding pre-provisioned. The namespaced rules below therefore
+#      apply cluster-wide via ClusterRoleBinding. Resource TYPES are kept to
+#      exactly what the chart renders + what helm/kubectl in the workflow
+#      touch; the widest consequence is secrets access outside the ephemeral
+#      namespaces — accepted for a CI-only SA on the staging cluster, see (2).
+#
+#   2. ESCALATE/BIND. The chart renders release-prefixed `<release>-manager` /
+#      `<release>-runtime-agent` ClusterRoles carrying the operator's own
+#      permissions (cluster-wide pods CRUD, networkpolicies CRUD, nodes
+#      patch, sandboxes CRUD). K8s escalation prevention means arc-runner-sa
+#      must either HOLD that whole union itself or hold `escalate`+`bind` on
+#      clusterroles. Both are escalation-equivalent for an adversary
+#      (cluster-wide pod create alone is a cluster-admin path); mirroring the
+#      union additionally breaks every setec merge group whenever the chart's
+#      manager role gains a rule (cross-repo RBAC drift). We grant
+#      escalate/bind — the honest, drift-proof form of the same trust level —
+#      and rely on the existing containment: this SA is reachable only from
+#      merge_group-triggered jobs on the trusted `staging-ephemeral` scale-set
+#      (fork PRs never reach it, see envs/staging/arc-runners.yaml).
+#
+# Epic: cicd-efficiency (board #44) / setec#113 / gitops#320.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: arc-runner-setec-installer
+rules:
+  # --- cluster-scoped -------------------------------------------------------
+  # Throwaway namespace per run: `helm install --create-namespace` (get +
+  # create) and `kubectl delete namespace` in cleanup. Names can't be
+  # pattern-restricted (see tradeoff 1). `patch`: the chart renders its own
+  # Namespace object and helm applies it via server-side apply, which the API
+  # server authorizes as patch once --create-namespace has created it (e2e
+  # run 31713724425 died 403 here).
+  #
+  # `list`: the e2e's start-of-run sweep enumerates `setec-e2e-*` namespaces
+  # and deletes the ones older than its own job timeout (setec#255). It needs
+  # this because a run cancelled mid-step never executes its own teardown —
+  # setec-e2e-31722553592 sat Active for 29h with its runtime-agent DaemonSet
+  # still running on five nodes. The sweep degrades to a warning without the
+  # verb, so this grant is what makes it effective. Read-only on top of the
+  # delete the SA already holds; it widens visibility, not authority.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "list", "create", "delete", "patch"]
+  # charts/setec/crds/ — helm applies the chart's CRDs via SERVER-SIDE APPLY,
+  # which the API server authorizes as `patch` when the object already exists
+  # (and `create` when it does not). The CRDs already exist in staging (live
+  # setec release), so without `patch` the shadow install dies 403 on its
+  # first CRD ("cannot patch customresourcedefinitions at the cluster
+  # scope", setec e2e run 31711591779). `create` stays for a fresh cluster.
+  # helm never deletes crds/-dir CRDs, so no delete verb.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list", "watch", "create", "patch"]
+  # Release-prefixed <release>-manager / <release>-runtime-agent ClusterRoles
+  # + Bindings the chart renders. escalate/bind rationale: header note (2).
+  # Full lifecycle verbs so a re-run over a half-torn-down release can adopt
+  # and clean leftovers. Per-run names (setec-e2e-<run_id>-…) rule out
+  # resourceNames restriction.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # `escalate` IS GONE (hosted#108). It let this SA mint any permission the
+  # cluster can express, which is what made the grant cluster-admin-equivalent.
+  # Without it, Kubernetes escalation prevention applies: this SA may only
+  # create a role whose permissions it already holds. The block at the end of
+  # these rules holds exactly what setec's chart grants, so the install still
+  # passes — on the merits, not by exemption.
+  #
+  # `bind` stays, scoped by name to the six ClusterRoles setec's chart renders.
+  # Binding one of those confers only that fixed, chart-authored rule set.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    verbs: ["bind"]
+    resourceNames: [setec-frontend, setec-frontend-exec, setec-manager, setec-preupgrade-runtime-check,
+  setec-runtime-agent, setec-sandbox-namespace]
+  # Workflow preflight (`kubectl get runtimeclass kata-fc/kata-qemu`) + the
+  # overhead read that mirrors kata-deploy's podFixed into the chart values.
+  # The chart itself installs no RuntimeClass (runtimes.*.install=false).
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    resourceNames: ["kata-fc", "kata-qemu"]
+    verbs: ["get"]
+  # Failure diagnostics only (`kubectl get nodes -o wide`). Read-only.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # setec#194 session-checkpoint e2e: the drain scenario cordons the node a
+  # session's microVM is on and asserts the session resumes on ANOTHER node
+  # with process state intact, uncordoning in cleanup. `kubectl cordon` is a
+  # patch of .spec.unschedulable.
+  #
+  # This is the broadest verb added here, and it is granted knowingly: node
+  # names are per-run Karpenter instances so resourceNames cannot restrict
+  # it, and a cordon of every node in staging is a real DoS. It is
+  # acceptable ONLY because this SA already holds `escalate`/`bind` on
+  # clusterroles (see header note 2), which this file already documents as
+  # escalation-equivalent — node patch adds no authority an attacker at
+  # that grant does not already have. Revisit both together, not this one
+  # alone.
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["patch", "update"]
+  # --- namespaced, bound cluster-wide (tradeoff 1) ---------------------------
+  # Helm release storage (sh.helm.release.v1.<release>.v1) — the ONLY reason
+  # this SA can touch secrets outside setec-system; see tradeoff 1.
+  #
+  # `list` and `watch` on secrets ARE HELD, and this comment says why rather
+  # than pretending otherwise. Setec's chart renders Role/gibson-setec-cert-
+  # reader, a NAMESPACED role with secrets get/list/watch, and without
+  # `escalate` this SA can only create that Role if it holds the same. Because
+  # this ClusterRole is bound cluster-wide (tradeoff 1: the e2e namespace is
+  # named at run time), holding it means holding it everywhere. That is the
+  # one enumeration primitive left in this grant; it is here because setec
+  # needs it, and it is exactly as wide as setec's own reader, no wider.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Chart-rendered namespaced resources (install + uninstall + re-run
+  # adoption): operator/runtime-agent ServiceAccounts, runtimes ConfigMap,
+  # operator Deployment, runtime-agent DaemonSet.
+  - apiGroups: [""]
+    resources: ["serviceaccounts", "configmaps"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "daemonsets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The session-checkpoint install (setec#194) turns on nodeAgent +
+  # snapshots, which the base round-trip install leaves off. That renders
+  # two kinds this grant never needed before — found by rendering
+  # charts/setec with the session job's exact flags and diffing against
+  # this file, the same method that found the PodDisruptionBudget gap:
+  #
+  #   - Service            <release>-node-agent (the operator's gRPC
+  #                        channel to the node-agent, :50052)
+  #   - Certificate ×2     <release>-nodeagent-server and
+  #                        <release>-operator-client — the mTLS pair for
+  #                        that channel, issued by a ClusterIssuer
+  #
+  # Without the Certificate grant the install 403s; without the Service
+  # grant it 403s one resource later. Both are namespaced to the throwaway
+  # release namespace in practice, and cert-manager (not this SA) does the
+  # issuing — the SA only creates the request objects.
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # setec#65 (2026-09-18) issues the node-agent CA from a namespaced
+  # `Issuer` of kind `ca` in the release namespace, so the install now
+  # creates one Issuer beside its Certificates. Same reasoning as above:
+  # cert-manager does the issuing, the SA only creates the request object.
+  - apiGroups: ["cert-manager.io"]
+    resources: ["certificates", "issuers"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # `helm install --wait` readiness-checks a Deployment via its newest
+  # ReplicaSet and its Pods — read-only.
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list", "watch"]
+  # setec chart >= 0.109 renders more kinds the original grant predates
+  # (found by rendering charts/setec with the e2e's exact flags and diffing
+  # against this file; the shadow install 403'd first on the PDB, e2e run
+  # 31712622245):
+  #   - PodDisruptionBudget (operator PDB)
+  #   - Job (pre-upgrade runtime-check hook)
+  #   - namespaced Role/RoleBinding (leader-election grant, setec#219)
+  #   - Validating{AdmissionPolicy,Binding} (sandbox-host/node guards) —
+  #     cluster-scoped CEL policies; full lifecycle so a re-run over a
+  #     half-torn-down release can adopt and clean leftovers, same rationale
+  #     as the clusterroles rule above.
+  - apiGroups: ["policy"]
+    resources: ["poddisruptionbudgets"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["batch"]
+    resources: ["jobs"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # The leader-election Role grants coordination.k8s.io/leases, which this SA
+  # does not hold — Kubernetes' escalation check would 403 the create without
+  # `escalate`; `bind` covers the RoleBinding. Same rationale as the
+  # clusterroles escalate/bind rule above.
+  # Same for namespaced Roles: no `escalate`. `bind` alone, and only for roles
+  # whose permissions this SA already holds, which escalation prevention checks.
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles"]
+    verbs: ["bind"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Workload-pod discovery + result-marker log read + failure diagnostics in
+  # the throwaway namespace (same shape as the setec-system Role above).
+  # create/delete: the e2e pre-warms a scale-from-zero metal node with a
+  # placeholder pod before creating the Sandbox (setec#230/#231) — Karpenter
+  # only provisions on a Pending Pod, and the operator hard-fails a Sandbox
+  # when no labeled node exists yet.
+  - apiGroups: [""]
+    resources: ["pods", "pods/log"]
+    verbs: ["get", "list", "watch", "create", "delete"]
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list", "watch"]
+  # Sandbox round-trip inside the throwaway namespace (the setec-system Role
+  # above cannot reach it). patch covers `kubectl apply` over a leftover.
+  - apiGroups: ["setec.zeroroot.ai"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # --- HELD SO SETEC'S CHART RBAC CAN BE CREATED WITHOUT `escalate` -------
+  # Every (group, resource, verb) below is one setec's chart grants to its
+  # own ServiceAccounts and this SA did not already hold. Escalation
+  # prevention requires the creator of a role to hold what the role grants,
+  # so these are the price of removing `escalate`. Computed from a render of
+  # the gibson umbrella at values-baseline.yaml on 2026-09-16; re-derive it
+  # the same way when setec's RBAC changes, and add nothing by hand.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: [create, patch]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: [watch]
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: [watch]
+  - apiGroups: [""]
+    resources: ["persistentvolumeclaims"]
+    verbs: [create, delete, get, list, watch]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: [patch, update]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingwebhookconfigurations"]
+    verbs: [get, list, watch]
+  - apiGroups: ["coordination.k8s.io"]
+    resources: ["leases"]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: [create, patch]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies"]
+    verbs: [create, delete, get, list, patch, update, watch]
+  - apiGroups: ["node.k8s.io"]
+    resources: ["runtimeclasses"]
+    verbs: [list, watch]
+  - apiGroups: ["setec.zeroroot.ai"]
+    resources: ["sandboxclasses"]
+    verbs: [get, list, patch, update, watch]
+  - apiGroups: ["setec.zeroroot.ai"]
+    resources: ["sandboxes"]
+    verbs: [update]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: arc-runner-setec-installer
+subjects:
+  - kind: ServiceAccount
+    name: arc-runner-sa
+    namespace: arc-runners
+roleRef:
+  kind: ClusterRole
+  name: arc-runner-setec-installer
+  apiGroup: rbac.authorization.k8s.io

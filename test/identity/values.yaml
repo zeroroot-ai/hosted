@@ -1,0 +1,45 @@
+# test/identity/values.yaml — the overlay exit-test-identity.sh's ONLINE leg
+# layers on the baseline profile (zeroroot-ai/charts helm/gibson/values-baseline.yaml)
+# and the CI rung (hosted#208).
+#
+# Same shape as test/platform-owner/values.yaml and test/signup/values.yaml:
+# the baseline profile ships global.email.provider="log" (a
+# non-delivering stub) and BOTH global.platformOwner.offlineSetup and
+# global.firstTenant.offlineSetup as true, on purpose (no operator input is
+# needed to install). This overlay swaps in the chart's own Mailpit dev sink
+# and turns both offlineSetup flags off, so every setup link this exit test
+# proves (the Platform owner's, the first tenant's Owner's, an invitee's
+# accept link, and the MFA-reset notice) is observable in one place.
+#
+# The OFFLINE leg of this exit test runs against the baseline as shipped,
+# with NO overlay at all — see exit-test-identity.sh's --offline mode.
+gibson-workloads:
+  # Debug logging on ext-authz, so a hosted#204 miss shows each allow and
+  # its reason. At info level an allowed FGA decision is not logged at all,
+  # and run 36647738112 accepted a demoted writer for 15s with nothing to read.
+  extAuthz:
+    logLevel: debug
+  mailpit:
+    enabled: true
+# One mail value for the daemon, the tenant-operator and Zitadel (hosted#223,
+# charts feat/223-one-global-email). The chart fails the render on each old
+# per-sender block. The in-cluster Mailpit sink listens in plaintext, offers no
+# STARTTLS, and accepts any sender with no credential (MP_SMTP_AUTH_ACCEPT_ANY).
+# So tlsMode is plaintext and the credential source is none. The chart refuses
+# plaintext with a credential, so this pair cannot be copied into a cloud
+# overlay by accident.
+global:
+  email:
+    provider: "smtp"
+    from: "no-reply@localhost.zeroroot.ai"
+    fromName: "Gibson"
+    smtp:
+      host: "gibson-mailpit"
+      port: 1025
+      tlsMode: "plaintext"
+      credentials:
+        source: "none"
+  platformOwner:
+    offlineSetup: false
+  firstTenant:
+    offlineSetup: false

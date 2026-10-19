@@ -1,0 +1,1051 @@
+# Production env overlay for the umbrella chart (ADR-0072), apex zeroroot.ai.
+#
+# Derived from the proven envs/staging/values.yaml with the env deltas applied:
+#   global.domain=zeroroot.ai, zitadel ExternalDomain=app.zeroroot.ai,
+#   prod IRSA role ARNs + SES identity zeroroot.ai.
+# The one secret backend is OpenBao in the cluster, as in each environment
+# (ADR-0073: no secret name prefix separates the environments).
+# Consumed by envs/prod/gibson.yaml (the single prod platform Application,
+# multi-source: OCI umbrella chart gibson:<chartVersion> + this file). Prod is
+# only advanced to a chartVersion already staging-smoke-green (gitops#251).
+#
+# Stripe is in LIVE mode (acct_<redacted> — go-live 2026-08, reinstating
+# the gitops#282 flip). REQUIRED at prod standup: put the LIVE values into the
+# keyring input members STRIPE_SECRET_KEY, STRIPE_PUBLISHABLE_KEY and
+# STRIPE_WEBHOOK_SECRET (`scripts/keyring.sh set`, then `make substrate`,
+# hosted#450). The bringup copies them into the platform's own OpenBao key
+# gibson-stripe-credentials, in place of the placeholders the seed table
+# plants, and preflight fails prod without them. The
+# secret_key (sk_live_),
+# webhook_secret (whsec_ from the LIVE-mode webhook endpoint at
+# https://app.zeroroot.ai/api/billing/webhook), and publishable_key (pk_live_).
+# The billing overlay reads secret_key and webhook_secret through its own
+# ExternalSecret (gitops/saas-overlay/billing-webhook). The dashboard holds no
+# Stripe value since charts#375, and nothing compares the key prefix to a mode.
+# Price IDs are NOT pinned here: billing resolves them at runtime by the
+# stable lookup_key of each plan, identical across test/live.
+# Preflight the live account (lookup_keys + webhook endpoint) with
+# deploy scripts/stripe-live-preflight.sh before standup.
+
+# The pinned umbrella chart version does NOT live in this file. It is the OCI
+# source `targetRevision` in envs/prod/gibson.yaml — the single promotion
+# marker, only advanced to a version already staging-smoke-green (gitops#251).
+# The old `chartVersion:` key here was deleted in gitops#448: writing it made
+# every promotion touch this $values file in the same commit as the Application
+# spec, which raced Argo's unordered reconciliation. A promotion must never
+# change this file (check-promotion-isolation.sh enforces that).
+
+gibson-workloads:
+  # ---------------------------------------------------------------------------
+  # tenantNeo4j — the per-tenant graph, sized for a REAL cluster.
+  #
+  # The chart's default `team` tier is the MEASURED FLOOR: 100m / 1Gi, the
+  # smallest size a non-backed-up Neo4j is known to run at, with its heap
+  # pinned by the operator. That number exists so the whole platform plus two
+  # tenants fit one local node, and baseline, developer and CI install it
+  # (ADR-0090).
+  #
+  # It is not what a paying tenant should run on. Neo4j's own Helm chart
+  # refuses to render below 500m CPU and 2Gi memory, and states that as its
+  # minimum; the platform's own graph is pinned at exactly that. A hosted
+  # environment has no reason to run a tenant's graph below the vendor's
+  # stated minimum, so this raises `team` to it.
+  #
+  # WHY THIS LIVES HERE AND NOT IN THE CHART. ADR-0090 puts staging and
+  # production sizing with the environment, not with the chart: the chart
+  # ships the floor an operator can install anywhere, and an environment that
+  # can afford more says so itself.
+  #
+  # org and enterprise are already at or above the vendor minimum in the
+  # chart, so they are not restated. One name for one number.
+  #
+  # Delivered by the tenant-neo4j-template ConfigMap, which the chart renders
+  # and the tenant-operator reads. Until zeroroot-ai/charts#99 that ConfigMap
+  # did not exist, so EVERY environment silently ran the 100m/1Gi dev size
+  # regardless of what any values file said.
+  tenantNeo4j:
+    tiers:
+      team:
+        storage: 10Gi
+        cpu: 500m
+        memory: 2Gi
+  global:
+    domain: "zeroroot.ai"
+    imagePullSecrets:
+      - name: ghcr-credentials
+  # -----------------------------------------------------------------------------
+  # externalSecrets — the ClusterSecretStore reads the platform's own OpenBao.
+  # -----------------------------------------------------------------------------
+  # The one External Secrets backend is OpenBao, on every substrate (ADR-0083,
+  # deploy#1733). AWS Secrets Manager is not a backend any more, so the
+  # selector, the IRSA ServiceAccount and the per-env key prefix all go: every
+  # remoteRef key is flat under the kv v2 mount `secret`. The chart renders the
+  # one ClusterSecretStore on every profile, so `create` goes too — no
+  # Terraform workspace makes a store any more (deploy#1732). Only the store's
+  # NAME is an env choice.
+  #
+  # The ServiceAccount is left entirely to the chart. It defaults the name to
+  # `external-secrets` and the NAMESPACE to the release namespace, which is
+  # where the umbrella installs External Secrets. Naming a namespace here is
+  # what broke staging: the store came up InvalidProviderConfig, and because it
+  # is a sync hook the whole gibson Application aborted with every later wave
+  # Missing, presenting three layers away as a registry-auth 401 (gitops#568).
+  externalSecrets:
+    clusterSecretStore:
+      name: "gibson-secrets"
+  # -----------------------------------------------------------------------------
+  # certManager — envoy edge uses letsencrypt-prod with the DNS-01 Route53
+  # solver (deploy#362 landed the chart support); no LB warmup race because
+  # the challenge never traverses the data plane. cert-manager publishes the
+  # challenge record with the DNS credential stage 0 mints
+  # (substrate/gibson-bootstrap, IAM user zeroroot-ai-<env>-dns): the bringup
+  # writes it into Secret gibson/route53-credential, named below, and
+  # external-dns reads the same Secret. Stage 1 mints no IRSA role
+  # (deploy#1744); without this Secret cert-manager fell back to the node's
+  # instance profile and every challenge stayed pending on "no EC2 IMDS role
+  # found" (staging 2026-09-10).
+  #
+  # Internal certs (daemon callback, ext-authz, postgres aliases) remain on
+  # selfsigned-ca until deploy#363 (AWS PCA) lands the privateca-issuer
+  # controller + IRSA role + SCP allowlist.
+  # -----------------------------------------------------------------------------
+  certManager:
+    issuers:
+      letsencrypt:
+        enabled: true
+        email: "ops@zeroroot.ai"
+        solver: "dns01-route53"
+        dns01Route53:
+          region: "us-east-1"
+          # hostedZoneID intentionally empty — cert-manager auto-detects from
+          # the Certificate's dnsNames (route53:ListHostedZonesByName, which
+          # the DNS credential allows). Stage 0 recreates the zone with a new
+          # id on every fresh bringup, so a literal here would go stale.
+          hostedZoneID: ""
+          credentialsSecret:
+            name: route53-credential
+      selfsigned:
+        enabled: true
+      vault:
+        enabled: false
+    envoyEdge:
+      enabled: true
+      issuer: "letsencrypt-prod"
+      secretName: "gibson-envoy-tls"
+      # The names of the helper (gibson.tlsSans) without www: app, api, docs
+      # and the apex. www is off-cluster (ADR-0077), so the edge serves no www
+      # name. The list is explicit so the bringup knows the names, and can
+      # restore the kept edge certificate instead of asking Let's Encrypt for a
+      # new one (scripts/lib/edge-cert.sh, row 9 of the drill path audit). The
+      # first recreate after this change issues once for the new set.
+      dnsNames:
+        - "app.zeroroot.ai"
+        - "api.zeroroot.ai"
+        - "docs.zeroroot.ai"
+        - "zeroroot.ai"
+  # -----------------------------------------------------------------------------
+  # Envoy — fronted by AWS NLB. clusterIP pinned outside the EKS auto-range.
+  # -----------------------------------------------------------------------------
+  envoy:
+    replicas: 2
+    # The edge routes of the private billing service (charts#375, ADR-0060,
+    # hosted#440). The core chart holds no billing route from 0.140.0. These
+    # entries add them, and the billing-webhook overlay serves each one at
+    # this Service and port. A chart before 0.140.0 ignores the list and keeps
+    # its own webhook route, so no pinned version has two billing routes or
+    # none. The edge adds no authentication to an extra route, so each entry
+    # names who authenticates the request:
+    #   /api/billing/webhook  signed-request. Stripe signs each delivery, and
+    #                         the receiver verifies the signature.
+    #   /signup-step          query-token. The request carries the opaque
+    #                         signup step token that the daemon issued, and
+    #                         billing has the daemon check it before it acts.
+    #                         No user session exists yet at this step.
+    #   /account              own-sign-in. billing signs the user in as its
+    #   /account/callback     own sign-in client (D54). The callback is the
+    #                         second half of that sign-in, and it must sit
+    #                         under /account, the Path of the sign-in cookies.
+    extraRoutes:
+      - path: /api/billing/webhook
+        rewrite: /webhook
+        service: gibson-billing-webhook
+        port: 8090
+        rateLimitClass: catch-all
+        auth: signed-request
+      - path: /signup-step
+        service: gibson-billing-webhook
+        port: 8090
+        rateLimitClass: login
+        auth: query-token
+      - path: /account
+        service: gibson-billing-webhook
+        port: 8090
+        rateLimitClass: login
+        auth: own-sign-in
+      - path: /account/callback
+        service: gibson-billing-webhook
+        port: 8090
+        rateLimitClass: login
+        auth: own-sign-in
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 512Mi
+    # podDisruptionBudget is deliberately NOT set here (gitops#381).
+    #
+    # The chart auto-enables the Envoy PDB when replicas > 1 and omits it at
+    # replicas: 1, because a PDB over a single replica cannot protect anything
+    # — it can only obstruct. This overlay used to force `enabled: true`
+    # against `replicas: 1`, which rendered `minAvailable: 1` over a 1-replica
+    # Deployment: the budget permits ZERO voluntary evictions, so the eviction
+    # API rejects the Envoy pod forever and `kubectl drain` / Karpenter
+    # consolidation / a managed-nodegroup roll hangs on that node indefinitely.
+    # It made node replacement strictly worse, not safer.
+    #
+    # Leaving it unset keeps the pair coherent in both directions: raise
+    # `replicas` above 1 and the chart brings the PDB back on its own, with no
+    # second edit to remember. scripts/check-pdb-drainability.sh renders every
+    # env against its own pinned chartVersion and fails any PDB that permits
+    # zero voluntary evictions, so the combination cannot come back unnoticed.
+    service:
+      type: LoadBalancer
+      httpsPort: 443
+      annotations:
+        service.beta.kubernetes.io/aws-load-balancer-type: external
+        service.beta.kubernetes.io/aws-load-balancer-nlb-target-type: ip
+        service.beta.kubernetes.io/aws-load-balancer-scheme: internet-facing
+        service.beta.kubernetes.io/aws-load-balancer-cross-zone-load-balancing-enabled: "true"
+        service.beta.kubernetes.io/aws-load-balancer-attributes: "deletion_protection.enabled=true"
+        # external-dns hostname annotation is injected by the envoy Service
+        # template from gibson.externalDnsHosts (apex,www,app,api — auth. dropped)
+        # for LoadBalancer Services. No literal here (deploy#683).
+    tls:
+      selfSigned: false
+      secretName: "gibson-envoy-tls"
+    zitadel: {}
+    # dashboardClientId is intentionally NOT set here. The Envoy pod's
+    # `render-envoy-config` initContainer resolves it from the live
+    # `gibson-dashboard-oidc` Secret at startup (platform-operator owns
+    # that Secret and rewrites it on every Zitadel reset / OIDC re-mint).
+    # Stakater Reloader rolls Envoy when the Secret changes. No PR /
+    # Argo re-sync is required after a Zitadel reset — the next pod
+    # restart picks up the new client_id automatically.
+    # See zeroroot-ai/deploy#130 + the runtime-resolution follow-up.
+    # SPIRE identity admission ships in Deny (chart >= 0.110.0), so the principal
+  # allowed to create workload identities must be named explicitly or the chart
+  # refuses to render. On the EKS clusters the chart is applied by Argo CD, so
+  # the Argo application controller is that principal — the same value
+  # deploy/helm/gibson/ci/values-staging.yaml has used since the policy landed.
+  #
+  # The real platform-identity boundary is GitOps write access plus the Argo
+  # credential, not admission (gitops#423, deploy ci/values-staging.yaml:23-24).
+  spire:
+    identityAdmission:
+      workloadCreators:
+        - "system:serviceaccount:argocd:argocd-application-controller"
+
+  # -----------------------------------------------------------------------------
+  # OpenBao — ONE replica. The chart writes `storage "file"` and has no Raft
+  # storage, so each replica holds its own data directory. Three replicas
+  # behind one Service are three separate secret stores: a write lands on one
+  # pod and the next read can reach another. `mode` was a key no template
+  # reads. More replicas need Raft storage in the chart first (ADR-0075).
+  # Transit engine + JWT auth backend come up via the chart's init Job, same
+  # as kind. SPIRE OIDC discovery URL is in-cluster.
+  # -----------------------------------------------------------------------------
+  openbao:
+    # `config` is deliberately NOT overridden. The seal is the static key in
+    # the bringup keyring (bringup-keyring/openbao-seal-key, deploy#1731): no
+    # KMS key, no IRSA role, no recovery shares, and every one of those is a
+    # chart default. The KMS auto-unseal this env used to configure left with
+    # the AWS control plane (deploy#1744); hosted#61 deleted it and left the
+    # bare `config:` key behind, which YAML reads as null — and null REPLACES
+    # the chart's whole config map, taking the seal and the audit device with
+    # it. `helm template` on this file then failed at
+    # "openbao.config.seal.keyringSecretName is REQUIRED", so the first prod
+    # bringup would have died in stage 2. Staging keeps the key only because
+    # it sets audit.enabled there; prod adopts the audit device when staging
+    # has soaked (deploy#1436).
+    persistence:
+      enabled: true
+      size: 10Gi
+      storageClass: gp3
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+    jwtAuth:
+      spireOidcIssuer: "https://gibson-spiffe-oidc-discovery-provider"
+      spireBundleConfigMap: "spire-bundle"
+      # SPIRE→Vault audience contract (gibson#167, deploy#360,
+      # ADR-0009 amendment docs#34). Must match the gibson-operators
+      # values-aws-prod.yaml setting so the daemon and tenant-operator
+      # negotiate the same `aud` claim.
+      audience: "gibson-saas"
+    # The OpenBao volume is archived by Velero (gibson-velero, the
+    # platform-hourly Schedule with defaultVolumesToFsBackup) into the
+    # durable bucket under backups/velero/, with the platform credential
+    # from the bringup keyring. The chart's openbao.backup CronJob stays at
+    # its default (off): it wrote to a backups bucket and through an IRSA
+    # role that stage 0 and stage 1 no longer create (deploy#1744), so an
+    # enabled CronJob here failed daily against a bucket that does not exist.
+  # -----------------------------------------------------------------------------
+  # Gibson daemon — replicas + storage class. Embedder cache stays in
+  # skip mode for first cutover (downloads on first use). Flip to s3 + S3
+  # source bucket once steady-state.
+  # -----------------------------------------------------------------------------
+  gibson:
+    replicas: 2
+    # The audit export (ADR-0113, charts#446). The daemon writes each audit
+    # record under audit/ of the durable bucket of this env, with an object
+    # lock. The bucket policy of stage 0 requires COMPLIANCE on prod
+    # (substrate/gibson-bootstrap, audit_lock_mode). The bucket is the one of
+    # platformPostgres.backup.destinationPath: the chart refuses two buckets.
+    auditExport:
+      bucket: "zeroroot-ai-prod-durable-447184491447"
+      lockMode: "COMPLIANCE"
+      region: "us-east-1"
+    # No image override: the chart's digest pins apply (ADR-0072 — a chart
+    # version IS the deployable; images are pinned at package time and
+    # staging-validated at this same chartVersion before promotion).
+    resources:
+      requests:
+        cpu: 1000m
+        memory: 2Gi
+      limits:
+        cpu: 2000m
+        memory: 4Gi
+    serviceAccount:
+      create: true
+      name: "gibson"
+    persistence:
+      enabled: true
+      storageClassName: gp3
+      size: 20Gi
+    embedder:
+      cache:
+        # skip mode assumed 'downloads on first use' works — it can't: the
+        # daemon rootfs is read-only, so the built-in HuggingFace fallback
+        # crashloops at 'failed to create embedder' (deploy#826 live).
+        # download mode hydrates the PVC once via init container. Flip to
+        # s3 + source bucket at steady-state as originally planned.
+        enabled: true
+        initMode: download
+    # Entitlements seam knob (ADR-0074 / deploy#1032).
+    # The entitlements-svc workload is now a SaaS overlay (separate Argo app:
+    # envs/prod/apps/entitlements-svc.yaml). The core umbrella
+    # carries only this seam knob. The overlay deploys the actual Service and
+    # this value points the daemon at it over SPIFFE mTLS.
+    entitlementsEndpoint: "gibson-entitlements-svc:9091"
+    # INVARIANT (deploy#1055, gitops#356): endpoint set implies required true.
+    # Without this the daemon falls back to the unlimited OSS ConfigProvider
+    # when the seam fails to wire — fail-OPEN in a paying environment, which
+    # is the exact posture the guard exists to prevent. Fail closed instead.
+    #
+    # LIVE since prod advanced to 0.109.2 (gitops#378). Both knobs were inert
+    # for as long as prod sat on 0.104.0, which predates the seam templates
+    # (they land in 0.105.0): the values were set, the chart had nothing to
+    # consume them, and the daemon ran the embedded unlimited OSS
+    # ConfigProvider regardless. Rendering envs/prod/values.yaml against 0.109.2
+    # now emits ENTITLEMENTS_ENDPOINT=gibson-entitlements-svc:9091 and
+    # GIBSON_ENTITLEMENTS_REQUIRED=true on the daemon, so the seam is dialled
+    # and a seam failure is a denial rather than a silent upgrade to unlimited.
+    # profile-coherence-guard renders this file against whatever chartVersion
+    # is pinned above on every PR, which is what keeps the pair honest — the
+    # original bug was invisible to any check that only grepped this file
+    # (gitops#356, gitops#359).
+    entitlementsRequired: true
+    # The neutral connection points (ADR-0060, D54, charts#375). The signup
+    # waits on the external step of the billing service, at its redirect
+    # endpoint on the app host. The SPIFFE path names the one caller that can
+    # end a signup step: billing, whose overlay ClusterSPIFFEID mints this
+    # path (gitops/saas-overlay/billing-webhook, spiffe.path). Nothing calls
+    # the tenant activation point yet, so its path stays empty and the daemon
+    # accepts no caller there.
+    connectionPoints:
+      signupStepUrl: "https://app.zeroroot.ai/signup-step"
+      signupStepCompleterPath: "platform/billing"
+  # -----------------------------------------------------------------------------
+  # Dashboard — Zitadel issuer is the public hostname.
+  # -----------------------------------------------------------------------------
+  dashboard:
+    replicas: 2
+    # Marketing host for SaaS plan-selection redirects (WWW_URL). REQUIRED
+    # whenever billing is on: the deployment-profile resolver fail-closes on
+    # billing-without-marketing-host, which 500s every route including /login.
+    #
+    # There is ONE marketing site and it is off-cluster (ADR-0077): S3 behind
+    # CloudFront, production-only, deliberately not forked per environment.
+    # No chart deploys it, no env has its own copy, and no `www.<env>.` host
+    # exists in DNS. So every environment points at the same public origin.
+    wwwUrl: "https://www.zeroroot.ai"
+    # No image override: the chart's digest pins apply (ADR-0072 — a chart
+    # version IS the deployable; images are pinned at package time and
+    # staging-validated at this same chartVersion before promotion).
+    resources:
+      requests:
+        cpu: 200m
+        memory: 256Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+    serviceAccount:
+      create: true
+    zitadel:
+      issuer: ""
+      # Auth.js callback URL — match the public app hostname.
+      authUrl: ""
+    # NO dashboard mail. dashboard#181 deleted src/lib/email and charts#329
+    # deleted dashboard.auth.email with it, so a provider, a from address and a
+    # contact-sales inbox set here would reach a Deployment that reads none of
+    # them. The SES relay this block named is still the platform's one relay:
+    # every sender reaches it through global.email below, which this overlay
+    # already sets.
+
+    # No Stripe value (charts#375, ADR-0060). The dashboard holds no billing
+    # code. It shows the account link of the billing service and the texts of
+    # the signup step. The owner approved each text on 2026-10-05
+    # (hosted#440). Do not change a word: the billing overlay render test
+    # compares each one byte for byte.
+    accountLink:
+      url: "https://app.zeroroot.ai/account"
+      label: "Plan and payment"
+    signupStep:
+      title: "Payment details"
+      text: "You add your payment details on a secure page from our payment provider. You return here after that."
+      buttonLabel: "Continue"
+      waitingText: "We are confirming your payment details. This takes a few seconds."
+      failureText: "We could not confirm your payment details. No account was created."
+      retryLabel: "Try again"
+  # -----------------------------------------------------------------------------
+  # ext-authz — IRSA for AWS calls (KMS verify if needed).
+  # -----------------------------------------------------------------------------
+  extAuthz:
+    replicas: 2
+    # No image override: the chart's digest pins apply (ADR-0072 — a chart
+    # version IS the deployable; images are pinned at package time and
+    # staging-validated at this same chartVersion before promotion).
+    serviceAccount:
+      create: true
+      name: "gibson-ext-authz"
+  # -----------------------------------------------------------------------------
+  # Zitadel — externalDomain is the public hostname; externalSecure true.
+  # Database lives on Aurora (RDS) via the gibson.thirdPartyPostgres.zitadel.*
+  # helpers (thirdPartyPostgres.external.enabled=true above). deploy#572.
+  # -----------------------------------------------------------------------------
+  zitadel:
+    zitadel:
+      configmapConfig:
+        ExternalDomain: ""
+        ExternalPort: 443
+        ExternalSecure: true
+  # -----------------------------------------------------------------------------
+  # Daemon IdP admin client — issuer is the EXTERNAL Zitadel issuer (the
+  # instance ExternalDomain above), NOT the in-cluster service host. Zitadel
+  # routes the Management API by request Host, so the daemon must use the
+  # public issuer or user lookups hit the wrong instance and the Members /
+  # team roster fall back to raw UUIDs (deploy#632, two-plane addressing
+  # contract / #630). In prod the daemon reaches it over public DNS (ALB →
+  # Envoy → Zitadel); discoveryURL stays empty so discovery falls back to the
+  # issuer. (S13/#642 will derive this from the gibson.oidcIssuer helper once
+  # Zitadel's ExternalDomain moves to app.<domain>.)
+  idp:
+    zitadel:
+      issuer: ""
+  # -----------------------------------------------------------------------------
+  # SPIRE (server + agent + spiffe-csi-driver + controller-manager + oidc) is
+  # rendered by the umbrella chart's `spire` sub-chart dependency
+  # (helm/gibson/Chart.yaml, spiffe helm-charts-hardened), NOT by a
+  # standalone Argo Application — apps/<env>/spire.yaml was retired with the
+  # single-main collapse and does not exist. No env overlay block is needed:
+  # the umbrella's global.spire wiring (controller-manager className
+  # "gibson-gibson", trust domain zeroroot.ai) applies as-is.
+  # -----------------------------------------------------------------------------
+  # In-cluster Redis (Bitnami) — gp3 storage, larger size for prod traffic.
+  # -----------------------------------------------------------------------------
+  redis:
+    master:
+      persistence:
+        enabled: true
+        storageClass: gp3
+        size: 10Gi
+      resources:
+        requests:
+          cpu: 200m
+          memory: 512Mi
+        limits:
+          cpu: 1000m
+          memory: 1Gi
+  # -----------------------------------------------------------------------------
+  # platformPostgres — Aurora PostgreSQL (RDS), NOT in-cluster CNPG (deploy#572 /
+  # deploy#567 S8). external.enabled flips the gibson.platformPostgres.* helpers
+  # to read external.host etc. instead of the kind CNPG Service.
+  #
+  # external.host is the stable in-cluster ExternalName
+  # platform-postgres-rw.gibson.svc.cluster.local (a TF-managed Service aliasing
+  # the RDS writer endpoint) — committed verbatim, no render step (deploy#753).
+  #
+  # The password Secret is ESO-projected from AWS Secrets Manager
+  # (gibson/prod/rds/<db>, created by the rds Terraform module). sslMode=require
+  # because RDS forces TLS.
+  # -----------------------------------------------------------------------------
+  platformPostgres:
+    external:
+      enabled: true
+      host: "platform-postgres-rw.gibson.svc.cluster.local"
+      port: 5432
+      database: "gibson_platform"
+      username: "gibson_platform"
+      sslMode: "require"
+      passwordSecretName: "gibson-platform-postgres-credentials"
+      passwordSecretKey: "password"
+  # -----------------------------------------------------------------------------
+  # dataPlane.postgres — per-tenant admin Postgres for the daemon's CREATEDB
+  # bootstrap pool. Points at the Aurora writer endpoint (gibson.tenant.dbHost
+  # reads dataPlane.postgres.host first); the daemon creates per-tenant
+  # databases + roles on the same RDS cluster (deploy#572).
+  # -----------------------------------------------------------------------------
+  dataPlane:
+    postgres:
+      host: "platform-postgres-rw.gibson.svc.cluster.local"
+      port: 5432
+      admin_database: "postgres"
+      # MUST pair with the password the secret ref actually carries:
+      # TENANT_POSTGRES_ADMIN_PASSWORD maps to the Aurora `tenant_admin`
+      # role's password (gibson/prod/gibson-tenant-admin-postgres-password),
+      # NOT the gibson_admin master. tenant_admin holds CREATEDB+CREATEROLE
+      # (deploy#841). Secret name is release-prefixed by the umbrella:
+      # gibson-gibson-workloads-db-secrets.
+      admin_username: "tenant_admin"
+      admin_password_secret_ref:
+        name: "gibson-gibson-workloads-db-secrets"
+        key: "TENANT_POSTGRES_ADMIN_PASSWORD"
+  # -----------------------------------------------------------------------------
+  # tests.postgres — point the helm-test Postgres probe at the Aurora writer
+  # endpoint instead of the in-cluster CNPG -rw Service (deploy#572).
+  # -----------------------------------------------------------------------------
+  tests:
+    postgres:
+      host: "platform-postgres-rw.gibson.svc.cluster.local"
+      port: 5432
+  # -----------------------------------------------------------------------------
+  # Observability (D26, hosted#423). The chart installs no stack. It renders its
+  # ServiceMonitors and PrometheusRules when the cluster serves
+  # monitoring.coreos.com, and the Prometheus stack of this environment
+  # (apps/monitoring.yaml, namespace monitoring) loads them.
+  # jaeger.enabled is still a live toggle and is unaffected.
+  # -----------------------------------------------------------------------------
+  jaeger:
+    enabled: false
+  # -----------------------------------------------------------------------------
+  # saas — tenant isolation primitives are PER-TENANT, not for the platform ns.
+  # -----------------------------------------------------------------------------
+  # Per-tenant isolation (NetworkPolicy / ResourceQuota / PSA) is owned by the
+  # tenant-operator and applied in each tenant namespace at reconcile time. It is
+  # NOT a platform-chart concern: the deploy#742 cascade was a tenant
+  # NetworkPolicy/ResourceQuota landing in the platform (gibson) namespace, where
+  # the quota rejected every sub-chart init Job and the egress-deny policy would
+  # sever the platform from DNS/AWS/Postgres. The saas.tenantNetworkPolicy /
+  # saas.tenantResourceQuota chart toggles were removed (deploy#756); only the
+  # SaaS-mode flag remains. cross-chart-check Check 24 enforces the split.
+  saas:
+    enabled: true
+  # -----------------------------------------------------------------------------
+  # Ingress — Envoy owns the external LB. In-chart nginx Ingress stays off.
+  # -----------------------------------------------------------------------------
+  ingress:
+    enabled: false
+  componentIngress:
+    enabled: false
+  # Setec runs in prod like in every other env (D8: the setec subchart
+  # selects whose fleet runs, never whether one runs). The workload nodes of
+  # this EKS cluster are the sandbox fleet: m8i with nested virtualization,
+  # so each exposes /dev/kvm, and each carries the label
+  # setec.zeroroot.ai/sandbox-host=true (hosted#446, ADR-0166). The four Argo
+  # CD scope additions that setec needs are in
+  # bootstrap/eks/gibson/envs/prod.tfvars (deploy#1429).
+  setec:
+    enabled: true
+    # The signed sandbox disks (D85, hosted#521, ADR-0166). diskRepo is the
+    # ECR repository that stage 0 of this env makes
+    # (substrate/gibson-bootstrap/ecr.tf, substrate.env SETEC_DISK_REPO).
+    # scripts/check-overlay-disk-repo.py proves the two names agree.
+    # publicKeys holds the public key of the keyring seed
+    # SETEC_DISK_SIGNING_SEED. The owner makes the keyring of this env at the
+    # rebuild (D73), so the key is set then, as a reviewed commit
+    # (release/end-phase-checklist.md). The recreate verb refuses a key that
+    # is not the key of the seed.
+    launcher:
+      diskRepo: "447184491447.dkr.ecr.us-east-1.amazonaws.com/zeroroot-ai-prod-setec-disks"
+      diskBuilder:
+        publicKeys:
+          - "XltTJSSF+N+A/laAQpLG0DhulZz1hUmkV6XdlJcDCf8="
+    # The vendored hook default (docker.io/bitnami/kubectl) no longer pulls.
+    # The same org mirror as staging and drill.
+    kubectl:
+      image: ghcr.io/zeroroot-ai/mirror/kubectl:1.31.4
+    frontend:
+      enabled: true
+gibson-operators:
+  # The SaaS overlay Deployments in the release namespace that Reloader rolls
+  # when their platform Postgres login role changes (ADR-0171, row
+  # postgres-role-passwords). The chart grants patch on these names only.
+  reloader:
+    rollouts:
+      extraDeployments:
+        - gibson-billing-webhook
+        - gibson-entitlements-svc
+  global:
+    domain: "zeroroot.ai"
+  aws:
+    region: "us-east-1"
+  # -----------------------------------------------------------------------------
+  # tenant-operator — real Stripe in prod (no devAutoConfirm); in-cluster CNPG
+  # for the broker-config DB.
+  # -----------------------------------------------------------------------------
+  tenantOperator:
+    # No image override: the chart's digest pins apply (ADR-0072 — a chart
+    # version IS the deployable; images are pinned at package time and
+    # staging-validated at this same chartVersion before promotion).
+    # The SaaS belief trainer image (gibson#31). The source image in GHCR is
+    # private, and a tenant namespace has no pull secret. So the node pulls
+    # the copy in the ECR repository of stage 0 with its instance role.
+    # scripts/belief-trainer-image.sh copies this digest there (the recreate
+    # verbs call it). check-overlay-belief-trainer keeps the repository and
+    # the digest form.
+    beliefTrainer:
+      image:
+        repository: "447184491447.dkr.ecr.us-east-1.amazonaws.com/zeroroot-ai-prod-belief-trainer"
+        tag: "sha-9797812@sha256:a3a6e1b46ef83adff7fa4b6293651de662467f335b0474d1aaf91f07fb26740a"
+    billing:
+      # Real Stripe Checkout — WaitForBillingConfirmation actually waits.
+      devAutoConfirm: false
+      # TEST mode guard (dashboard#767): asserts the sk_test_ key prefix. Flip
+      # to live alongside the dashboard block above when seeding sk_live_ keys.
+    brokerConfig:
+      platformPg:
+        host: "platform-postgres-rw.gibson.svc.cluster.local"
+        port: 5432
+        database: "gibson_platform"
+        username: "gibson_platform"
+        sslMode: "require"
+        passwordSecretRef:
+          name: "gibson-platform-postgres-credentials"
+          key: "password"
+      systemTenantKekSecretRef:
+        name: "gibson-master-key"
+        key: "master-key"
+      vault:
+        namespaceTemplate: "tenant-{tenant_id}"
+        authMethod: "jwt"
+        mountPath: "secret"
+  # -----------------------------------------------------------------------------
+  # platform-operator — NO IRSA in v1. The reconciler talks only to in-cluster
+  # Vault / Postgres / OpenFGA / Zitadel; no AWS API calls. If a future feature
+  # requires AWS access (e.g. KMS-backed master-key generation), add a
+  # `platform_operator` IRSA role in eks/zeroroot-ai-prod/modules/iam-irsa/main.tf
+  # AND re-add a serviceAccount.annotations block here.
+  # -----------------------------------------------------------------------------
+
+  # -----------------------------------------------------------------------------
+  # Envoy — cross-chart parity with helm/gibson-workloads/values-aws-prod.yaml.
+  # -----------------------------------------------------------------------------
+  envoy:
+    tls:
+      secretName: "gibson-envoy-tls"
+  # -----------------------------------------------------------------------------
+  # Redis — points at the in-cluster redis-stack Service that the workloads
+  # chart installs. Service name follows `<workloads-release>-redis-stack`.
+  # -----------------------------------------------------------------------------
+  redis:
+    # Umbrella names: the in-chart redis-stack renders as gibson-redis-stack
+    # (ADR-0071 canonical), not the old gibson-workloads-* release prefix —
+    # tenant-operator's wait-for-redis-secret init looped forever on the
+    # stale name (deploy#826).
+    addr: "gibson-redis-stack:6379"
+    auth:
+      existingSecret: "gibson-redis-stack"
+      passwordSecretKey: "redis-password"
+  # -----------------------------------------------------------------------------
+  # OpenFGA — in-cluster Service.
+  # -----------------------------------------------------------------------------
+  fga:
+    url: "https://gibson-openfga:8080"
+  # -----------------------------------------------------------------------------
+  # Zitadel — ExternalDomain is the public hostname. Operator dials by in-cluster
+  # Service DNS but forges this as the Host header so Zitadel's vhost routing
+  # matches.
+  # -----------------------------------------------------------------------------
+  zitadel:
+    zitadel:
+      configmapConfig:
+        ExternalDomain: ""
+  # -----------------------------------------------------------------------------
+  # Postgres on the tenant-operator data-plane side.
+  # -----------------------------------------------------------------------------
+  platformPostgres:
+    host: "platform-postgres-rw.gibson.svc.cluster.local"
+    port: 5432
+    database: "gibson_platform"
+    user: "gibson_platform"
+    passwordSecretName: "gibson-platform-postgres-credentials"
+    passwordSecretKey: "password"
+  # -----------------------------------------------------------------------------
+  # data-plane OpenBao — same in-cluster Service as the workloads-chart OpenBao.
+  # Slice 7 of openbao-migration (deploy#435): staged for prod cutover.
+  # -----------------------------------------------------------------------------
+  dataPlane:
+    vault:
+      # No addr: the operator dials the in-chart OpenBao at
+      # gibson.openbaoAddr, over TLS only. charts 0.142 refuses the key.
+      transitKey: "master-kek"
+  # SPIRE→Vault audience contract (gibson#167, deploy#360, ADR-0009
+  # amendment docs#34). Must match gibson-workloads values-aws-prod.yaml.
+  vault:
+    jwtAuth:
+      audience: "gibson-saas"
+      # SPIRE→Vault per-tenant auth/jwt/config writer (tenant-operator#189).
+      # MUST equal the umbrella's global.spire.jwtIssuer (the iss SPIRE
+      # stamps on every JWT-SVID) AND resolve in-cluster (OpenBao fetches
+      # ${issuer}/keys). The prod-apex oidc-discovery.zeroroot.ai literal
+      # copied from values-aws-prod was a double mismatch (deploy#839).
+      spireOidcIssuer: "https://gibson-spiffe-oidc-discovery-provider"
+      spireBundleConfigMap: "spire-bundle"
+  # -----------------------------------------------------------------------------
+  # KMS KEK deriver — INTENTIONALLY UNSET (tenant-operator#347). Setting
+  # kms.keyARN switches tenant-operator's KEK derivation to the KMS-HMAC path,
+  # which cannot pass the saga startup gate (vault-transit capability is left
+  # nil → crash-loop), and the daemon-keyprovider alias it pointed at is an
+  # encryption key, not the required HMAC_SHA_256 type. With it unset the
+  # operator uses the kind-proven OpenBao vault-transit KEK path
+  # (GIBSON_VAULT_ADDR + transit key master-kek). Re-enable only after
+  # tenant-operator#347 lands with a dedicated HMAC key.
+  # (The DAEMON's keyprovider KMS alias is configured separately in the
+  # gibson-workloads/operators values — this block fed ONLY the operator's
+  # GIBSON_KMS_KEY_ARN env.)
+  # -----------------------------------------------------------------------------
+  # -----------------------------------------------------------------------------
+  # platformBootstrap CR — drives the platform-operator's bootstrap reconciler.
+  # -----------------------------------------------------------------------------
+  platformBootstrap:
+    zitadel:
+      # The operator dials its own ZITADEL_URL and claims the public host in
+      # the instance header (ADR-0092). charts 0.141 refuses an issuer value
+      # (gibson#933).
+      externalDomain: ""
+      adminTokenRef:
+        name: iam-admin-pat
+        key: pat
+      project:
+        name: gibson
+        ensureExists: true
+      systemClient:
+        trustedClusterDomain: "gibson-zitadel.gibson.svc.cluster.local"
+    # OIDC clients minted as child OIDCClient CRs. Each Secret is consumed by
+    # the named workload. redirectURIs / postLogoutRedirectURIs match the
+    # workloads chart's dashboard.auth.* — drift breaks logout.
+    oidcClients:
+      - name: gibson-daemon
+        roles: ["IAM_ORG_MANAGER"]
+        applicationType: MACHINE_USER
+        secretRef:
+          name: idp-admin-credentials
+          key: client_secret
+      - name: gibson-tenant-operator
+        roles: ["IAM_ORG_MANAGER"]
+        applicationType: MACHINE_USER
+        secretRef:
+          name: gibson-zitadel-tenant-operator
+          key: ZITADEL_CLIENT_SECRET
+      - name: gibson-dashboard
+        roles: []
+        # Derived from global.domain by the platformbootstrap template
+        # (deploy#682) — same helpers the dashboard uses, so no drift.
+        redirectURIs: []
+        postLogoutRedirectURIs: []
+        secretRef:
+          name: gibson-dashboard-oidc
+          key: client_secret
+      - name: gibson-dashboard-service
+        roles: []
+        applicationType: MACHINE_USER
+        secretRef:
+          name: gibson-zitadel-dashboard
+          key: ZITADEL_CLIENT_SECRET
+      # (The gibson-tool-runner MACHINE_USER OIDCClient was removed with the
+      # client_credentials runtime model — ADR-0045, sdk#306. The sandboxed
+      # tool-runner returns tool output via stdout and never authenticates to
+      # the daemon, so its Zitadel service account was unused dead config.)
+      # Native interactive-login app (Epic native-cli-login, platform-operator#80).
+      # Public/PKCE NATIVE client used by `gibson login` and any future native
+      # client (desktop/TUI/IDE): OAuth2 device-authorization grant, plus
+      # authorization-code + refresh. No client_secret (public client) — secretRef
+      # captures the minted clientID that the daemon's /.well-known/gibson-login
+      # bootstrap endpoint (gibson#623) serves. 15m access-token lifetime bounds
+      # the gibson#622 session-revocation window.
+      - name: gibson-native-login
+        # The name the device consent page shows (gibson#452, charts#276).
+        displayName: Gibson CLI
+        roles: []
+        applicationType: NATIVE
+        grantTypes:
+          - DEVICE_CODE
+          - AUTHORIZATION_CODE
+          - REFRESH_TOKEN
+        accessTokenLifetimeSeconds: 900
+        secretRef:
+          name: gibson-native-login-oidc
+          key: client_secret
+      # The sign-in client of the billing service (D54, hosted#440). billing
+      # signs the Owner in itself before it opens the Stripe Customer Portal.
+      # The platform-operator mints the client and writes its Secret
+      # gibson-billing-oidc (client_id, client_secret). That operator is the
+      # one writer of the client secret; the billing overlay only reads it.
+      # The redirect URI is the /account/callback route of this env.
+      - name: gibson-billing
+        roles: []
+        applicationType: WEB
+        grantTypes:
+          - AUTHORIZATION_CODE
+        redirectURIs:
+          - "https://app.zeroroot.ai/account/callback"
+        secretRef:
+          name: gibson-billing-oidc
+          key: client_secret
+    fgaModel:
+      apiEndpoint: https://gibson-openfga.gibson.svc:8080
+    # No vaultTransit.address: the chart derives the in-chart OpenBao address.
+    # charts 0.142 refuses the key.
+    vaultTransit:
+      tokenRef:
+        name: gibson-openbao-keys
+        key: VAULT_ADMIN_TOKEN
+      keyName: master-kek
+    masterKey:
+      secretName: gibson-master-key
+      namespace: gibson
+      key: master-key
+    postgresBundle:
+      cluster:
+        host: "platform-postgres-rw.gibson.svc.cluster.local"
+        port: 5432
+        superuserSecretRef:
+          name: platform-postgres-superuser
+          namespace: gibson
+          key: password
+      databases:
+        - {name: gibson_platform, owner: gibson_platform}
+        - {name: tenant_admin, owner: tenant_admin}
+        - {name: zitadel, owner: zitadel}
+        - {name: openfga, owner: openfga}
+        - {name: spire, owner: spire}
+  # Platform-operator Vault / OpenBao wiring (deploy#449).
+  # Prod uses the in-cluster OpenBao StatefulSet (ADR-0024 migration, deploy#431).
+  # Update this address when the prod OpenBao Service name is confirmed post-migration.
+  platformOperator:
+    # No image override: the chart's digest pins apply (ADR-0072 — a chart
+    # version IS the deployable; images are pinned at package time and
+    # staging-validated at this same chartVersion before promotion).
+    # No vaultAddr: the chart derives the in-chart OpenBao address, and
+    # charts 0.142 refuses the key.
+    vaultTokenSecretRef:
+      name: gibson-openbao-keys
+      key: VAULT_ADMIN_TOKEN
+global:
+  # The SPIFFE trust domain of this install (ADR-0164). It is the one value
+  # that names the domain. The chart builds each SPIFFE ID from it and a path,
+  # and the entitlements-svc Application reads it from this file too. The
+  # SaaS uses zeroroot.ai. It cannot change on a running install.
+  spire:
+    trustDomain: zeroroot.ai
+  # ADR-0093 decision 5/8, hosted#201: the one human Zitadel administrator.
+  # The platform-operator creates this account with no password and
+  # emails a one-time setup link. It belongs to no tenant.
+  platformOwner:
+    email: "anthony@zeroroot.ai"
+  domain: zeroroot.ai
+  # Top-level global on purpose: Helm lets the umbrella's global override a
+  # subchart-scoped one, and the umbrella ships apiServerCIDRs: [].
+  #
+  # EMPTY MEANS NO RULE. `gibson.netpolEgressAPIServer` renders nothing for an
+  # empty list, so leaving this out is a MISSING egress rule, not a weaker one,
+  # and OpenBao's Kubernetes-auth TokenReview is the first thing to find out:
+  # every login then answers a bare "permission denied", the secret store goes
+  # InvalidProviderConfig, every ExternalSecret lands in SecretSyncedError and
+  # the platform never finishes. Measured on staging 2026-09-10, on k3d
+  # 2026-09-14 (zeroroot-ai/charts#80), and on staging again 2026-09-23 when the
+  # range went stale after the ADR-0095 move.
+  #
+  # These two values are DERIVED and checked, not chosen:
+  #   10.40.0.0/16   var.vpc_cidr in bootstrap/eks/gibson — the node range
+  #   172.20.0.1/32  the first address of the Service range, which is the /16
+  #                  the envoy clusterIP pinned below (172.20.0.250) sits in
+  # scripts/check-apiserver-cidrs.py recomputes both on every PR and fails when
+  # this list and the substrate disagree, so a VPC move cannot leave it stale.
+  #
+  # BOTH NAMES, because they are the same apiserver and a policy engine may judge
+  # either: kube-proxy rewrites the destination before a NetworkPolicy is
+  # evaluated, so a packet to the Service leaves as the endpoint address, while an
+  # engine that evaluates the pre-DNAT address sees the ClusterIP. On staging
+  # 2026-09-10 the ENIs answered and the ClusterIP timed out.
+  networkPolicy:
+    apiServerCIDRs:
+      - "10.40.0.0/16"
+      - "172.20.0.1/32"
+    # The egress host group of the billing pod (D76, hosted#525). The
+    # billing-webhook overlay labels its pod egress-fqdn: billing. The pod
+    # calls the payment provider API, the sign-in issuer on the app host and
+    # the daemon API on the api host, and no other outside host. It never
+    # gets egress-internet. The billing overlay test (tests/env_wiring.py)
+    # fails when this group does not open a host that the pod calls.
+    egressHostGroups:
+      billing:
+        - "https://api.stripe.com"
+        - "https://app.zeroroot.ai"
+        - "https://api.zeroroot.ai"
+  # One mail value for the daemon, the tenant-operator and Zitadel (hosted#223,
+  # charts feat/223-one-global-email). Outbound mail goes through the SES SMTP
+  # relay that stage 0 mints (substrate/gibson-bootstrap, IAM user
+  # zeroroot-ai-<env>-smtp). The bringup hands the credential to the OpenBao
+  # seed, which fills the key ses-smtp-credentials. The chart reads that one
+  # key into the Secret <release>-email-smtp, and all three senders use it.
+  # provider=smtp is REQUIRED: self-serve signup is on, and the daemon refuses
+  # to start without a delivering transport. The relay speaks STARTTLS on 587.
+  email:
+    provider: "smtp"
+    from: "no-reply@zeroroot.ai"
+    fromName: "Zero Root"
+    smtp:
+      host: "email-smtp.us-east-1.amazonaws.com"
+      port: 587
+      tlsMode: "starttls"
+      credentials:
+        source: "secretStore"
+        remoteKey: "ses-smtp-credentials"
+# external-dns — publishes the envoy Service's hostnames into the environment's
+# zone (the chart's values-eks.yaml delta, restated here because this
+# Application loads only this file). The umbrella default provider is
+# inmemory, which publishes nothing: measured on staging 2026-09-10 as an
+# empty zone. The credential is the same Secret cert-manager reads,
+# gibson/route53-credential, written by the bringup from the keyring
+# (DNS_ACCESS_KEY / DNS_SECRET_KEY, minted by stage 0 for this zone only).
+# domainFilters keeps the controller inside this environment's zone.
+external-dns:
+  provider:
+    name: aws
+  env:
+    - name: AWS_DEFAULT_REGION
+      value: "us-east-1"
+    - name: AWS_ACCESS_KEY_ID
+      valueFrom:
+        secretKeyRef:
+          name: route53-credential
+          key: access-key-id
+    - name: AWS_SECRET_ACCESS_KEY
+      valueFrom:
+        secretKeyRef:
+          name: route53-credential
+          key: secret-access-key
+  domainFilters:
+    - "zeroroot.ai"
+# -----------------------------------------------------------------------------
+# platformPostgres.backup — WHERE THIS CLUSTER ARCHIVES ITS WAL.
+#
+# The chart's defaults are kind's stage 0: s3://gibson-kind and the MinIO
+# address on the kind Docker subnet. They are documented as a seam
+# `make recreate` fills from substrate.env, and scripts/recreate-kind.sh does
+# exactly that — but scripts/recreate-aws.sh never has, and on the AWS path it
+# could not: Argo renders this Application from git, not from the script's
+# environment. So every AWS bringup since the seam existed ran its platform
+# Postgres pointed at a MinIO that is not on the network. Measured on the
+# 2026-09-14 from-zero staging bringup: "Connect timeout on endpoint URL:
+# http://172.18.255.250:9000/gibson-kind" every five minutes,
+# ContinuousArchiving False, no WAL archived and no base backup taken. It
+# never failed a bringup, which is why it survived this long.
+#
+# These are env facts and belong in git. The bucket is stage 0's durable
+# bucket (substrate.env BUCKET_NAME); an empty endpoint means real AWS S3 for
+# the bucket's region. The path must sit under backups/, the only prefix the
+# bucket's lifecycle rule covers.
+#
+# backup.serverName is the archive directory this cluster writes:
+# <destinationPath>/<serverName>/. It is stamped per BRINGUP, not per
+# environment, because the durable bucket outlives the cluster (ADR-0083) and
+# barman-cloud-check-wal-archive refuses a fresh cluster whose archive
+# directory already holds WAL. Leaving it empty means CNPG's default, the
+# Cluster's own name, which is correct only for the first bootstrap into an
+# empty bucket. A second bringup under a used name comes up Ready and Healthy
+# with NO backups and says nothing about it.
+#
+# kind stamps this per bootstrap, because ENV=kind builds its Application
+# inline. The AWS path reads its Applications from git through the app-of-apps,
+# which has no per-bringup values seam, so the name is a reviewed commit here
+# and scripts/recreate-aws.sh refuses to start a bringup whose archive
+# directory is not empty. NEVER delete the old archive to reuse a name: it is
+# the restore source for the environment that wrote it (ADR-0083).
+#
+# prod has never been brought up on this bucket, so 20260914 is its first
+# archive. A later prod bringup stamps a new one.
+# -----------------------------------------------------------------------------
+platformPostgres:
+  backup:
+    destinationPath: "s3://zeroroot-ai-prod-durable-447184491447/backups/postgres/"
+    endpointURL: ""
+    serverName: "platform-postgres-20260914"
+
+# OpenFGA — force sslmode=require on the Aurora client (deploy#1197 / deploy#1239).
+# Base values.yaml sets sslmode=disable (kind CNPG has no TLS); on AWS that literal
+# is passed straight to the openfga subchart and connects in plaintext, which
+# rds.force_ssl=1 (deploy#1239) rejects. Same ExternalName host (aliases the Aurora
+# writer); only sslmode flips. Companion the deploy#1239 CUTOVER NOTE requires.
+openfga:
+  datastore:
+    uri: "postgres://placeholder@platform-postgres-rw.gibson.svc.cluster.local:5432/openfga?sslmode=require"
+zitadel:
+  zitadel:
+    configmapConfig:
+      ExternalDomain: app.zeroroot.ai
+      # MUST override the umbrella base's kind NodePort (30443): helm
+      # deep-merge keeps base keys you don't override, so without this the
+      # Zitadel issuer renders as https://app.zeroroot.ai:30443 and
+      # EVERY audience-checked JWT fails — observed live as platform-operator
+      # System API 401 Errors.Token.Invalid (TrustedDomainReady stuck), and
+      # it would equally break OIDC login flows.
+      ExternalPort: 443
+      # Zitadel Postgres on Aurora — force TLS on User+Admin conns
+      # (deploy#1197 / deploy#1239). Base renders SSL.Mode=disable (kind);
+      # rds.force_ssl=1 rejects plaintext.
+      Database:
+        Postgres:
+          User:
+            SSL:
+              Mode: require
+          Admin:
+            SSL:
+              Mode: require
+# SPIRE datastore — force sslmode=require on the Aurora client (deploy#1197).
+# The umbrella base sets spire-server dataStore.sql with no `options`, so the
+# rendered libpq connection string carries no sslmode and falls back to the
+# `prefer` default: try TLS, retry IN THE CLEAR if the handshake is refused.
+# rds.force_ssl=1 (deploy#1239) refuses the retry, so these connections are
+# encrypted today — but only for as long as the server parameter stays on, and
+# the client still advertises that plaintext is acceptable to it. Same
+# ExternalName host as every other Aurora client; only sslmode is added.
+spire:
+  spire-server:
+    dataStore:
+      sql:
+        options:
+          - sslmode: require
+
+# The secret plane alerts of manifests/monitoring/externalsecret-alerts.yaml
+# read this metric (hosted#174).
+external-secrets:
+  serviceMonitor:
+    enabled: true

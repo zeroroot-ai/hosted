@@ -1,0 +1,292 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.15.8",
+  "resource_changes": [
+    {
+      "address": "module.kms.aws_kms_key.this[\"cloudwatch_logs\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "no-op"
+        ]
+      }
+    },
+    {
+      "address": "module.kms.aws_kms_key.this[\"daemon_keyprovider\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "update"
+        ]
+      }
+    },
+    {
+      "address": "module.kms.aws_kms_key.this[\"efs\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "delete"
+        ]
+      }
+    },
+    {
+      "address": "module.kms.aws_kms_key.this[\"eks_secrets\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.kms.aws_kms_key.this[\"elasticache\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.kms.aws_kms_key.this[\"openbao_unseal\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.kms.aws_kms_key.this[\"rds\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.kms.aws_kms_key.this[\"s3\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.kms.aws_kms_key.this[\"secretsmanager\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.kms.aws_kms_key.this[\"spire_keymanager\"]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.s3.aws_s3_bucket.this[\"artifacts\"]",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.s3.aws_s3_bucket.this[\"audit\"]",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.s3.aws_s3_bucket.this[\"backups\"]",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.s3.aws_s3_bucket.this[\"checkpoints\"]",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.s3.aws_s3_bucket.this[\"setec_checkpoints\"]",
+      "mode": "managed",
+      "type": "aws_s3_bucket",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "module.cluster.module.eks.module.kms.aws_kms_key.this[0]",
+      "mode": "managed",
+      "type": "aws_kms_key",
+      "name": "this",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "data.aws_iam_policy_document.karpenter_sqs",
+      "mode": "data",
+      "type": "aws_iam_policy_document",
+      "name": "karpenter_sqs",
+      "change": {
+        "actions": [
+          "read"
+        ]
+      }
+    },
+    {
+      "address": "aws_cloudwatch_event_rule.karpenter[\"instance_state\"]",
+      "mode": "managed",
+      "type": "aws_cloudwatch_event_rule",
+      "name": "karpenter",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "aws_cloudwatch_event_rule.karpenter[\"rebalance\"]",
+      "mode": "managed",
+      "type": "aws_cloudwatch_event_rule",
+      "name": "karpenter",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "aws_cloudwatch_event_rule.karpenter[\"scheduled_change\"]",
+      "mode": "managed",
+      "type": "aws_cloudwatch_event_rule",
+      "name": "karpenter",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "aws_cloudwatch_event_rule.karpenter[\"spot_interruption\"]",
+      "mode": "managed",
+      "type": "aws_cloudwatch_event_rule",
+      "name": "karpenter",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "aws_cloudwatch_event_target.karpenter[\"instance_state\"]",
+      "mode": "managed",
+      "type": "aws_cloudwatch_event_target",
+      "name": "karpenter",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "aws_cloudwatch_event_target.karpenter[\"rebalance\"]",
+      "mode": "managed",
+      "type": "aws_cloudwatch_event_target",
+      "name": "karpenter",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "aws_cloudwatch_event_target.karpenter[\"scheduled_change\"]",
+      "mode": "managed",
+      "type": "aws_cloudwatch_event_target",
+      "name": "karpenter",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "aws_cloudwatch_event_target.karpenter[\"spot_interruption\"]",
+      "mode": "managed",
+      "type": "aws_cloudwatch_event_target",
+      "name": "karpenter",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    },
+    {
+      "address": "aws_ec2_tag.karpenter_sg_discovery",
+      "mode": "managed",
+      "type": "aws_ec2_tag",
+      "name": "karpenter_sg_discovery",
+      "change": {
+        "actions": [
+          "create"
+        ]
+      }
+    }
+  ]
+}

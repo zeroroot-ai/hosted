@@ -1,0 +1,12 @@
+# Cilium on k3d (hosted#436). The node is a container, and cluster-k3d.sh
+# mounts cgroup2 at this path before the install. The agent does not mount it
+# again.
+cgroup:
+  autoMount:
+    enabled: false
+  hostRoot: /run/cilium/cgroupv2
+
+# k3s starts with --disable-kube-proxy. The API server is the server
+# container on port 6443. scripts/cluster-k3d.sh passes the host, because
+# the container name carries the cluster name.
+k8sServicePort: 6443

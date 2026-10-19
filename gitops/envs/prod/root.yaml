@@ -1,0 +1,78 @@
+# Root ArgoCD Application for the prod environment (gitops#364).
+#
+# WHY THIS EXISTS
+#
+# The Argo root of this environment points straight at envs/prod/gibson.yaml.
+# Before this file, NOTHING reconciled the
+# SaaS overlay Applications — no Makefile target, script, workflow or runbook
+# step in gitops or deploy applied them. They were committed and then
+# hand-applied at best.
+#
+# That blind spot is the likely reason two defects sat undetected: the wrong
+# SPIRE controller className in both envs (gitops#355) and prod's entitlements
+# seam being inert against its pinned chart (gitops#359). If nothing reconciles
+# the Application, nothing reports it unhealthy.
+#
+# SCOPE — deliberately narrow. This root recurses ONLY envs/prod/apps/, which
+# holds the SaaS overlay Applications. The platform Application itself
+# (envs/prod/gibson.yaml) is NOT moved under it: adopting the whole platform
+# into a new app-of-apps is a change with a much worse failure mode than the
+# problem being fixed here, and the promotion flow (scripts/bump-chart-version.sh,
+# promote-bump.yml) addresses that file by its current path. Migrating it, and
+# staging's arc-* Applications, is a separate deliberate step.
+#
+# BOOTSTRAP — apply once per cluster:
+#   kubectl apply -f envs/prod/root.yaml
+# Everything committed under envs/prod/apps/ thereafter syncs on its own.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: prod-root
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  source:
+    repoURL: https://github.com/zeroroot-ai/hosted
+    # Single-`main` env-selection-by-PATH (ADR-0072). The targetrevision-guard
+    # requires `main` on every gitops-repo source under envs/.
+    targetRevision: main
+    path: gitops/envs/prod/apps
+    directory:
+      recurse: true
+      exclude: '{README.md,*/README.md,manifests/**}'
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: argocd
+  syncPolicy:
+    # selfHeal:true everywhere (deploy#1394, amends ADR-0072): drift and the
+    # gitops#448 "nothing re-drives it" family auto-recover instead of waiting
+    # on a human null-commit. Bringup determinism is enforced by the converge
+    # gates (make eks-converge / wait-root fail loud on a stalled app), not by
+    # declining to self-heal. prune:false means removing a file here never
+    # silently deletes a running Application — deletion in prod stays a
+    # deliberate, reviewed act.
+    automated:
+      prune: false
+      selfHeal: true
+    # Bounded operations (gitops#495): a sync that fails or hangs must reach a
+    # TERMINAL state quickly, because selfHeal cannot abandon or re-target an
+    # in-flight operation — a Running op pinned to a stale $values revision
+    # stranded staging for 17h (the op could only be fixed by a commit it was
+    # structurally unable to see). Bounding retries makes the op end, and a
+    # fresh selfHeal drive then resolves CURRENT revisions. The companion
+    # controller.sync.timeout (deploy argocd module) bounds the hung-Running
+    # case the same way.
+    retry:
+      limit: 2
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+    syncOptions:
+      - CreateNamespace=true
+      # SSA + ServerSideDiff are mandatory for App-of-Apps so the root's apply
+      # doesn't silently elide changes to child `spec.sources` (gitops#86).
+      - ServerSideApply=true
+      - ServerSideDiff=true

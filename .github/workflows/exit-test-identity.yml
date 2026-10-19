@@ -1,0 +1,214 @@
+# exit-test-identity — the identity model exit test (hosted#208, epic
+# hosted#189, ADR-0093). Supersedes charts#160, whose password sign-in no
+# longer exists.
+#
+# In plain words: ONE INSTALL PROVES THE WHOLE IDENTITY MODEL THE WAY A
+# CUSTOMER MEETS IT. The Platform owner and the first tenant's Owner each
+# receive a one-time setup link, set a password, and enroll an authenticator
+# app. The Owner invites a teammate, who accepts and lands in the tenant with
+# the invited role. The Owner changes that role and OpenFGA reflects it
+# within seconds. The Owner recovers a teammate's lost authenticator (MFA
+# reset) and, separately, removes a teammate — both cut the target's open
+# session off at once.
+#
+# Two legs, two jobs, both against a fresh kind cluster brought up by
+# .github/actions/demo-enrollment-install (ADR-0027 — one installer):
+#
+#   online   test/identity/values.yaml layers the chart's own Mailpit sink on
+#            the baseline profile and turns BOTH global.platformOwner and
+#            global.firstTenant offlineSetup off, so every mail this test
+#            proves (two setup links, an invite, an MFA-reset notice) is
+#            observable. Runs test/identity/exit-test-identity.sh --online.
+#   offline  the baseline exactly as shipped (no overlay): both setup links
+#            are written to Secrets instead, and this leg proves they still
+#            start at the public host, and that no password Secret is ever
+#            created (gibson-first-admin — the pre-ADR-0093 model — must be
+#            NotFound). Runs test/identity/exit-test-identity.sh --offline.
+#
+# WHERE THE ENFORCED-POLICY RUN HAPPENS (owner decision of 2026-10-05,
+# hosted#428): here, on kind, each day. The kind cluster runs Cilium since
+# hosted#436, and Cilium enforces each NetworkPolicy and CiliumNetworkPolicy
+# of the chart. So both legs run the identity model under enforced policy.
+# The offline leg then runs test/identity/deny-probe.sh: a deliberate deny
+# policy in a namespace of its own must stop an identity call, or the run
+# fails. That proves the enforcement is real on the cluster of this run.
+#
+# ADR-0080: never on pull_request. It measures state on main and runs on push
+# to main and on its schedule. The merge gate is ci.yml, which runs the
+# guards through `make check`.
+name: exit-test-identity
+
+on:
+  workflow_dispatch:
+    inputs:
+      charts_ref:
+        description: The zeroroot-ai/charts ref to install (branch, tag or SHA)
+        required: false
+        type: string
+        default: main
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap/kind/**'
+      - 'scripts/**'
+      - 'test/identity/**'
+      - 'test/platform-owner/**'
+      - 'Makefile'
+      - '.github/workflows/exit-test-identity.yml'
+      - '.github/actions/demo-enrollment-install/**'
+  schedule:
+    # Daily, after the baseline install (04:00), the signup drill (04:30),
+    # the Platform owner drill, the demo enrollment (06:00), chart signing
+    # (05:20) and the rate limit (05:40).
+    - cron: '20 6 * * *'
+
+concurrency:
+  group: exit-test-identity-${{ github.ref }}
+  # A run that started finishes. On main an exit test is the proof (ADR-0080),
+  # so a newer push queues behind it and does not cancel it (hosted#585).
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NS: gibson
+  RELEASE: gibson
+  # demo-enrollment-install checks the charts out here and reads this
+  # variable; exit-test-demo-enrollment.yml sets it the same way.
+  CHARTS_ROOT: ${{ github.workspace }}/charts
+  # The adk CLI (gibson login, for the Owner's and the invitee's bearers),
+  # pinned to the same commit exit-test-demo-enrollment.yml uses (adk#39,
+  # sdk v0.179.0).
+  ADK_COMMIT: 27b31b7d99ad9b1a23f7277ac2ba74fd5195ff9e
+
+jobs:
+  guards:
+    name: guards (no cluster)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # -x follows the sourced console library, so the guard checks it too.
+      # Without -x shellcheck reports SC1091 on the source line and exits 1
+      # (run 37627825403).
+      - name: shellcheck
+        run: shellcheck -x test/identity/exit-test-identity.sh
+
+      # Proves the drill's own assertions can fail, offline: the setup-link
+      # and TOTP derivation (driver.mjs), the accept-link extractor, the
+      # overlay's own shape, and the JWT-subject helper.
+      # ubuntu-latest ships Node.js already (the same reasoning
+      # demo-enrollment-install/action.yml gives for skipping a setup-node
+      # step). No browser install here: --selftest never opens a page, only
+      # otpauth's TOTP derivation and driver.mjs's own pure parsing helpers.
+      - run: npm --prefix test/platform-owner install --no-audit --no-fund
+      - name: exit-test selftest
+        run: bash test/identity/exit-test-identity.sh --selftest
+
+  online:
+    name: online leg — Mailpit, invite, role change, MFA reset, removal (steps 1 to 6)
+    needs: guards
+    runs-on: ubuntu-latest
+    # One recreate on a 2-vCPU runner takes up to 90 minutes
+    # (WAIT_APPS_TIMEOUT in the install action), then the drill (three
+    # gibson-login device flows and two browser setups on top of the
+    # Platform owner's and Owner's own).
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: The identity-overlay install and the drill's tools
+        uses: ./.github/actions/demo-enrollment-install
+        with:
+          charts_ref: ${{ inputs.charts_ref || 'main' }}
+          ghcr_pull_token: ${{ secrets.GHCR_RO_PAT }}
+          github_token: ${{ github.token }}
+          adk_commit: ${{ env.ADK_COMMIT }}
+          overlay: identity
+
+      # demo-enrollment-install/action.yml already checked out
+      # zeroroot-ai/gibson at the daemon version the chart pins, sparse to
+      # internal/server/daemon/api (the tenant proto schema InviteMember,
+      # SetTenantRole, RemoveMember and ResetUserMFA live in, not the
+      # published SDK module) — reused here, not repeated.
+      - name: EXIT TEST — the identity model, online leg (steps 1 to 6)
+        env:
+          DIAG_DIR: ${{ runner.temp }}/identity-diag
+          GIBSON_SRC: ${{ github.workspace }}/gibson
+        run: |
+          mkdir -p "$DIAG_DIR"
+          bash test/identity/exit-test-identity.sh --online
+
+      # dashboard#107: the heap snapshot NODE_OPTIONS asks for (see
+      # test/identity/values.yaml), copied out before the artifact upload.
+      - name: Upload failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: identity-online-diag
+          path: ${{ runner.temp }}/identity-diag
+          if-no-files-found: ignore
+
+      - name: Diagnose a failure
+        if: failure()
+        run: |
+          kubectl -n "$NS" get pods -o wide || true
+          kubectl get tenants.gibson.zeroroot.ai,platformbootstraps.gibson.zeroroot.ai -o wide || true
+          # Every bootstrap step reports a condition. The steps run in order, so
+          # the first False or Unknown one names the step that stopped the rest
+          # (run 36353718228: PlatformOwnerReady never came, and nothing said why).
+          kubectl get platformbootstrap platform -o jsonpath='{range .status.conditions[*]}{.type}={.status} {.reason}: {.message}{"\n"}{end}' || true
+          kubectl -n "$NS" logs deploy/gibson-platform-operator --tail=150 || true
+          kubectl -n "$NS" get events --sort-by=.lastTimestamp | tail -60 || true
+          kubectl -n "$NS" logs deploy/gibson-zitadel --tail=100 || true
+          # A restarted container hides its last words unless asked for them
+          # (demo run 36346338176: the dashboard hung after sign-in, the
+          # liveness probe restarted it, and nothing showed why).
+          kubectl -n "$NS" get pods -o jsonpath='{range .items[*]}{range .status.containerStatuses[?(@.restartCount>0)]}{..name} restarts={.restartCount} last={.lastState.terminated.reason} exit={.lastState.terminated.exitCode}{"\n"}{end}{end}' || true
+          kubectl -n "$NS" logs deploy/gibson-dashboard --tail=120 || true
+          kubectl -n "$NS" logs deploy/gibson-dashboard --previous --tail=200 || true
+          sts="$(kubectl -n "$NS" get sts -l app.kubernetes.io/component=daemon -o name | head -1)"
+          if [ -n "$sts" ]; then kubectl -n "$NS" logs "$sts" -c gibson --tail=200 | grep -iE 'invit|role|mfa|remov|tenant_user|error' | tail -100 || true; fi
+          kubectl -n "$NS" logs deploy/gibson-mailpit --tail=60 || true
+          # A self-mode RPC can be denied at the gateway with no daemon log
+          # line (run 36434264686: the invitee's ListMyMemberships was denied
+          # by the session gate). The deny reason is only in these logs.
+          kubectl get tenantmembers.gibson.zeroroot.ai -A -o custom-columns=NS:.metadata.namespace,NAME:.metadata.name,EMAIL:.spec.email,ROLE:.spec.role,PHASE:.status.phase,USER:.status.userID || true
+          # Two replicas, and only the leader reconciles: read every pod.
+          for pod in $(kubectl -n "$NS" get pods -o name | grep -E '/gibson-(tenant-operator|ext-authz)-'); do
+            echo "=== ${pod}"
+            kubectl -n "$NS" logs "$pod" --tail=150 | grep -viE 'revoked (org|IAM) membership from machine user' | tail -80 || true
+          done
+
+  offline:
+    name: offline leg — setup links from Secrets, no password Secret (baseline as shipped)
+    needs: guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: The baseline install, no overlay
+        uses: ./.github/actions/demo-enrollment-install
+        with:
+          charts_ref: ${{ inputs.charts_ref || 'main' }}
+          ghcr_pull_token: ${{ secrets.GHCR_RO_PAT }}
+          github_token: ${{ github.token }}
+          adk_commit: ${{ env.ADK_COMMIT }}
+
+      - name: EXIT TEST — the identity model, offline leg
+        run: bash test/identity/exit-test-identity.sh --offline
+
+      # hosted#428: the policy is enforced on this cluster, proven on an
+      # identity call with the test's own deny fixture.
+      - name: EXIT TEST — a deny policy stops an identity call
+        run: bash test/identity/deny-probe.sh
+
+      - name: Diagnose a failure
+        if: failure()
+        run: |
+          kubectl get platformbootstrap platform -o yaml || true
+          kubectl -n "$NS" get secrets | grep -i setup || true
+          kubectl -n "$NS" get secret gibson-first-admin || true

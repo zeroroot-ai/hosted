@@ -1,0 +1,90 @@
+# exit-test-setec-cpu-template: a snapshot loads in a class with the m8i CPU
+# template on the m8i nodes of staging (setec#239, setec#271).
+#
+# The CPU of a GitHub-hosted runner is never m8i, and Firecracker refuses the
+# m8i template on it, so the setec nightly run (exit-test-launcher) cannot run
+# this scenario. The nodes of the rebuilt staging are m8i.
+#
+# The script is test/setec/exit-test-cpu-template.sh. It runs on the cluster
+# through the SSM forward of `make with-cluster`, in one step, because the
+# forward lives as long as the command that owns it. It checks out the setec
+# tag that the env runs and runs `make e2e-cpu-template` against the
+# installed setec. The suite installs nothing.
+#
+# WHEN IT RUNS (ADR-0080): on main each day against staging, and on dispatch
+# against a named env. Never on a pull request.
+name: exit-test-setec-cpu-template
+
+on:
+  schedule:
+    - cron: '40 7 * * *'
+  workflow_dispatch:
+    inputs:
+      env:
+        description: The env whose m8i nodes load the snapshot
+        required: true
+        type: choice
+        options: [staging, drill]
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: exit-test-setec-cpu-template-${{ inputs.env || 'staging' }}
+  cancel-in-progress: false
+
+jobs:
+  cpu-template:
+    name: a snapshot loads with the m8i CPU template on ${{ inputs.env || 'staging' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env || 'staging' }}
+    timeout-minutes: 40
+    env:
+      ENV: ${{ inputs.env || 'staging' }}
+      AWS_REGION: us-east-1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # setec is public. Its tags pick the test code that matches the setec
+      # the env runs.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: zeroroot-ai/setec
+          path: setec
+          fetch-depth: 0
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
+        with:
+          go-version-file: setec/go.mod
+          cache: false
+
+      - name: Configure AWS credentials (OIDC role assumption)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+        with:
+          role-to-assume: ${{ vars.EXIT_TEST_NODE_ROLE_ARN }}
+          role-session-name: gh-actions-exit-test-setec-cpu-template-${{ github.run_id }}
+          aws-region: us-east-1
+
+      - name: Install kubectl and the SSM session-manager plugin
+        run: |
+          set -euo pipefail
+          if ! command -v kubectl >/dev/null; then
+            curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
+          fi
+          if ! command -v session-manager-plugin >/dev/null; then
+            curl -fsSL -o /tmp/ssm.deb "https://s3.amazonaws.com/session-manager-downloads/plugin/latest/ubuntu_64bit/session-manager-plugin.deb"
+            sudo dpkg -i /tmp/ssm.deb
+          fi
+          for t in kubectl aws session-manager-plugin go; do command -v "$t" >/dev/null || { echo "$t required"; exit 1; }; done
+
+      - name: The check can fail
+        run: |
+          scripts/install-bats.sh "$HOME/.local"
+          "$HOME/.local/bin/bats" tests/harness/setec-cpu-template.bats
+
+      - name: EXIT TEST — a snapshot loads with the m8i CPU template
+        env:
+          SETEC_DIR: ${{ github.workspace }}/setec
+        run: make with-cluster ENV="${ENV}" CMD="test/setec/exit-test-cpu-template.sh"

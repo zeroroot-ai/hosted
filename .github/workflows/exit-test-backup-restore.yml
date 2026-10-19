@@ -1,0 +1,299 @@
+# ----------------------------------------------------------------------------
+# Launch blocker 3 — the exit test.
+#
+# In plain words: prove that a planned teardown does not lose a customer's
+# data, and that an unplanned one does not bring it back.
+#
+# THE HEADLINE JOB IS `restore-loop` (deploy#1739). It runs the whole loop
+# with the verbs an operator runs and no other path:
+#
+#     make recreate ENV=kind            the platform from nothing, EMPTY
+#     seed the tenant the profile made  a node in its graph, a row in the
+#                                       platform database, and a ciphertext
+#                                       under a key that lives only in the
+#                                       secret store
+#     make teardown MODE=preserve       backup, backup-verify, destroy. It
+#                                       prints the backup name.
+#     make recreate RESTORE_FROM=<name>
+#     EXIT TEST                         the key decrypts the ciphertext
+#                                       recorded before the teardown, the graph
+#                                       node reads back, and so does the
+#                                       database row — which comes back a
+#                                       different way, through CNPG recovery
+#                                       from the base backup id read out of
+#                                       that same named Velero backup
+#     make teardown MODE=wipe           destroy, keep nothing
+#     make recreate ENV=kind            no name, so no restore
+#     EXIT TEST                         the graph node is ABSENT, the tenant key
+#                                       is ABSENT, the database row is ABSENT —
+#                                       while the bucket still holds that same
+#                                       backup. The Tenant CR itself is desired
+#                                       state the chart re-seeds, so its DATA is
+#                                       what must not come back
+#
+# The last four lines are ADR-0083, and they are why the job runs the bringup
+# three times instead of twice. The bucket is identical between the two
+# assertions: the only difference is that nobody named the backup. If the
+# tenant comes back there, a wipe teardown and a preserve teardown mean the
+# same thing.
+#
+# THE SEVEN DRILLS THAT USED TO FOLLOW (restore-drill, openbao-seeder,
+# postgres-primary-kill, postgres-barman, velero-tenant-restore,
+# velero-schedule, teardown-preserve) rendered chart pieces straight from a
+# checkout that no longer holds them: the 2026-09-04 split (ADR-0086) moved
+# the chart source to zeroroot-ai/charts, and the values files they rendered
+# with (helm/gibson-workloads/values-kind.yaml, helm/gibson/ci/values-
+# staging.yaml, the CNPG posture fixture) and the `make chart-deps` target
+# went with the old repo. Every one of them failed on every run after the
+# split (run 34118470837 and its predecessors). They were removed on
+# 2026-09-07 (owner call) and their contracts recorded in that PR; they
+# return as chart suites in charts, against the current chart shape.
+#
+# WHERE THE CHART COMES FROM. The verbs live here and the chart source in
+# charts. This job checks charts out into charts/ and points CHARTS_ROOT at
+# it, exactly as charts exit-test-baseline-install.yml does. The CI rung and the one
+# CI rung (zeroroot-ai/charts, values-ci.yaml) fits the platform onto the
+# 2-vCPU runner; scripts/check-2core-overlay.py keeps their sum under budget.
+#
+# It all runs entirely inside kind with the stage 0 MinIO. No AWS, no
+# staging, no prod — the estate is torn down and the exit test must not wait
+# for it.
+#
+# What is NOT here: the verb refusals (no ENV, no MODE, a
+# nameless recreate that restores nothing, a name that matches no backup).
+# tests/harness/{teardown,recreate,restore}.bats asserts each of them offline
+# against a stubbed kind/kubectl/aws in the ten-minute merge gate. A runner
+# minute spent re-proving them is a runner minute not spent on the path that
+# needs a cluster.
+# ----------------------------------------------------------------------------
+# ADR-0080: never on pull_request. This is an exit test — it measures state on
+# main for the launch scorecard and runs on push to main and on its schedule.
+# The merge gate is the ten-minute set in ci.yml.
+name: exit-test-backup-restore
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap/kind/substrate/**'
+      - 'bootstrap/kind/gibson/**'
+      - 'scripts/keyring.sh'
+      - 'scripts/keyring-to-cluster.sh'
+      - 'scripts/recreate-kind.sh'
+      - 'scripts/teardown-kind.sh'
+      - 'scripts/backup-verify.sh'
+      # Every helper the verbs source, not two of them by name: the loop
+      # runs velero-restore.sh, wait-apps.sh, preserve-backup.sh and
+      # ensure-container.sh too, and a merge that changed only one of those
+      # started no run (hosted#34, 2026-09-08). Same for the CI overlays,
+      # which are the only reason the platform fits the runner.
+      - 'scripts/lib/**'
+      - 'scripts/check-2core-overlay.py'
+      - 'test/baseline/**'
+      - 'Makefile'
+      - 'test/dr/**'
+      - '.github/workflows/exit-test-backup-restore.yml'
+  schedule:
+    # Daily, ahead of the 06:09Z launch scorecard run.
+    - cron: '20 5 * * *'
+
+concurrency:
+  # A manual dispatch gets its OWN group, so two dispatches never cancel each
+  # other. cancel-in-progress exists to drop runs made redundant by a newer
+  # push on the same ref; a workflow_dispatch is an explicit request, and
+  # silently cancelling one because someone else asked for the same test is a
+  # lost result, not a saved runner. Found while running the loop three times
+  # for deploy#1740: all three dispatches collapsed into one.
+  group: >-
+    exit-test-backup-restore-${{ github.ref }}${{
+      github.event_name == 'workflow_dispatch' && format('-{0}', github.run_id) || ''
+    }}
+  # A run that started finishes. On main an exit test is the proof (ADR-0080),
+  # so a newer push queues behind it and does not cancel it (hosted#585).
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  NS: gibson
+  # The chart source, checked out below. Every verb reads it from here.
+  CHARTS_ROOT: ${{ github.workspace }}/charts
+
+jobs:
+  # ==========================================================================
+  # THE EXIT TEST. Three bringups on one runner, because ADR-0083 is a claim
+  # about the difference between two of them.
+  #
+  # ONE PATH: every step is `make recreate` or `make teardown`, the verbs an
+  # operator runs (ADR-0083). Nothing about the loop lives only in this file:
+  # the sequence and every assertion are test/dr/preserve-restore-loop.sh, so
+  # the same loop runs on a workstation.
+  # ==========================================================================
+  restore-loop:
+    name: preserve, restore, wipe — the whole loop
+    runs-on: ubuntu-latest
+    # Three cold bringups of the whole platform, two teardowns with a verified
+    # backup between them, and a tenant data plane on top. Measured on kind,
+    # a cold recreate alone is 25-40 minutes.
+    # Three recreates and two teardowns on a 2-vCPU runner: a recreate took
+    # the whole 60-minute stage-2 cap on run 34124471104 before the CI
+    # overlays fit the node, and the cap is now 90 minutes (WAIT_APPS_TIMEOUT
+    # below). 350 is the room three of them plus the teardowns need; the
+    # GitHub ceiling is 360.
+    timeout-minutes: 350
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # The chart source (ADR-0086). charts is public, so the job's own
+      # token reads it; actions/checkout cannot write outside the workspace,
+      # so it lands in charts/ and CHARTS_ROOT (env above) names it.
+      - name: Check out zeroroot-ai/charts
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: zeroroot-ai/charts
+          path: charts
+
+      - name: Record the chart source under test
+        run: |
+          echo "charts: $(git -C "$CHARTS_ROOT" rev-parse HEAD) ($(git -C "$CHARTS_ROOT" describe --tags --always))"
+          test -d "$CHARTS_ROOT/helm/gibson" || { echo "::error::no chart source at $CHARTS_ROOT/helm/gibson"; exit 1; }
+
+      - name: Log in to ghcr.io
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: echo "$GH_TOKEN" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      # A full install unpacks ~10 GB of images on the kind node before any
+      # volume data, and this job does it three times on one runner.
+      # ubuntu-latest guarantees 14 GB free on /; the preinstalled toolchains
+      # below are unused here and hold about 25 GB (charts exit-test-baseline-install
+      # run 34121599474 died with "No space left on device").
+      - name: Free runner disk
+        uses: ./.github/actions/free-runner-disk
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
+        with:
+          version: v3.16.2
+
+      # kind + kubectl only. `make recreate` creates the cluster itself, with
+      # /dev/kvm mounted into the node and the StorageClass annotation Velero
+      # needs; a cluster pre-created here would have neither.
+      - name: Install kind + kubectl
+        uses: helm/kind-action@1544676c07bb3570fcb70166beaa07c4528fd4aa  # v1.15.1
+        with:
+          install_only: true
+
+      - name: Install Terraform
+        uses: ./.github/actions/install-terraform
+
+      # Stage 0 (ADR-0083): the durable bucket, the SMTP relay, the DNS
+      # sub-zone and the bringup keyring, OUTSIDE the cluster and outliving
+      # all three of them. GHCR_RO_PAT becomes the keyring member
+      # GHCR_PULL_TOKEN; without it the first-party images do not pull and the
+      # first recreate never converges.
+      - name: Stage 0 (make substrate ENV=kind)
+        env:
+          GHCR_PULL_TOKEN: ${{ secrets.GHCR_RO_PAT }}
+        run: |
+          if [ -z "${GHCR_PULL_TOKEN}" ]; then
+            echo "::warning::GHCR_RO_PAT is not available (fork PR?) — first-party images will not pull and the first recreate WILL fail."
+          fi
+          SUBSTRATE_DIR="$RUNNER_TEMP/substrate" make substrate ENV=kind
+
+      # The whole loop. Every assertion is in the script, so a failure names
+      # the step of the loop it failed at.
+      #
+      # BACKUP_TIMEOUT / VERIFY_TIMEOUT: the teardown verb's defaults (900 s
+      # and 240 s) are sized for a workstation. On the 2-vCPU runner the
+      # preserve backup took 12m38s on run 34190800718 with kopia on both
+      # cores, and it is slower now that the Velero overlay caps the
+      # node-agent at one core. The canary Restore shares that one core with
+      # whatever the hourly Schedule is doing, so 240 s is not enough for it
+      # either. Both knobs are deadlines, never sleeps: a fast run is still
+      # fast.
+      - name: EXIT TEST — preserve, restore, wipe, and prove the difference
+        run: |
+          RUNG=ci \
+          WAIT_APPS_TIMEOUT=5400 \
+          BACKUP_TIMEOUT=2400 \
+          VERIFY_TIMEOUT=900 \
+          test/dr/preserve-restore-loop.sh \
+            --substrate-dir "$RUNNER_TEMP/substrate" \
+            --rung ci
+
+      - name: Diagnose a failure
+        if: failure()
+        # Run 34138863972 (2026-09-07) failed on a canary Restore whose
+        # PodVolumeRestore the node-agent never accepted, and this step could
+        # not say why: it printed the Velero server tail and no node-agent
+        # log, no PodVolumeRestore phase, no PodVolumeBackup phases, and no
+        # node allocation. Every line below names one of those.
+        run: |
+          echo "=== runner and node disk ==="
+          df -h / || true
+          docker exec gibson-control-plane sh -c 'du -sh /var/lib/containerd; df -h /' 2>/dev/null || true
+          echo "=== node allocatable vs requested (a Pending pod is starvation) ==="
+          kubectl describe nodes | grep -A9 'Allocated resources' || true
+          kubectl top nodes 2>/dev/null || true
+          kubectl top pods -A --sort-by=cpu 2>/dev/null | head -25 || true
+          echo "=== node conditions and taints, the runner's memory, and what the kernel and kubelet said ==="
+          # Runs 34190800718 and 34217032807 (2026-09-08) both ended with every
+          # platform pod restarted in the same minute and the restored canary
+          # Pending with no node. Whether that was an OOM wave on the 7 GB
+          # runner or a NotReady kubelet was not in this log. Now it is.
+          kubectl get nodes -o custom-columns='NAME:.metadata.name,READY:.status.conditions[?(@.type=="Ready")].status,MEMPRESSURE:.status.conditions[?(@.type=="MemoryPressure")].status,PIDPRESSURE:.status.conditions[?(@.type=="PIDPressure")].status,TAINTS:.spec.taints[*].key' || true
+          free -m || true
+          docker exec gibson-control-plane sh -c 'dmesg 2>/dev/null | grep -iE "oom|out of memory|killed process" | tail -20' || true
+          docker exec gibson-control-plane sh -c 'journalctl -u kubelet --since "-40 min" --no-pager 2>/dev/null | grep -iE "oom|pressure|evict|not ready|NodeNotReady|PLEG|failed to run Kubelet" | tail -40' || true
+          echo "=== cluster events, newest last ==="
+          kubectl get events -A --sort-by=.lastTimestamp | tail -60 || true
+          echo "=== every pod's requests (what scripts/check-2core-overlay.py models, measured live) ==="
+          kubectl get pods -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,PHASE:.status.phase,CPU:.spec.containers[*].resources.requests.cpu,MEM:.spec.containers[*].resources.requests.memory' | grep -v Succeeded | sort || true
+          echo "=== why each restarted container last died: OOMKilled, or Error with the exit code (137 kill, 143 term, 2 liveness) ==="
+          # Run 34227548606: gibson-server restarted 7 times in 41 minutes,
+          # zitadel-login 8, and kube-scheduler itself 3. Whether the kernel
+          # OOM-killed them or the kubelet killed them on a failed probe is
+          # the difference between a memory budget and a CPU budget.
+          kubectl get pods -A -o custom-columns='NS:.metadata.namespace,NAME:.metadata.name,RESTARTS:.status.containerStatuses[*].restartCount,LAST:.status.containerStatuses[*].lastState.terminated.reason,EXIT:.status.containerStatuses[*].lastState.terminated.exitCode,AT:.status.containerStatuses[*].lastState.terminated.finishedAt' | awk 'NR==1 || $3 ~ /[1-9]/' || true
+          kubectl describe node | sed -n '/^Conditions:/,/^Addresses:/p' || true
+          kubectl describe node | sed -n '/^Events:/,$p' | tail -30 || true
+          echo "=== pods not Running, and pods with restarts (a CrashLoop is phase Running) ==="
+          kubectl get pods -A --no-headers | awk '$4!="Running" && $4!="Completed" || $5>0' || true
+          echo "=== what a crashlooping container said before it died (run 34345134204: gibson-0 exit 64, 21 restarts, no log) ==="
+          bash scripts/lib/diagnose-crash-logs.sh 12 || true
+          echo "=== Argo Applications: sync, health, and the operation phase wait-apps counts against ==="
+          kubectl -n argocd get applications -o custom-columns='NAME:.metadata.name,SYNC:.status.sync.status,HEALTH:.status.health.status,PHASE:.status.operationState.phase,RETRIES:.status.operationState.retryCount,STARTED:.status.operationState.startedAt,FINISHED:.status.operationState.finishedAt,MSG:.status.operationState.message' || true
+          echo "=== Tenant CRs ==="
+          kubectl get tenants.gibson.zeroroot.ai || true
+          echo "=== Velero: backups, restores, PodVolumeBackups, PodVolumeRestores, with phases ==="
+          kubectl -n velero get backups.velero.io -o custom-columns='NAME:.metadata.name,PHASE:.status.phase,ITEMS:.status.progress.itemsBackedUp,ERRORS:.status.errors,START:.status.startTimestamp,END:.status.completionTimestamp' || true
+          kubectl -n velero get restores.velero.io -o custom-columns='NAME:.metadata.name,BACKUP:.spec.backupName,PHASE:.status.phase,ITEMS:.status.progress.itemsRestored,ERRORS:.status.errors,START:.status.startTimestamp' || true
+          kubectl -n velero get podvolumebackups.velero.io -o custom-columns='NAME:.metadata.name,BACKUP:.metadata.labels.velero\.io/backup-name,PHASE:.status.phase,NODE:.spec.node,VOLUME:.spec.volume,START:.status.startTimestamp,END:.status.completionTimestamp' || true
+          kubectl -n velero get podvolumerestores.velero.io -o custom-columns='NAME:.metadata.name,RESTORE:.metadata.labels.velero\.io/restore-name,PHASE:.status.phase,NODE:.spec.node,VOLUME:.spec.volume,MSG:.status.message' || true
+          echo "=== Velero schedule and the backups it fired during the loop ==="
+          kubectl -n velero get schedules.velero.io -o wide || true
+          echo "=== node-agent, last 150 lines (the PodVolumeRestore controller lives here) ==="
+          kubectl -n velero logs daemonset/node-agent --tail=150 || true
+          echo "=== velero server, last 120 lines ==="
+          kubectl -n argocd get applications -o wide || true
+          kubectl -n gibson get pods,pvc -o wide || true
+          kubectl get pv -o custom-columns=NAME:.metadata.name,TYPE:.spec.local,HOSTPATH:.spec.hostPath || true
+          kubectl -n gibson get events --sort-by=.lastTimestamp | tail -40 || true
+          kubectl get clusters.postgresql.cnpg.io -A -o yaml | tail -60 || true
+          for ns in $(kubectl get ns -o name | grep 'namespace/tenant-' | cut -d/ -f2); do
+            echo "--- $ns"; kubectl -n "$ns" get pods,pvc -o wide || true
+            kubectl -n "$ns" get events --sort-by=.lastTimestamp | tail -20 || true
+          done
+          # The server pod by its label: deploy/velero also matches the
+          # node-agent pods, and printed a node-agent log (run 38316404113).
+          kubectl -n velero logs -l name=velero -c velero --tail=120 || true
+          # The CNPG bootstrap job writes WHY a recovery failed to its own pod
+          # log and nowhere else: the Cluster status says only "Instance
+          # creation failed for the following jobs". Without these lines the
+          # run names a failed job and never says what the job said
+          # (deploy#1740, run 33720474418).
+          for j in $(kubectl -n gibson get jobs -o name 2>/dev/null); do
+            echo "--- $j"; kubectl -n gibson logs "$j" --all-containers --tail=60 || true
+          done

@@ -1,0 +1,5 @@
+# What `make check` needs beyond the standard library, and nothing else.
+# check-exit-tests-off-pr.py parses workflow YAML; the other four guards are
+# stdlib-only. Pinned so a guard never changes behaviour because a transitive
+# release shipped.
+PyYAML==6.0.3

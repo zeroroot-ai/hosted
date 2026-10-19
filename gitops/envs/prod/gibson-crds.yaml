@@ -1,0 +1,68 @@
+# gibson-crds — a SIBLING release of the platform, not a dependency of it.
+#
+# gibson-crds exists because Helm cannot install a CRD and a CR that uses it in
+# one release (deploy CONTEXT.md § Umbrella chart). gibson-velero is a second
+# release in its own namespace because the Velero server reads its kopia
+# repository password through a namespace-scoped cache, so its namespace needs
+# list/watch on secrets — which in `gibson` would be every platform Secret
+# (deploy#1762).
+#
+# Neither is a dependency of the umbrella, so neither arrived with it. Before
+# gitops#563 NO env declared either, so a from-zero recreate brought up a
+# cluster with no CRDs and no backup plane: the gibson Application failed every
+# CRD-typed resource of its 45 with "Make sure the CRD is installed", measured
+# on staging while running deploy#1746.
+#
+# sync-wave "-10": the CRDs must be established before the platform
+# Application applies any custom resource. The platform carries no wave and so
+# defaults to 0.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gibson-crds
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: "-10"
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    # Versioned OCI chart, published beside the umbrella at the same version
+    # by deploy's publish-umbrella-chart workflow (deploy#1777/#1785).
+    - repoURL: ghcr.io/zeroroot-ai/charts
+      chart: gibson-crds
+      targetRevision: "0.146.1"
+      helm:
+        # The monitoring Application installs kube-prometheus-stack, which
+        # owns the full prometheus-operator CRD set. This release ships two of
+        # the same CRDs (ServiceMonitor, PrometheusRule), so the two
+        # Applications fought over them and monitoring never synced (staging
+        # rebuild, 2026-10-06). This is the seam of the chart for a cluster
+        # that runs the Prometheus Operator (gibson-crds values.yaml).
+        valuesObject:
+          prometheus-operator-crds:
+            enabled: false
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gibson
+  syncPolicy:
+    automated:
+      # prune:false matches the platform Application in this env. Pruning stays
+      # a deliberate, reviewed action rather than something a fast auto-sync
+      # path can do on a transient or misread diff.
+      prune: false
+      selfHeal: true
+    retry:
+      limit: 2
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+    syncOptions:
+      - CreateNamespace=true
+      - ServerSideApply=true
+      # CRDs are large; Argo must not refuse them for exceeding the
+      # last-applied-configuration annotation limit. ServerSideApply above is
+      # what makes that safe (deploy#1751 vendored CRD experience).
+      - Replace=true

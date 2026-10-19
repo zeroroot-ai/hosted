@@ -1,0 +1,23 @@
+# Values of the ToolHive operator chart (ADR-0114). The kind recreate
+# (scripts/recreate-kind.sh) and the EC2 and EKS bringups
+# (scripts/lib/bringup-after-cluster.sh) install the chart with this file.
+#
+# Each tenant namespace enforces the restricted Pod Security level
+# (ADR-0165, gibson#767). ToolHive v0.12.1 sets the seccomp profile
+# RuntimeDefault and drops ALL capabilities only on its OpenShift platform
+# (pkg/container/kubernetes/security.go). OPERATOR_OPENSHIFT=true selects
+# that platform, so each proxy Deployment that the operator creates, for an
+# MCPServer and for an MCPRemoteProxy, meets restricted (hosted#454).
+#
+# The platform also unsets runAsUser on the proxy. The proxy image runs as
+# user 65532, a numeric non-root user, so runAsNonRoot still passes.
+#
+# The MCP server pod of an MCPServer is created by the proxy, not by the
+# operator. The proxy does not read this variable. The MCPServer itself
+# must set spec.podTemplateSpec (test/toolhive/restricted-probe.sh shows
+# the fields). ToolHive v0.30.1 and later set these fields on each platform
+# (stacklok/toolhive#5555). That upgrade removes this file.
+operator:
+  env:
+    - name: OPERATOR_OPENSHIFT
+      value: "true"

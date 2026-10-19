@@ -1,0 +1,103 @@
+# Dependabot keeps every pin here moving: the org reusable workflows and
+# actions (first-party refs are pinned by SHA and bumped the same way as
+# actions/checkout), the load-test Go module, the CI Python tools, and the
+# Terraform providers of every root module. Without this file no PR is ever
+# opened, and the pins froze at v0.4.0 until a hand bump on 2026-09-17.
+version: 2
+updates:
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+    labels: ["dependencies", "github-actions"]
+    commit-message:
+      prefix: chore(deps)
+    open-pull-requests-limit: 5
+    groups:
+      codeql-action:
+        patterns:
+          - github/codeql-action*
+      actions-deps:
+        patterns:
+          - '*'
+        exclude-patterns:
+          - github/codeql-action*
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: "gomod"
+    directory: "/test/load"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+    labels: ["dependencies", "go"]
+    commit-message:
+      prefix: chore(deps)
+    open-pull-requests-limit: 5
+    groups:
+      go-deps:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+    labels: ["dependencies", "pip"]
+    commit-message:
+      prefix: chore(deps)
+    open-pull-requests-limit: 5
+    groups:
+      pip-deps:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: "terraform"
+    directories:
+      - "/bootstrap/eks/gibson"
+      - "/bootstrap/kind/gibson"
+      - "/substrate/apex-zone"
+      - "/substrate/gibson-bootstrap"
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+    labels: ["dependencies", "terraform"]
+    commit-message:
+      prefix: chore(deps)
+    open-pull-requests-limit: 5
+    groups:
+      terraform-deps:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+  - package-ecosystem: npm
+    directories:
+      - /test/load
+      - /test/platform-owner
+      - /test/signup
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+    open-pull-requests-limit: 5
+    groups:
+      npm-deps:
+        patterns:
+          - '*'
+        update-types:
+          - minor
+          - patch
+    commit-message:
+      prefix: chore(deps)

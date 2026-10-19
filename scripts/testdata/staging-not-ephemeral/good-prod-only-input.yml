@@ -1,0 +1,16 @@
+# The verb workflow shape after hosted#403. The input does not offer staging.
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        type: choice
+        options: [prod]
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    env:
+      ENV: ${{ inputs.env }}
+    steps:
+      - name: make teardown
+        run: make teardown ENV="${ENV}" MODE=wipe

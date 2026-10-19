@@ -1,0 +1,18 @@
+# Local state files (only present during the local-backend bootstrap).
+terraform.tfstate
+terraform.tfstate.backup
+.terraform.tfstate.lock.info
+
+# Module + provider caches.
+.terraform/
+.terraform.lock.hcl
+
+# Operator-supplied secret values.
+terraform.tfvars
+terraform.tfvars.json
+*.auto.tfvars
+*.auto.tfvars.json
+
+# Plan artifacts.
+plan.out
+plan.json

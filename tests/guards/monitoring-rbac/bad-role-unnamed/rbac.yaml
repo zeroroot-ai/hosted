@@ -1,0 +1,10 @@
+# A Role in gibson that lists every Secret there, the owner credentials too.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: monitoring-operator-daemon-metrics-ca
+  namespace: gibson
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    verbs: [get, list, watch]

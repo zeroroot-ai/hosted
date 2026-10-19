@@ -1,0 +1,114 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "AllowEverythingByDefault",
+      "Effect": "Allow",
+      "Action": "*",
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyKMSScheduleDeletion",
+      "Effect": "Deny",
+      "Action": [
+        "kms:ScheduleKeyDeletion",
+        "kms:DisableKey",
+        "kms:DisableKeyRotation"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyCloudTrailDisable",
+      "Effect": "Deny",
+      "Action": [
+        "cloudtrail:StopLogging",
+        "cloudtrail:DeleteTrail",
+        "cloudtrail:UpdateTrail",
+        "cloudtrail:PutEventSelectors",
+        "cloudtrail:PutInsightSelectors"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyStateBucketDeletion",
+      "Effect": "Deny",
+      "Action": [
+        "s3:DeleteBucket",
+        "s3:DeleteBucketPolicy",
+        "s3:PutBucketPolicy",
+        "s3:PutBucketVersioning",
+        "s3:PutBucketLifecycleConfiguration"
+      ],
+      "Resource": [
+        "arn:aws:s3:::zeroroot-ai-prod-tfstate-*",
+        "arn:aws:s3:::zeroroot-ai-mgmt-tfstate-*",
+        "arn:aws:s3:::gibson-org-cloudtrail-*",
+        "arn:aws:s3:::zeroroot-ai-prod-security-findings-*",
+        "arn:aws:s3:::zeroroot-ai-prod-audit-*"
+      ]
+    },
+    {
+      "Sid": "DenyOrganizationsLeave",
+      "Effect": "Deny",
+      "Action": [
+        "organizations:LeaveOrganization",
+        "organizations:DeleteOrganization",
+        "organizations:DisablePolicyType"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyGuardDutyDisable",
+      "Effect": "Deny",
+      "Action": [
+        "guardduty:DeleteDetector",
+        "guardduty:DisassociateFromMasterAccount",
+        "guardduty:DisassociateMembers",
+        "guardduty:UpdateDetector"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyConfigDisable",
+      "Effect": "Deny",
+      "Action": [
+        "config:DeleteConfigurationRecorder",
+        "config:DeleteDeliveryChannel",
+        "config:StopConfigurationRecorder",
+        "config:DeleteConfigRule"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "DenyIAMUserCredentialsExceptSubstrateUsers",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateUser",
+        "iam:CreateAccessKey",
+        "iam:CreateLoginProfile"
+      ],
+      "NotResource": [
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-drill-platform",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-drill-smtp",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-drill-dns",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-drill-setec-disk-builder",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-staging-platform",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-staging-smtp",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-staging-dns",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-staging-setec-disk-builder",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-prod-platform",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-prod-smtp",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-prod-dns",
+        "arn:aws:iam::*:user/substrate/zeroroot-ai-prod-setec-disk-builder"
+      ]
+    },
+    {
+      "Sid": "DenyIAMUserManagedPolicyAttach",
+      "Effect": "Deny",
+      "Action": [
+        "iam:AttachUserPolicy"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

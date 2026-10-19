@@ -1,0 +1,9 @@
+{
+  "name": "exit-test-signup",
+  "private": true,
+  "description": "The browser driver of the signup exit test (hosted#122). npm --prefix test/signup install, then npx playwright install --with-deps chromium.",
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.64.1"
+  }
+}

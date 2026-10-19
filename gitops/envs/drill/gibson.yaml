@@ -1,0 +1,147 @@
+# DRILL env overlay. Derived from envs/staging/ and kept close to it on purpose
+# (ADR-0095): a drill that proves a bringup on a shape staging does not use is
+# not evidence about staging. Every path, host, bucket and address here follows
+# `drill`; where a comment below still says "staging" it is describing the
+# permanent environment as a different thing, not this file.
+#
+# What differs from staging, and only this:
+#   - global.domain and every host derive from drill.zeroroot.ai
+#   - the durable bucket is zeroroot-ai-drill-durable-<account>
+#   - the owner and from addresses are +drill
+#   - the self-hosted ARC runners and their manifests are absent: a drill proves
+#     the platform and the backup chain, not an add-on staging happens to carry
+#
+# THIS ENVIRONMENT IS DESTROYED AFTER EVERY RUN. Its stage 1 instance also arms
+# its own termination (self_terminate_after_minutes), so nothing here should be
+# treated as state that survives.
+# The single Gibson platform Application for the drill env (ADR-0071/0072).
+#
+# One umbrella chart = one Argo Application = the whole platform (CRDs →
+# operators → workloads → datastores → ExternalSecrets → bringup Jobs → CNPG),
+# replacing the superseded apps/<env> app-of-apps over three separate charts.
+#
+# Multi-source (ADR-0072 / gitops#250):
+#   - source[0]: the VERSIONED OCI umbrella chart — an exact, reproducible,
+#     tested deployable. Promotion = a one-line bump of this targetRevision,
+#     the SINGLE promotion marker (the values.yaml chartVersion marker was
+#     deleted in gitops#448); rollback = pin the previous version.
+#   - source[1]: this gitops repo as the $values ref, supplying the staging
+#     env-shape overlay envs/staging/values.yaml, which DOES carry per-app
+#     image.tag overrides for the gibson-built components (gibson, extAuthz,
+#     tenantOperator, platformOperator) — corrected 2026-07-02 (Epic:
+#     cicd-efficiency slice S8, gibson#1131): those four tags are the
+#     continuous-deploy lever gibson's post-merge job writes a fresh
+#     `sha-<commit>` into on every push to main. Only dashboard's image is
+#     still pinned purely at chart-package time from this repo's side (its
+#     tag bump is a separate repo/build, untouched by that job).
+#
+# STAGED, not yet switched (gitops#250): this repoint to the OCI source is the
+# target shape. The live staging Argo App is switched by a human after review,
+# and requires the OCI chart to be published at the pinned chartVersion
+# (deploy#790 publish-umbrella-chart) + the ghcr OCI Helm repo registered in Argo.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gibson
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    # source[0] — versioned OCI umbrella chart. This targetRevision is THE
+    # promotion marker (gitops#448): the promotion workflow bumps this line and
+    # must never touch envs/staging/values.yaml in the same commit.
+    - repoURL: ghcr.io/zeroroot-ai/charts
+      chart: gibson
+      targetRevision: "0.151.1"
+      helm:
+        valueFiles:
+          - $values/gitops/envs/drill/values.yaml
+    # source[1] — this repo as the $values ref (the staging env overlay).
+    - repoURL: https://github.com/zeroroot-ai/hosted
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: gibson
+  # platform-operator's CreateOrUpdate rewrites two label fields on the SA
+  # identity ConfigMap (managed-by=platform-operator, component=
+  # sa-identity-map) that the chart renders differently — permanent
+  # OutOfSync otherwise (deploy#865; same entry as the dev-branch
+  # gibson-workloads app, gitops#207/#209). Only the two label fields are
+  # excluded; the data section (populated at runtime by the identity
+  # bootstrap, never rendered by the chart) is protected by
+  # ServerSideDiff's managed-fields-aware dry-run, not by ignores.
+  ignoreDifferences:
+    - group: ""
+      kind: ConfigMap
+      name: gibson-sa-identity-map
+      namespace: gibson
+      jqPathExpressions:
+        - '.metadata.labels["app.kubernetes.io/managed-by"]'
+        - '.metadata.labels["gibson.zeroroot.ai/component"]'
+  syncPolicy:
+    # selfHeal:true (now the policy EVERYWHERE — deploy#1394, amends ADR-0072;
+    # staging pioneered it via Epic: cicd-efficiency board #44, slice S8,
+    # gibson#1131). Staging is a continuous-deploy target: gibson's
+    # post-merge image matrix writes a fresh `sha-<commit>` straight into
+    # envs/staging/values.yaml on every push to main (gibson
+    # .github/workflows/gibson-images.yml, bump-staging job), so an
+    # OutOfSync Application here is the EXPECTED steady state between
+    # merges, not a bug to leave stuck for investigation — selfHeal
+    # reconciles it automatically and quickly. prune:false (flipped from
+    # prune:true) keeps this fast/frequent auto-sync path from ever
+    # deleting a resource on a transient or misread diff; pruning stays a
+    # deliberate, reviewed action via the manual promotion flow instead.
+    automated:
+      prune: false
+      selfHeal: true
+    # Bounded operations (gitops#495): a sync that fails or hangs must reach a
+    # TERMINAL state quickly, because selfHeal cannot abandon or re-target an
+    # in-flight operation — a Running op pinned to a stale $values revision
+    # stranded staging for 17h (the op could only be fixed by a commit it was
+    # structurally unable to see). Bounding retries makes the op end, and a
+    # fresh selfHeal drive then resolves CURRENT revisions. The companion
+    # controller.sync.timeout (deploy argocd module) bounds the hung-Running
+    # case the same way.
+    retry:
+      limit: 2
+      backoff:
+        duration: 30s
+        factor: 2
+        maxDuration: 5m
+    # Pod Security on the gibson namespace (D8, ADR-0165, hosted#438): the
+    # namespace enforces restricted. This Application is the one place that
+    # sets the labels for this env; Terraform and the scripts set none
+    # (scripts/check-namespace-pod-security.py). The pods with an expected
+    # exception run in their own namespaces: spire-system (rendered by the
+    # chart), setec-system and velero.
+    managedNamespaceMetadata:
+      labels:
+        pod-security.kubernetes.io/enforce: restricted
+        pod-security.kubernetes.io/enforce-version: latest
+        pod-security.kubernetes.io/audit: restricted
+        pod-security.kubernetes.io/warn: restricted
+    syncOptions:
+      - CreateNamespace=true
+      # ApplyOutOfSyncOnly is deliberately ABSENT (gitops#363). With it enabled,
+      # a sync applies only what the comparison at sync-start marked OutOfSync —
+      # and when that comparison is computed against the previous revision, the
+      # resources a promotion actually changes look in-sync, get skipped, and the
+      # operation reports "successfully synced (no more tasks)". The next refresh
+      # marks them OutOfSync against the new revision, but nothing re-drives it
+      # where selfHeal is false. Reproduced on dev: a chartVersion move left the
+      # live Envoy ConfigMap on the old content with the app reporting Succeeded,
+      # indefinitely. The option is a throughput optimisation for applications
+      # with thousands of objects; this one has ~150, so applying them all is the
+      # cheap side of the trade.
+      - ServerSideApply=true
+      # API-server dry-run diff: respects SSA managed-fields ownership, so
+      # the chart's data-less gibson-sa-identity-map ConfigMap stays Synced
+      # while the runtime writer owns f:data, and kube-defaulted field
+      # drift disappears without per-kind ignores (deploy#865). The
+      # controller-side flag (controller.diff.server.side=true) is already
+      # set on this Argo's argocd-cmd-params-cm.
+      - ServerSideDiff=true
+      - RespectIgnoreDifferences=true

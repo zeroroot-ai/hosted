@@ -1,0 +1,65 @@
+# Deliberate-prune allowlist for the staging `gibson` Application.
+#
+# WHY THIS FILE EXISTS (gitops#498, gitops#507, gitops#522)
+#
+# staging runs `syncPolicy.automated.prune: false` on purpose — the gitops#448
+# blast-radius guard: a fast, frequent selfHeal path must never delete a live
+# resource on a transient or misread diff. The cost is that every object whose
+# chart source is retired stays live, keeps its `argocd.argoproj.io/tracking-id`,
+# and holds the Application `OutOfSync` forever. Nothing in the automated path
+# can ever remove it.
+#
+# The companion the `prune: false` comment promised — "pruning stays a
+# deliberate, reviewed action" — did not exist (gitops#507). This file IS the
+# review: an entry here is a merged, reviewed authorisation to delete exactly
+# one named live object, and `gitops/scripts/prune-orphans.sh` turns the entries into
+# the exact scoped `argocd app sync --prune --resource ...` an operator runs.
+# Nothing else may be pruned, and the app-wide policy stays `prune: false`.
+#
+# IT IS ALSO THE DETECTOR
+#
+# gitops#522's orphan was found by accident during a promotion, not by a check,
+# because `gitops/scripts/check-promotion-landed.sh` waved through ANY resource
+# carrying `requiresPruning`. It now tolerates only the ones named here, so an
+# unreviewed orphan fails promotion verification the first time it appears
+# instead of accumulating unseen.
+#
+# A STALE ENTRY IS A FAILURE
+#
+# Same contract as `chart-digests.yaml`'s `signed: false` exemptions: once the
+# prune has run, the entry matches nothing live and `prune-orphans.sh audit`
+# fails until it is deleted. scripts/prove-promotion.sh runs that audit on
+# each promotion of the env (hosted#748), so the next promotion fails on a
+# stale entry. The debt cannot outlive itself.
+#
+# ADDING AN ENTRY
+#
+#   1. prove the chart no longer renders it (`helm template` the pinned version)
+#   2. add it below with `retiredBy`, `reason`, `observed`
+#   3. merge — that is the review
+#   4. `gitops/scripts/prune-orphans.sh plan staging <app.json>` and run the printed
+#      command (`--dry-run` first)
+#   5. delete the entry once the object is gone
+#
+# Fields: group ("" for core), kind, namespace ("" for cluster-scoped), name,
+# retiredBy (the PR/issue that removed the source), reason, observed (the date
+# the orphan was verified live).
+
+resources:
+  # 2026-10-17 (hosted#748): six earlier entries (three gibson-grafana-*
+  # ConfigMaps, ExternalSecret gibson-db-secrets, and ClusterRole and
+  # ClusterRoleBinding gibson-dashboard-crd) were deleted. Their prune ran:
+  # the last green promote-staging run (38484395075, chart 0.148.0) reported
+  # no reviewed residue, so none of them was live.
+  # charts#710 (chart 0.150.0) deleted the provider catalogue: gibson v0.161.0
+  # reads every model list from the provider's own API (gibson#1194) and no
+  # longer reads GIBSON_PROVIDERS_CATALOGUE_PATH. The chart 0.150.0 render
+  # holds no provider-catalogue ConfigMap, and the daemon StatefulSet at that
+  # pin mounts no volume of that name.
+  - group: ""
+    kind: ConfigMap
+    namespace: gibson
+    name: gibson-gibson-workloads-provider-catalogue
+    retiredBy: charts#710
+    reason: the daemon reads model lists from each provider's API, and nothing mounts the catalogue
+    observed: "2026-10-15"

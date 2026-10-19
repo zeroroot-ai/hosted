@@ -1,0 +1,14 @@
+# CI render fixture for the SaaS overlay entitlements-svc chart.
+# Used by the bats no-closed-refs guard to verify the overlay renders cleanly
+# and that the closed billing image reference is confined to the overlay.
+#
+# NOTE: ARNs/hostnames are GENERICIZED PLACEHOLDERS (account 000000000000)
+# for OSS publication — this is a CI render fixture only.
+# The trust domain arrives from the env's values.yaml in a real install.
+global:
+  spire:
+    trustDomain: "fixture.example"
+postgres:
+  host: "platform-postgres-rw.gibson.svc.cluster.local"
+  passwordSecretName: "gibson-platform-postgres-credentials"
+# CI uses the digest-pinned default from values.yaml (no image override needed).

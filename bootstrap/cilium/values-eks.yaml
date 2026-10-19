@@ -1,0 +1,13 @@
+# Cilium on EKS (hosted#436). ENI mode: each pod gets an address of the VPC
+# from an ENI of its node, as it did with the VPC CNI. The EKS control plane
+# reaches an admission webhook by pod address, so the pod network must be the
+# VPC network.
+eni:
+  enabled: true
+ipam:
+  mode: eni
+routingMode: native
+
+# A pod address is a VPC address, and the nodes are in private subnets behind
+# a NAT gateway. So no node rewrites the source address of a pod.
+enableIPv4Masquerade: false

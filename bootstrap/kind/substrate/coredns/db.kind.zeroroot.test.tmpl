@@ -1,0 +1,14 @@
+; Zone file for kind.zeroroot.test, the kind DNS sub-zone of stage 0 (ADR-0083).
+; substrate.sh renders __NS_IP__ to the CoreDNS container's pinned address on
+; the kind Docker network and writes the result beside the Corefile.
+; zeroroot.test is the reserved test TLD (RFC 6761): it never leaks to real DNS.
+$ORIGIN kind.zeroroot.test.
+$TTL 60
+@   IN  SOA ns.kind.zeroroot.test. hostmaster.kind.zeroroot.test. (
+            1          ; serial
+            3600       ; refresh
+            600        ; retry
+            86400      ; expire
+            60 )       ; minimum
+@   IN  NS  ns.kind.zeroroot.test.
+ns  IN  A   __NS_IP__

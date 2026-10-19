@@ -1,0 +1,33 @@
+Copyright (c) 2026 Zero Root AI All rights reserved.
+
+This repository contains the ZeroRoot estate: Terraform for the substrate and
+cluster, the bringup verbs, and the Argo tree that syncs the platform.
+
+It is NOT distributed and NOT licensed for use, copying, modification or
+redistribution by anyone outside Zero Root AI
+
+This notice exists so the absence of a license is explicit rather than
+accidental. A repository with no LICENSE file is all-rights-reserved by
+default, which is the same outcome — but silence is indistinguishable from an
+oversight, and this repository's terms are deliberate.
+
+The product this repository deploys is licensed separately. Each repository
+carries its own LICENSE file, and that file is the authority (ADR-0089):
+
+  Apache-2.0            zeroroot-ai/sdk, zeroroot-ai/adk, zeroroot-ai/setec,
+                        zeroroot-ai/ast-checks, zeroroot-ai/charts,
+                        zeroroot-ai/.github
+  Elastic License 2.0   zeroroot-ai/gibson, zeroroot-ai/dashboard,
+                        zeroroot-ai/gibson-executor, zeroroot-ai/sdk-ts,
+                        zeroroot-ai/zerocool-plugins, zeroroot-ai/cve-triage,
+                        zeroroot-ai/docs-site, zeroroot-ai/brand,
+                        zeroroot-ai/zero-day-ai.github.io
+  MIT                   zeroroot-ai/zitadel-login, a fork. Copyright (c) 2023
+                        ZITADEL.
+  All rights reserved   zeroroot-ai/hosted (this repository),
+                        zeroroot-ai/billing, zeroroot-ai/www,
+                        zeroroot-ai/docs
+
+The license of each repository states its terms. No registry credential
+enforces them: each first-party container image is public, except the image
+of zeroroot-ai/billing.

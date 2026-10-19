@@ -1,0 +1,11 @@
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: { name: alertmanager-config, namespace: monitoring }
+spec:
+  secretStoreRef: { name: gibson-secrets, kind: ClusterSecretStore }
+---
+apiVersion: external-secrets.io/v1
+kind: ExternalSecret
+metadata: { name: in-release, namespace: gibson }
+spec:
+  secretStoreRef: { name: gibson-secrets, kind: ClusterSecretStore }

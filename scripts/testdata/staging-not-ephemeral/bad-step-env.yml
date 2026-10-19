@@ -1,0 +1,14 @@
+# The step sets ENV, and the verb has no ENV on its line.
+# The guard must reject it.
+on:
+  workflow_dispatch:
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rebuild
+        env:
+          ENV: staging
+        run: |
+          set -euo pipefail
+          make recreate

@@ -1,0 +1,198 @@
+# The RBAC of the monitoring stack (hosted#505). One copy for staging, drill
+# and prod: each env's apps/monitoring.yaml loads this directory as a source.
+#
+# kube-prometheus-stack gives its operator a ClusterRole that reads every
+# Secret of the cluster, and the chart has no setting to narrow it. That
+# includes the owner credentials that only bootstrap may read (charts
+# ADR-0093). So each env sets global.rbac.create=false, and this file holds
+# the RBAC instead:
+#
+#   - the operator: the upstream ClusterRole of chart 91.9.0 WITHOUT
+#     configmaps and secrets, plus a Role for both in `monitoring`, where its
+#     Prometheus and Alertmanager live. It watches only `monitoring` and
+#     `gibson` (prometheusOperator.namespaces).
+#   - one exception in `gibson`: get on the one Secret that a chart
+#     ServiceMonitor names, the CA of the daemon metrics endpoint
+#     (gibson-daemon-metrics-tls, key ca.crt). resourceNames limits it to
+#     that Secret.
+#   - Prometheus: the upstream ClusterRole, which reads no Secret.
+#   - Grafana: a ClusterRole on ConfigMaps only. Its sidecars watch
+#     ConfigMaps only (grafana.sidecar.*.resource: configmap), and
+#     grafana.rbac.useExistingClusterRole binds this one.
+#
+# kube-state-metrics keeps its own RBAC, without the secrets collector
+# (collectorsExclude), so its ClusterRole names no Secret.
+#
+# scripts/check-monitoring-rbac.py (make check-monitoring-rbac) fails a
+# monitoring values file or a manifest here that grants a Secret read
+# outside `monitoring`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring-kube-prometheus-operator
+rules:
+  - apiGroups: [monitoring.coreos.com]
+    resources: [alertmanagers, prometheusagents, prometheuses, thanosrulers]
+    verbs: [patch]
+  - apiGroups: [monitoring.coreos.com]
+    resources:
+      - alertmanagers/status
+      - podmonitors/status
+      - probes/status
+      - prometheuses/status
+      - prometheusagents/status
+      - prometheusrules/status
+      - scrapeconfigs/status
+      - servicemonitors/status
+      - thanosrulers/status
+    verbs: [create, update, patch, delete]
+  - apiGroups: [monitoring.coreos.com]
+    resources:
+      - alertmanagers/finalizers
+      - prometheusagents/finalizers
+      - prometheuses/finalizers
+      - thanosrulers/finalizers
+    verbs: [update]
+  - apiGroups: [monitoring.coreos.com]
+    resources:
+      - alertmanagers
+      - alertmanagerconfigs
+      - podmonitors
+      - probes
+      - prometheusagents
+      - prometheuses
+      - prometheusrules
+      - servicemonitors
+      - scrapeconfigs
+      - thanosrulers
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [statefulsets]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods]
+    verbs: [list, delete]
+  - apiGroups: [""]
+    resources: [services, services/finalizers, endpoints]
+    verbs: [get, create, update, delete]
+  - apiGroups: [""]
+    resources: [nodes]
+    verbs: [list, watch]
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch]
+  - apiGroups: ["", events.k8s.io]
+    resources: [events]
+    verbs: [patch, create]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+  - apiGroups: [storage.k8s.io]
+    resources: [storageclasses]
+    verbs: [get]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, create, list, watch, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: monitoring-kube-prometheus-operator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: monitoring-kube-prometheus-operator
+subjects:
+  - kind: ServiceAccount
+    name: monitoring-kube-prometheus-operator
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: monitoring-kube-prometheus-operator
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: [configmaps, secrets]
+    verbs: [get, list, watch, create, update, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: monitoring-kube-prometheus-operator
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: monitoring-kube-prometheus-operator
+subjects:
+  - kind: ServiceAccount
+    name: monitoring-kube-prometheus-operator
+    namespace: monitoring
+---
+# The CA that the daemon ServiceMonitor names (tlsConfig.ca.secret). The
+# operator copies it into the TLS assets of Prometheus in `monitoring`.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: monitoring-operator-daemon-metrics-ca
+  namespace: gibson
+rules:
+  - apiGroups: [""]
+    resources: [secrets]
+    resourceNames: [gibson-daemon-metrics-tls]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: monitoring-operator-daemon-metrics-ca
+  namespace: gibson
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: monitoring-operator-daemon-metrics-ca
+subjects:
+  - kind: ServiceAccount
+    name: monitoring-kube-prometheus-operator
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring-kube-prometheus-prometheus
+rules:
+  - apiGroups: [""]
+    resources: [nodes, nodes/metrics, services, endpoints, pods]
+    verbs: [get, list, watch]
+  - apiGroups: [discovery.k8s.io]
+    resources: [endpointslices]
+    verbs: [get, list, watch]
+  - apiGroups: [networking.k8s.io]
+    resources: [ingresses]
+    verbs: [get, list, watch]
+  - nonResourceURLs: [/metrics, /metrics/cadvisor]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: monitoring-kube-prometheus-prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: monitoring-kube-prometheus-prometheus
+subjects:
+  - kind: ServiceAccount
+    name: monitoring-kube-prometheus-prometheus
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: monitoring-grafana-configmaps
+rules:
+  - apiGroups: [""]
+    resources: [configmaps]
+    verbs: [get, watch, list]

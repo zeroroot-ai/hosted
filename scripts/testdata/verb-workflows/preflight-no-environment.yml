@@ -1,0 +1,19 @@
+# Fixture: the job names no environment, so no protection rule gates the
+# run. The guard must REJECT this.
+name: preflight
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        type: choice
+        options: [staging, prod]
+concurrency:
+  group: bringup-${{ inputs.env }}
+  cancel-in-progress: false
+jobs:
+  preflight:
+    runs-on: ubuntu-latest
+    steps:
+      - name: make preflight
+        run: make preflight ENV="${{ inputs.env }}"

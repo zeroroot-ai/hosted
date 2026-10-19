@@ -1,0 +1,113 @@
+# exit-test-chart-signing — launch blocker 5 (hosted#116, deploy#1194).
+#
+# The exit test, in plain words: PROD RUNS THE CHART DIGEST STAGING TESTED,
+# AND A MISMATCH IS BLOCKED.
+#
+# It lives here because every part of the mechanism does: the env pins under
+# gitops/envs/, the digest ledger gitops/chart-digests.yaml, and the scripts
+# under gitops/scripts/. The test ran in the gitops repo until the 2026-09-04
+# split deleted that repo (ADR-0086). The scripts moved here. The workflow did
+# not, and the board read NOT_BUILT while the scripts sat unwired.
+#
+# The scorecard reads the latest run of THIS workflow by name. It must stay
+# `exit-test-chart-signing.yml`, in this repo.
+#
+# TWO JOBS, AND THE SPLIT IS DELIBERATE
+#
+#   guards  no network, no credential. Every guard proves it can still fail
+#           before anything trusts its verdict. This half keeps working when
+#           the registry does not.
+#   state   the exit test proper. The offline ordering check, then the live
+#           check that every pinned version still resolves to its recorded
+#           digest and that the digest is signed by zeroroot-ai/charts.
+#
+# Neither needs staging or prod. A container registry is not the estate. The
+# chart packages are public (charts/scripts/check-anonymous-pull.sh holds them
+# so), so the live check runs with no token: the same pull a customer makes.
+#
+# ADR-0080: never on pull_request. It measures state on main for the board and
+# runs on push to main and on its schedule. The merge gate is ci.yml, which
+# runs the same guards through `make check` and `make check-promotion-pr`.
+name: exit-test-chart-signing
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    # Daily, ahead of the launch scorecard run, staggered from the other
+    # hosted exit tests. This is also the trigger that catches a tag swap
+    # landing after a merge, which no push trigger can see.
+    - cron: '20 5 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: exit-test-chart-signing-${{ github.ref }}
+  # A run that started finishes. On main an exit test is the proof (ADR-0080),
+  # so a newer push queues behind it and does not cancel it (hosted#585).
+  cancel-in-progress: false
+
+jobs:
+  guards:
+    name: guards (no network)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install guard dependencies
+        run: python3 -m pip install -r requirements-ci.txt
+
+      # check-promotion runs tests/harness/prove-promotion-audit.bats, and the
+      # runner image has no bats. The pinned release, as ci.yml installs it.
+      - name: Install bats
+        run: |
+          scripts/install-bats.sh "$HOME/.local"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      # Every selftest, then the offline ordering check on the tree. The same
+      # target the merge gate runs.
+      - name: The guards can still fail
+        run: make check-promotion
+
+  state:
+    name: prod runs the digest staging tested
+    needs: guards
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: '3.12'
+
+      - name: Install guard dependencies
+        run: python3 -m pip install -r requirements-ci.txt
+
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
+        with:
+          version: v3.16.2
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac  # v3
+        with:
+          cosign-release: "v2.4.1"
+
+      # EXIT TEST, half 1 — offline. Prod never pins a chart version staging
+      # has not pinned first, and every pin is one the ledger records.
+      - name: EXIT TEST — prod pins a version staging tested first
+        run: python3 gitops/scripts/check-promotion-order.py
+
+      # EXIT TEST, half 2 — live. The tag staging and prod pin still resolves
+      # to the digest the ledger recorded, and that digest carries a cosign
+      # signature from zeroroot-ai/charts's publish-umbrella-chart workflow.
+      # No registry login: the packages are public, and a pull that needs a
+      # token is a customer who cannot install.
+      - name: EXIT TEST — every pinned version still means what it meant
+        run: bash gitops/scripts/verify-chart-signature.sh staging prod

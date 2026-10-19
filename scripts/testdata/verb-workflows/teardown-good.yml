@@ -1,0 +1,30 @@
+# Fixture: the minimal clean teardown shape. The guard must ACCEPT this.
+name: teardown
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        type: choice
+        options: [prod]
+      mode:
+        required: true
+        type: choice
+        options: [wipe, preserve]
+concurrency:
+  group: bringup-${{ inputs.env }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    steps:
+      - name: Materialize stage 0 state from the environment
+        env:
+          BRINGUP_KEYRING: ${{ secrets.BRINGUP_KEYRING }}
+        run: |
+          printf '%s\n' "${BRINGUP_KEYRING}" > keyring.env
+      - name: make teardown
+        run: make teardown ENV="${{ inputs.env }}" MODE="${{ inputs.mode }}"

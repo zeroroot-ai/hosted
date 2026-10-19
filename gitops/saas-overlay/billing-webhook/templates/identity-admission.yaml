@@ -1,0 +1,162 @@
+{{/*
+SaaS overlay: platform identity admission for billing.
+
+The same two policies as the entitlements-svc overlay, which carries the full
+argument. The SPIFFE ID of billing can complete a signup step at the daemon,
+so a pod that wears `app.kubernetes.io/component: billing-webhook` or the
+billing ServiceAccount could mark a signup paid. The literal workload
+selectors of the ClusterSPIFFEID describe the pod, and the pod creator writes
+the pod. `request.userInfo.username` is the one attribute that a pod cannot
+assert, so these policies admit such a pod or workload only from the
+built-in controllers and the named workload creators.
+
+The policy names differ from the entitlements-svc policies because both are
+cluster-scoped and each chart owns its own pair.
+
+Ships in ["Deny"]. `identityAdmission.workloadCreators` is required under
+Deny: the legitimate creator differs per install.
+*/}}
+{{- $ia := (.Values.identityAdmission | default dict) -}}
+{{- $protectedSAs := list (include "billing-webhook.serviceAccountName" .) -}}
+{{- $allowedCreators := concat (list
+      "system:serviceaccount:kube-system:replicaset-controller"
+      "system:serviceaccount:kube-system:statefulset-controller"
+      "system:serviceaccount:kube-system:daemon-set-controller"
+      "system:serviceaccount:kube-system:job-controller"
+      "system:serviceaccount:kube-system:cronjob-controller")
+      ($ia.extraAllowedCreators | default (list)) -}}
+{{- $workloadCreators := concat (list
+      "system:serviceaccount:kube-system:deployment-controller"
+      "system:serviceaccount:kube-system:cronjob-controller")
+      ($ia.workloadCreators | default (list)) -}}
+{{- $actions := $ia.actions | default (list "Deny") -}}
+{{- if and (has "Deny" $actions) (empty ($ia.workloadCreators | default (list))) -}}
+{{- fail "identityAdmission.actions requests Deny but identityAdmission.workloadCreators is empty. That policy governs who may create or update a workload whose pod template claims the billing identity, and the legitimate creator differs per install — the Argo CD application-controller ServiceAccount on a GitOps cluster, the identity running `helm install` elsewhere. Name it, e.g. workloadCreators: [\"system:serviceaccount:argocd:argocd-application-controller\"]." -}}
+{{- end -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gibson-saas-billing-identity-pods
+  labels:
+    {{- include "billing-webhook.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["pods"]
+  variables:
+    - name: component
+      expression: >-
+        has(object.metadata.labels) && 'app.kubernetes.io/component' in object.metadata.labels
+          ? object.metadata.labels['app.kubernetes.io/component']
+          : ''
+    - name: sa
+      expression: >-
+        has(object.spec.serviceAccountName) && object.spec.serviceAccountName != ''
+          ? object.spec.serviceAccountName
+          : 'default'
+    - name: claimsPlatformIdentity
+      expression: >-
+        variables.component == 'billing-webhook'
+          || variables.sa in {{ $protectedSAs | toJson }}
+  validations:
+    - expression: >-
+        !variables.claimsPlatformIdentity
+          || request.userInfo.username in {{ $allowedCreators | toJson }}
+      reason: Forbidden
+      messageExpression: >-
+        'pod claims the Gibson billing identity (component=' + variables.component +
+        ', serviceAccount=' + variables.sa +
+        ') but was created by ' + request.userInfo.username +
+        ', which is not a built-in workload controller. Create the workload object' +
+        ' instead — it is validated by gibson-saas-billing-identity-workloads — or add this principal to' +
+        ' identityAdmission.extraAllowedCreators if it is a legitimate installer.'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gibson-saas-billing-identity-pods
+  labels:
+    {{- include "billing-webhook.labels" . | nindent 4 }}
+spec:
+  policyName: gibson-saas-billing-identity-pods
+  validationActions: {{ $actions | toJson }}
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Release.Namespace }}
+---
+{{/*
+The controller-object half. See the core chart's
+platform-identity-admission.yaml for the full argument: keying on the pod's
+creator cannot help when the adversary can create the object that creates
+the pod.
+*/}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: gibson-saas-billing-identity-workloads
+  labels:
+    {{- include "billing-webhook.labels" . | nindent 4 }}
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs", "cronjobs"]
+  variables:
+    - name: podTemplate
+      expression: >-
+        has(object.spec.jobTemplate)
+          ? object.spec.jobTemplate.spec.template
+          : object.spec.template
+    - name: component
+      expression: >-
+        has(variables.podTemplate.metadata) && has(variables.podTemplate.metadata.labels)
+          && 'app.kubernetes.io/component' in variables.podTemplate.metadata.labels
+          ? variables.podTemplate.metadata.labels['app.kubernetes.io/component']
+          : ''
+    - name: sa
+      expression: >-
+        has(variables.podTemplate.spec) && has(variables.podTemplate.spec.serviceAccountName)
+          && variables.podTemplate.spec.serviceAccountName != ''
+          ? variables.podTemplate.spec.serviceAccountName
+          : 'default'
+    - name: claimsPlatformIdentity
+      expression: >-
+        variables.component == 'billing-webhook'
+          || variables.sa in {{ $protectedSAs | toJson }}
+  validations:
+    - expression: >-
+        !variables.claimsPlatformIdentity
+          || request.userInfo.username in {{ $workloadCreators | toJson }}
+      reason: Forbidden
+      messageExpression: >-
+        'workload pod template claims the Gibson billing identity (component=' + variables.component +
+        ', serviceAccount=' + variables.sa +
+        ') but the object was written by ' + request.userInfo.username +
+        ', which is not a permitted creator of platform workloads. Add this principal to' +
+        ' identityAdmission.workloadCreators if it legitimately deploys this chart.'
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: gibson-saas-billing-identity-workloads
+  labels:
+    {{- include "billing-webhook.labels" . | nindent 4 }}
+spec:
+  policyName: gibson-saas-billing-identity-workloads
+  validationActions: {{ $actions | toJson }}
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: {{ .Release.Namespace }}

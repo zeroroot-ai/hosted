@@ -1,0 +1,56 @@
+# ----------------------------------------------------------------------------
+# Copy to terraform.tfvars and fill in. terraform.tfvars is gitignored.
+# ----------------------------------------------------------------------------
+
+# Email address that AWS Organizations uses to send the zeroroot-ai-prod root
+# password to. Must be a shared ops mailbox, not a personal inbox.
+prod_account_email = "REPLACE-ME@example.com"
+
+# After the first apply creates the zeroroot-ai-prod account, run
+#   terraform output prod_account_id
+# and paste the 12-digit ID here for the second apply.
+# prod_account_id = "123456789012"
+
+# Email destination for billing notifications. The zeroroot-ai-prod workspace
+# subscribes its cost alerts SNS topic here.
+
+# GitHub configuration for OIDC trust.
+github_org         = "zeroroot-ai"
+github_gitops_repo = "hosted"
+
+# ----------------------------------------------------------------------------
+# IAM Identity Center operator users + permission-set assignments.
+#
+# Each entry creates an aws_identitystore_user in the mgmt identity store and
+# assigns the listed permission sets against the zeroroot-ai-mgmt management
+# account (operators then cross-account assume-role into zeroroot-ai-prod).
+# Onboarding a new operator: append one entry here and `terraform apply` — no
+# console clicks (deploy#539).
+#
+# Valid permission_sets values: "ZeroDayAIProdAdmin", "ZeroDayAIProdReadOnly",
+# "BillingViewer".
+# ----------------------------------------------------------------------------
+users = [
+  {
+    given_name      = "Ada"
+    family_name     = "Lovelace"
+    email           = "aws-account-a@zeroroot.ai"
+    permission_sets = ["ZeroDayAIProdAdmin", "BillingViewer"]
+  },
+  {
+    given_name      = "Grace"
+    family_name     = "Hopper"
+    email           = "aws-account-b@zeroroot.ai"
+    permission_sets = ["ZeroDayAIProdReadOnly"]
+  },
+]
+
+# ----------------------------------------------------------------------------
+# ArgoCD SSO is NOT configured here any more.
+#
+# Ops SSO moved off AWS Identity Center to a pluggable github|gitlab|oidc Dex
+# connector configured per-cluster in eks/{prod,staging} (reworks deploy#1332).
+# Set argocd_sso_provider / argocd_sso_client_id / TF_VAR_argocd_sso_client_secret
+# / argocd_sso_github_org / argocd_sso_admin_group in the cluster tfvars, not
+# here. See runbooks/RUNBOOK-argocd-sso.md.
+# ----------------------------------------------------------------------------

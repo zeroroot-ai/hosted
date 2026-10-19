@@ -1,0 +1,116 @@
+# SaaS overlay: entitlements-svc values.
+#
+# This chart is deployed ONLY in the ZeroRoot SaaS deployment (staging + prod).
+# Self-hosted installs NEVER install this chart.
+#
+# ADR-0074: self-hosted vs SaaS seam model. The closed billing image reference
+# lives exclusively here — the core gibson umbrella carries zero closed refs.
+# deploy#1032: tracer bullet of the self-hosted-vs-SaaS seam epic.
+# -----------------------------------------------------------------------------
+
+# Image — ghcr.io/zeroroot-ai/billing cmd/entitlements-svc.
+# The closed image lives ONLY here, never in the core umbrella (enforced by
+# the no-closed-refs render guard in deploy CI, deploy#1032).
+# deploy#789 / ADR-0072: staging/prod override this with digest-pinned tags.
+image:
+  repository: ghcr.io/zeroroot-ai/billing
+  # deploy#789 / ADR-0072: digest-pinned for staging/prod immutability.
+  # The tag below is billing 4b2c65f (billing#43: the start pings Postgres
+  # before any listener exists and exits on a refused credential, so the
+  # probe port stays closed until the ping passes), the same image as the billing-webhook
+  # overlay (one image, two binaries). Re-resolve via:
+  #   gh api /orgs/zeroroot-ai/packages/container/billing/versions
+  # Env overlays in gitops (envs/{staging,prod}/saas-overlay-entitlements-values.yaml)
+  # pin to their own digest when image-updater wiring is complete.
+  # kind/dev overlays (values-kind*.yaml) are exempt from the digest guard.
+  tag: "sha-4b2c65f@sha256:2e4715c0f95fcac3e9eae410e94b697e49aba322c44586e3e8201c3f9467a46c"
+  pullPolicy: Always
+
+# Image pull secrets for the closed ghcr.io/zeroroot-ai/billing image.
+imagePullSecrets:
+  - name: ghcr-credentials
+
+replicas: 1
+
+# gRPC listen port.
+port: 9091
+
+# Probe HTTP listen port (plain HTTP, /healthz only). /probez/limits was
+# removed in billing#7: it answered any tenant's quotas with no auth.
+probePort: 9092
+
+# Platform Postgres connection (libpq env vars).
+# The entitlements-svc calls Postgres for GetLimits / plan data.
+# These MUST be overridden by the env-specific overlay.
+postgres:
+  host: ""
+  port: 5432
+  database: "gibson_platform"
+  # ESO-projected Secret name + key (same secret as the core daemon's postgres).
+  passwordSecretName: "gibson-platform-postgres-credentials"
+  passwordSecretKey: "password"
+  sslMode: "require"
+
+# Dedicated ServiceAccount for the entitlements-svc pod.
+#
+# NOT an API credential — the pod never calls the Kubernetes API and the
+# token is not mounted. It exists because the SA name is a
+# workload-attestation attribute: the ClusterSPIFFEID selects on the literal
+# `k8s:sa:<this name>` and the overlay's ValidatingAdmissionPolicy keys on
+# it. The pod previously had no serviceAccountName at all and therefore ran
+# as the namespace `default` SA, shared in ns `gibson` with
+# docs-svc/grafana/jaeger/loki/redis-stack/stripe-mock.
+#
+# name: leave empty for the release-derived fullname (e.g.
+# `gibson-entitlements-svc`). There is no `create` toggle — the SA is
+# structural; without it the pod falls back to `default` and the SPIRE agent
+# refuses to issue its SVID.
+serviceAccount:
+  name: ""
+  annotations: {}
+
+# Platform identity admission (templates/identity-admission.yaml).
+# Guards the `platform/entitlements-svc` SVID against a pod-create adversary
+# that simply wears the component label + ServiceAccount. See the core
+# chart's spire-server/platform-identity-admission.yaml for the full argument
+# and the flip-to-Deny procedure.
+identityAdmission:
+  # SHIPS IN DENY. Audit/Warn evaluates the policy, records the violation and
+  # admits the object anyway — a report, not a control.
+  actions: ["Deny"]
+  # Extra principals permitted to create an entitlements-svc-identity POD
+  # directly. Should stay empty: such a pod is the shape this policy rejects.
+  extraAllowedCreators: []
+  # Principals permitted to create or update a workload whose POD TEMPLATE
+  # claims the entitlements-svc identity. REQUIRED under Deny — the render
+  # fails without it, because the legitimate creator differs per install.
+  # This is the SaaS overlay, so in practice it is the Argo CD
+  # application-controller ServiceAccount:
+  workloadCreators:
+    - "system:serviceaccount:argocd:argocd-application-controller"
+
+# SPIFFE configuration.
+spiffe:
+  # No trust domain here (ADR-0164). The chart reads global.spire.trustDomain,
+  # which the Application loads from the env's values.yaml, the one place
+  # that names it. The daemon ID is that domain plus platform/daemon.
+  # entitlements-svc pins the calling peer's SVID against it, so only the
+  # gibson daemon can call EntitlementsService (deploy#1005).
+  # SPIRE controller-manager className — must match the `spire` Argo Application.
+  controllerManagerClassName: "gibson-gibson-spire"
+
+# Plans ConfigMap name — rendered by the core gibson-operators sub-chart.
+# Must match the name in the core umbrella release.
+plansCmName: "gibson-tenant-operator-plans"
+
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    cpu: 500m
+    memory: 256Mi
+
+# Extra env vars forwarded to the entitlements-svc container (e.g. AWS SDK
+# config for KMS plan data, Stripe read key for quota checks).
+extraEnv: []

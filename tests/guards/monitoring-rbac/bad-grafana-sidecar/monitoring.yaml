@@ -1,0 +1,135 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monitoring
+  namespace: argocd
+  annotations:
+    argocd.argoproj.io/sync-wave: '-10'
+  finalizers:
+  - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+  - repoURL: https://prometheus-community.github.io/helm-charts
+    chart: kube-prometheus-stack
+    targetRevision: 91.9.0
+    helm:
+      releaseName: monitoring
+      valuesObject:
+        global:
+          rbac:
+            create: false
+        kubeEtcd:
+          enabled: false
+        kubeScheduler:
+          enabled: false
+        kubeControllerManager:
+          enabled: false
+        kubeProxy:
+          enabled: false
+        prometheusOperator:
+          namespaces:
+            releaseNamespace: true
+            additional:
+            - gibson
+          prometheusInstanceNamespaces:
+          - monitoring
+          alertmanagerInstanceNamespaces:
+          - monitoring
+          alertmanagerConfigNamespaces:
+          - monitoring
+          thanosRulerInstanceNamespaces:
+          - monitoring
+          admissionWebhooks:
+            certManager:
+              enabled: true
+          resources:
+            requests:
+              cpu: 20m
+              memory: 64Mi
+            limits:
+              memory: 256Mi
+        prometheus:
+          prometheusSpec:
+            serviceMonitorSelectorNilUsesHelmValues: false
+            podMonitorSelectorNilUsesHelmValues: false
+            ruleSelectorNilUsesHelmValues: false
+            probeSelectorNilUsesHelmValues: false
+            retention: 2d
+            resources:
+              requests:
+                cpu: 50m
+                memory: 1Gi
+              limits:
+                memory: 1536Mi
+        alertmanager:
+          alertmanagerSpec:
+            configSecret: alertmanager-config
+            resources:
+              requests:
+                cpu: 10m
+                memory: 32Mi
+              limits:
+                memory: 128Mi
+        grafana:
+          rbac:
+            useExistingClusterRole: monitoring-grafana-configmaps
+          sidecar:
+            dashboards:
+              resource: both
+            datasources:
+              resource: configmap
+            alerts:
+              resource: configmap
+            plugins:
+              resource: configmap
+            notifiers:
+              resource: configmap
+          persistence:
+            enabled: false
+          resources:
+            requests:
+              cpu: 20m
+              memory: 96Mi
+            limits:
+              memory: 256Mi
+        kube-state-metrics:
+          collectorsExclude:
+          - secrets
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              memory: 128Mi
+        prometheus-node-exporter:
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              memory: 64Mi
+  - repoURL: https://github.com/zeroroot-ai/hosted
+    targetRevision: main
+    path: gitops/envs/staging/manifests/monitoring
+  - repoURL: https://github.com/zeroroot-ai/hosted
+    targetRevision: main
+    path: gitops/monitoring-rbac
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monitoring
+  ignoreDifferences:
+  - group: ''
+    kind: Secret
+    name: monitoring-grafana
+    namespace: monitoring
+    jsonPointers:
+    - /data
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+    - CreateNamespace=true
+    - RespectIgnoreDifferences=true
+    - ServerSideApply=true

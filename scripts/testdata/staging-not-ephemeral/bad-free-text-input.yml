@@ -1,0 +1,14 @@
+# A free-text input reaches the verb on its line. It can supply staging.
+# The guard must reject it.
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        required: true
+        type: string
+jobs:
+  recreate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: make recreate
+        run: make recreate ENV="${{ inputs.target }}"

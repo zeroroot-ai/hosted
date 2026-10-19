@@ -1,0 +1,730 @@
+name: drill
+# The destroy-and-recreate drill, on the environment that exists to be thrown
+# away (ADR-0095).
+#
+#   recreate   stand drill up from stage 0, from nothing
+#   assert     every Argo Application Synced+Healthy
+#   smoke      signup -> tenant Ready -> data-plane secrets -> api-edge auth
+#   seed       a known record in each store the backup covers (hosted#443)
+#   preserve   teardown MODE=preserve: back up, verify the backup, destroy
+#   restore    recreate with RESTORE_FROM=<that backup>, and read each record back
+#   rotate     rotate each credential class of credential-classes.yaml at its
+#              source, and prove the path that uses it (hosted#444)
+#
+# WHICH RUN DOES THE RESTORE HALF (hosted#443). scripts/drill-plan.sh decides:
+# a dispatch follows its `restore` input, and a scheduled run does it on
+# Sunday. A scheduled run has no inputs, so the step used to read an empty
+# value and no scheduled run ever restored. When the plan selects the restore
+# half and it does not succeed, the run fails: a skipped restore is not green.
+#   teardown   MODE=wipe, then the account is asked what survived
+#
+# WHICH RUN DOES THE ROTATION TEST (hosted#444). scripts/drill-plan.sh decides
+# that too. The monthly schedule starts a rotation run: a bringup, the
+# rotation test of each tested class of credential-classes.yaml, and a
+# teardown, with no restore half. A dispatch follows its `rotation` input. One
+# run never does the restore half and the rotation test together. A tested
+# class that fails opens one issue, and the test sends the alert
+# CredentialRotationFailed through the Alertmanager of drill. When the plan
+# selects the rotation test and it does not run, the run fails and opens one
+# issue.
+#
+# WHY THIS IS NOT RUN AGAINST STAGING. It used to be: promote-staging.yml began
+# with `make teardown ENV=staging MODE=wipe`, by default. With kind gone from the
+# workstation, staging is the only place the platform can be exercised, so a
+# drill that destroys it takes the environment away from whoever is using it
+# (ADR-0095). scripts/check-staging-not-ephemeral.py now fails any workflow that
+# tries.
+#
+# THE INSTANCE CANNOT OUTLIVE THIS RUN, and that does not depend on this file.
+# Three mechanisms, ordered by how little they rely on:
+#
+#   1. the node arms `shutdown -h +240` from its own cloud-init on every boot and
+#      its shutdown behaviour is `terminate` (self_terminate_after_minutes in
+#      envs/drill.tfvars). No network, no GitHub, no state file, no credential.
+#      This is what covers a cancelled job and a runner that vanishes.
+#   2. the teardown step below, which runs `if: always()`.
+#   3. scripts/reap-throwaway.sh on a schedule, for the minute between the API
+#      returning an instance and cloud-init arming it.
+#
+# A green run is not what proves the teardown. The last step asks AWS what still
+# carries `Environment=drill` and fails on a survivor, because terraform
+# reporting success says nothing about what is on the bill (ADR-0070).
+#
+# COST: hourly while a run is in flight, and nothing between runs. That is the
+# whole point of the environment.
+#
+# Prerequisites: stage 0 applied for drill, which keeps its keyring and
+# substrate.env in the Secrets Manager secret zeroroot-ai/drill/keyring and
+# its state in the prod state bucket (ADR-0083, scripts/stage0-store.sh), the
+# drill.zeroroot.ai
+# delegation, and `drill` in var.github_bringup_environments plus drill.yml in
+# the job_workflow_ref allowlist (bootstrap/eks/aws-org/github-oidc.tf). Without
+# the last two the role refuses the token and the run cannot start.
+
+on:
+  workflow_dispatch:
+    inputs:
+      restore:
+        description: "Run the preserve/restore half as well. Off makes the drill a bringup and teardown only, which is faster and proves less."
+        required: false
+        type: boolean
+        default: true
+      rotation:
+        description: "Rotate each tested credential class of credential-classes.yaml and prove its path (hosted#444). With the restore half on too, the rotation runs after it, on the restored cluster."
+        required: false
+        type: boolean
+        default: false
+      instance_type:
+        description: "The instance type of the drill node. Empty uses the type of envs/drill.tfvars. A value must be on the list bootstrap/ec2/gibson/envs/drill.instance-types. An m8i type has nested virtualization, and the run then proves /dev/kvm on the node."
+        required: false
+        type: string
+        default: ""
+      node_count:
+        description: "How many nodes the drill cluster has. 2 adds a second instance of the same type as a k3s agent, for a proof that needs two nodes (hosted#453). The scheduled run keeps 1."
+        required: false
+        type: choice
+        options: ["1", "2"]
+        default: "1"
+  schedule:
+    # 04:10 UTC daily. ADR-0080 keeps exit tests off pull requests; this is the
+    # same lane. It is a drill against a throwaway environment, so unlike the
+    # old staging cycle a failed run leaves nothing anybody needs.
+    - cron: "10 4 * * *"
+    # 12:10 UTC on the first day of each month: the rotation run (hosted#444).
+    # It is a run of its own, after the daily run, so the restore half and the
+    # rotation test never share a job. scripts/drill-plan.sh holds both cron
+    # lines.
+    #
+    # WHY 12:10. Both runs use the one environment `drill`, so they share the
+    # one concurrency group below: two runs on one environment destroy each
+    # other's cluster. In a group, GitHub keeps one pending run and cancels
+    # an older pending run when a newer one queues. The daily run starts at
+    # 04:10. A weekday run (up and teardown) ends by 10:40 at the latest
+    # (THE BUDGET below), so at 12:10 the rotation run starts at once. A
+    # Sunday run with the restore half can end near 16:30. On a 1st that is
+    # a Sunday the rotation run waits in the group, and no other run queues
+    # before the next daily run at 04:10, so nothing replaces it.
+    - cron: "10 12 1 * *"
+
+concurrency:
+  group: drill
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # OIDC — aws-actions/configure-aws-credentials
+  issues: write
+
+# THE BUDGET (drill sweep rows 19 and 26). Four jobs. Each one has its own
+# credential and its own limit under the GitHub limit of 360 minutes, and
+# each one starts from nothing: it reads the stage 0 files from AWS
+# (scripts/stage0-store.sh) and finds the cluster in AWS, never on the disk of
+# an earlier job (.github/actions/drill-setup, scripts/with-cluster.sh).
+#
+#   up        recreate from nothing, the ceiling, the smoke, and the open
+#             access key rotation. 345 minutes.
+#             The step limits come from the fixed waits of the scripts, plus
+#             30 percent:
+#               recreate  waits 163 min + 22 min of work (a green run) = 185,
+#                         + 30% = 241. The waits: node-init 15, nodes join 15,
+#                         node Ready 5, Cilium 10 + 5, CoreDNS 5, the Cilium
+#                         proof 8, ToolHive 10 + 10, wait_apps 60,
+#                         ExternalSecrets 5, WAL archiving 15.
+#               smoke     20 min, + 30% = 26 (tenant Ready 2, mail and
+#                         browser waits, the edge checks).
+#               keys      the continue of an open rotation: 30 (a wait of
+#                         60 s for a key in use, and for smtp up to 10 min
+#                         for the derived Secret, then a stop that the next
+#                         run continues).
+#             10 setup + 30 from zero + 241 + 3 + 5 + 26 + 30 = 345.
+#   restore   seed, preserve, restore, read back. 350 minutes. Its fixed
+#             waits are in the restore scripts, and the restore agent sets
+#             them from measured time (twice the measured time, at least 10
+#             minutes). The job limit is the ceiling of their sum.
+#   rotation  the rotation test, and the start of the access key rotation.
+#             345 minutes: 10 setup + 5 tools + the start of 60 (four users,
+#             each a Terraform apply, a restart of its readers and a wait of
+#             5 min for the new key in use, and for smtp up to 10 min for
+#             the derived Secret; a later daily run continues each rotation)
+#             + the step limit of 260 + 10.
+#             The step limit is the sum of the fixed waits of the 15 tested
+#             classes, read from exit-test-rotation.sh: the operator and
+#             sidecar passes, the grace before a revoke, the CronJob periods
+#             and each restart (about 240 min, with the two seed waits and the
+#             launcher boot of setec-disk-signing-seed), plus the typical time of
+#             keyring-generated-keys in the Velero queue (about 5 min for
+#             each of two backups). The worst case of that queue
+#             (VELERO_QUEUE_WAIT, 20 min, twice) passes the limit. A class
+#             that the limit stops keeps its "did not finish" line.
+#   teardown  60 minutes, `always()`. A teardown takes 1 to 3 minutes in the
+#             runs of 2026-10-11 and 2026-10-12.
+#
+# A node of the run arms its own ceiling of 420 minutes
+# (bootstrap/ec2/gibson/envs/drill.tfvars). The up job and the rotation job
+# use the node of the up job: a green up job takes 25 minutes (run
+# 38850592385), and the node boots some minutes into it, so 25 + 345 fits in
+# the ceiling. 345 + 345 is more than 420 only when both jobs use their whole
+# limit, and a run that does is stopped by the ceiling, which is the purpose
+# of the ceiling. A dispatch with both halves (coordinator decision of
+# 2026-10-13, scripts/drill-plan.sh) runs the rotation job on the node that
+# the restore half makes. That node boots at the recreate inside the restore
+# job, and the rest of the restore job (the smoke, the record check and the
+# settle probe of up to 20 minutes) takes 30 to 40 minutes, and 40 + 345 =
+# 385 fits in the ceiling of 420.
+#
+# In a monthly run the up job can also continue an open key rotation (30
+# minutes), and 25 + 30 + 345 = 400 still fits in the ceiling of 420.
+jobs:
+  up:
+    name: recreate from nothing, and the smoke
+    runs-on: ubuntu-latest
+    environment: drill
+    timeout-minutes: 345
+    outputs:
+      # `false` until the first step that changes the account. A run that
+      # stops before that step made nothing, so the teardown job skips it
+      # (hosted#470). An empty value (a job cancelled before its first step)
+      # runs the teardown, which is the safe side.
+      started: ${{ steps.start.outputs.started || steps.plan.outputs.started }}
+      restore_planned: ${{ steps.plan.outputs.restore }}
+      rotation_planned: ${{ steps.plan.outputs.rotation }}
+      up: ${{ steps.up.outcome }}
+      ceiling: ${{ steps.ceiling.outcome }}
+      smoke: ${{ steps.smoke.outcome }}
+      keys_continue: ${{ steps.keys-continue.outcome }}
+    env:
+      ENV: drill
+      AWS_REGION: us-east-1
+      # Argo CD of drill tracks the commit of this run, not main
+      # (scripts/recreate-ec2.sh, var.git_revision). The teardown job records
+      # the run commit and main in the summary ("Record the commits of the run").
+      GITOPS_REF: ${{ github.sha }}
+      # Empty on the schedule, so the scheduled run uses the default type.
+      INSTANCE_TYPE: ${{ inputs.instance_type }}
+      # Empty on the schedule, so the scheduled run keeps one node.
+      NODE_COUNT: ${{ inputs.node_count }}
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Does this run do the restore half
+        id: plan
+        env:
+          EVENT: ${{ github.event_name }}
+          RESTORE_INPUT: ${{ inputs.restore }}
+          ROTATION_INPUT: ${{ inputs.rotation }}
+          SCHEDULE: ${{ github.event.schedule }}
+        run: |
+          set -euo pipefail
+          scripts/drill-plan.sh "$EVENT" "$RESTORE_INPUT" "$(date -u +%u)" "$ROTATION_INPUT" "$SCHEDULE" | tee -a "$GITHUB_OUTPUT"
+          echo "started=false" >> "$GITHUB_OUTPUT"
+
+      # A type that is not on the list fails here, before a credential or
+      # Terraform is involved (hosted#448).
+      - name: The instance type is on the list
+        if: ${{ env.INSTANCE_TYPE != '' }}
+        run: scripts/check-instance-type.sh "${ENV}" "${INSTANCE_TYPE}"
+
+      # A count that is not 1 or 2 fails here, before a credential or
+      # Terraform is involved (hosted#453).
+      - name: The node count is on the list
+        if: ${{ env.NODE_COUNT != '' }}
+        run: scripts/check-node-count.sh "${ENV}" "${NODE_COUNT}"
+
+      # Stage 0 state, the masked seal key, a credential of this job's own,
+      # Terraform and the pinned tools (.github/actions/drill-setup).
+      - name: Set up the job from nothing
+        uses: ./.github/actions/drill-setup
+        with:
+          env: ${{ env.ENV }}
+          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          session-name: gh-actions-drill-up-${{ github.run_id }}
+
+      # A leftover from a previous run would make the recreate adopt an estate
+      # rather than build one, and "from nothing" is the property under test.
+      # The wipe proves it either way: it destroys a leftover, or it reports
+      # "nothing to destroy" with an empty state and zero resources tagged
+      # Environment=drill, and both paths end with that account check. Any
+      # other result fails this step. It used to end in `|| echo`, which
+      # read every failure as a clean account.
+      #
+      # From here the run changes the account, so the teardown job runs.
+      - name: This run starts to change the account
+        id: start
+        run: echo "started=true" >> "$GITHUB_OUTPUT"
+
+      - name: From zero — destroy any leftover drill state
+        timeout-minutes: 30
+        run: make teardown ENV="${ENV}" MODE=wipe
+
+      - name: Recreate from nothing
+        id: up
+        timeout-minutes: 241
+        run: make recreate ENV="${ENV}" INSTANCE_TYPE="${INSTANCE_TYPE}" NODE_COUNT="${NODE_COUNT}"
+
+      - name: Each node armed its own termination
+        id: ceiling
+        run: |
+          set -euo pipefail
+          # The ceiling is the mechanism that makes this environment safe to
+          # exist. Asserting it HERE, on each live node, is the only place it
+          # is ever proven: a fixture can only check that the template writes
+          # it. The second node of a two-node drill (hosted#453) is a node of
+          # this environment like the first, so it is on the same list.
+          ids="$(aws ec2 describe-instances --region "$AWS_REGION" \
+                 --filters "Name=tag:Environment,Values=${ENV}" "Name=instance-state-name,Values=running" \
+                 --query 'Reservations[].Instances[].InstanceId' --output text)"
+          test -n "$ids"
+          want="${NODE_COUNT:-1}"
+          got="$(printf '%s\n' "$ids" | tr '\t' '\n' | grep -c .)"
+          test "$got" = "$want" || { echo "::error::${got} running instance(s) carry Environment=${ENV}, and the run asked for ${want}"; exit 1; }
+          for id in $ids; do
+            behaviour="$(aws ec2 describe-instance-attribute --region "$AWS_REGION" \
+                          --instance-id "$id" --attribute instanceInitiatedShutdownBehavior \
+                          --query 'InstanceInitiatedShutdownBehavior.Value' --output text)"
+            test "$behaviour" = terminate || { echo "::error::shutdown behaviour of ${id} is ${behaviour}, not terminate: a poweroff would stop this instance and keep billing its volume"; exit 1; }
+            cmd="$(aws ssm send-command --region "$AWS_REGION" --instance-ids "$id" \
+                     --document-name AWS-RunShellScript \
+                     --parameters 'commands=["systemctl is-active self-terminate.timer; systemctl list-timers self-terminate.timer --no-pager"]' \
+                     --query 'Command.CommandId' --output text)"
+            for _ in $(seq 1 24); do
+              st="$(aws ssm get-command-invocation --region "$AWS_REGION" --command-id "$cmd" --instance-id "$id" --query Status --output text 2>/dev/null || echo Pending)"
+              case "$st" in Success) break ;; Failed|Cancelled|TimedOut) echo "::error::could not read the ceiling from ${id}"; exit 1 ;; esac
+              sleep 5
+            done
+            out="$(aws ssm get-command-invocation --region "$AWS_REGION" --command-id "$cmd" --instance-id "$id" --query StandardOutputContent --output text)"
+            printf '%s: %s\n' "$id" "$out"
+            printf '%s' "$out" | grep -q '^active' || { echo "::error::self-terminate.timer is not active on ${id}, so the ceiling is not armed"; exit 1; }
+            printf '%s' "$out" | grep -q 'self-terminate.timer' || { echo "::error::${id} lists no self-terminate timer, so nothing will power it off"; exit 1; }
+          done
+
+      # The smoke signs up through the edge with the one signup driver of the
+      # signup exit test (hosted#647), so it needs the same browser.
+      - name: The smoke prerequisites (browser driver, evidence directory)
+        if: ${{ steps.up.outcome == 'success' }}
+        uses: ./.github/actions/smoke-prereqs
+        with:
+          diag-dir: ${{ runner.temp }}/signup-diag
+
+      - name: Ready, and the smoke passes
+        id: smoke
+        timeout-minutes: 26
+        run: make with-cluster ENV="${ENV}" CMD="scripts/prove-bringup.sh ${ENV}"
+
+      - name: Keep the page the signup stopped on
+        if: ${{ failure() && steps.smoke.outcome == 'failure' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: signup-diag-up
+          path: ${{ runner.temp }}/signup-diag
+          retention-days: 7
+          if-no-files-found: ignore
+
+      # THE ACCESS KEY ROTATION OF THE DRILL IAM USERS (ADR-0083, row 24).
+      # The monthly rotation job starts it, and it takes longer than one run.
+      # Each run continues an open rotation on the cluster that the smoke
+      # proved: the old key is deleted once AWS reports it unused since the
+      # switch. A rotation that must wait more stops, and the next run goes
+      # on (scripts/drill-rotate-keys.sh).
+      - name: Continue an open access key rotation
+        id: keys-continue
+        if: ${{ steps.smoke.outcome == 'success' }}
+        timeout-minutes: 30
+        env:
+          WAIT_SECS: "60"
+        run: scripts/drill-rotate-keys.sh continue
+
+  # THE RESTORE HALF (hosted#443), after a green up job, when the plan selects
+  # it. It reaches the cluster of the up job through AWS.
+  restore:
+    name: preserve, restore, and read each record back
+    needs: up
+    if: ${{ needs.up.result == 'success' && needs.up.outputs.restore_planned == 'true' }}
+    runs-on: ubuntu-latest
+    environment: drill
+    timeout-minutes: 350
+    outputs:
+      seed: ${{ steps.seed.outcome }}
+      restore: ${{ steps.restore.outcome }}
+      settle: ${{ steps.settle.outcome }}
+    env:
+      ENV: drill
+      AWS_REGION: us-east-1
+      GITOPS_REF: ${{ github.sha }}
+      INSTANCE_TYPE: ${{ inputs.instance_type }}
+      NODE_COUNT: ${{ inputs.node_count }}
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # Stage 0 state, the masked seal key, a credential of this job's own,
+      # Terraform and the pinned tools (.github/actions/drill-setup).
+      - name: Set up the job from nothing
+        uses: ./.github/actions/drill-setup
+        with:
+          env: ${{ env.ENV }}
+          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          session-name: gh-actions-drill-restore-${{ github.run_id }}
+
+      # Before the backup: one known record in each store the backup covers,
+      # read back at once (test/dr/lib/restore-markers.sh).
+      # The restore half proves the restored platform with
+      # scripts/prove-bringup.sh, whose smoke signs up with the browser
+      # driver. A job starts from nothing, so it sets up the smoke itself.
+      - name: The smoke prerequisites (browser driver, evidence directory)
+        uses: ./.github/actions/smoke-prereqs
+        with:
+          diag-dir: ${{ runner.temp }}/signup-diag
+
+      - name: Seed a known record in each store
+        id: seed
+        run: make with-cluster ENV="${ENV}" CMD="test/dr/restore-markers.sh seed ${RUNNER_TEMP}/restore-markers.env"
+
+      - name: Preserve, then restore from that backup
+        id: restore
+        run: |
+          set -euo pipefail
+          # MODE=preserve prints the backup name a later recreate must carry, on
+          # its last line, and refuses to destroy anything it could not verify.
+          out="$(make teardown ENV="${ENV}" MODE=preserve | tee /dev/stderr)"
+          name="$(printf '%s' "$out" | sed -n 's/^ *RESTORE_FROM=//p' | tail -1)"
+          test -n "$name" || { echo "::error::the preserve teardown named no backup, so there is nothing to restore"; exit 1; }
+          make recreate ENV="${ENV}" RESTORE_FROM="$name" INSTANCE_TYPE="${INSTANCE_TYPE}" NODE_COUNT="${NODE_COUNT}"
+          make with-cluster ENV="${ENV}" CMD="scripts/prove-bringup.sh ${ENV}"
+          # The data, not only a ready platform: each record that the seed
+          # wrote before the backup is back and the same.
+          make with-cluster ENV="${ENV}" CMD="test/dr/restore-markers.sh check ${RUNNER_TEMP}/restore-markers.env"
+
+      # THE PROOF OF restore-settle (D91, hosted#687). The drill is the one
+      # env where the recovery parameters may leave a running Postgres
+      # Cluster as a test: the probe removes them from the live gibson
+      # Application and proves that CNPG accepts the change and does nothing
+      # on it (initdb, no externalClusters, the same primary pod, archiving
+      # on). A failure means restore-settle is not safe on staging or prod
+      # yet, so it fails the restore job. The probe waits up to SETTLE_TIMEOUT
+      # (900 s); the step limit adds a margin.
+      - name: The recovery parameters leave the running Cluster safely
+        id: settle
+        if: ${{ steps.restore.outcome == 'success' }}
+        timeout-minutes: 20
+        run: make with-cluster ENV="${ENV}" CMD="test/dr/settle-probe.sh"
+
+      - name: Keep the page the signup stopped on
+        if: ${{ failure() && steps.restore.outcome == 'failure' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: signup-diag-restore
+          path: ${{ runner.temp }}/signup-diag
+          retention-days: 7
+          if-no-files-found: ignore
+
+  # THE ROTATION TEST (hosted#444), after a green up job, when the plan
+  # selects it. A rotation run does no restore half.
+  # After the restore job, when the run does both: the rotation test then
+  # runs on the restored cluster, and never beside a preserve teardown.
+  rotation:
+    name: rotate each credential class, and prove its path
+    needs: [up, restore]
+    if: ${{ always() && needs.up.result == 'success' && needs.up.outputs.rotation_planned == 'true' && (needs.restore.result == 'success' || needs.restore.result == 'skipped') }}
+    runs-on: ubuntu-latest
+    environment: drill
+    timeout-minutes: 345
+    outputs:
+      rotation: ${{ steps.rotation.outcome }}
+      keys_start: ${{ steps.keys-start.outcome }}
+      results: ${{ steps.keep-results.outcome == 'success' }}
+    env:
+      ENV: drill
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # Stage 0 state, the masked seal key, a credential of this job's own,
+      # Terraform and the pinned tools (.github/actions/drill-setup).
+      - name: Set up the job from nothing
+        uses: ./.github/actions/drill-setup
+        with:
+          env: ${{ env.ENV }}
+          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          session-name: gh-actions-drill-rotation-${{ github.run_id }}
+
+      # THE ROTATION TEST (hosted#444). It runs only in a rotation run, which
+      # does no restore half, on the cluster that the smoke proved.
+      #
+      # cmctl starts a cert-manager renewal. It is pinned by version and by
+      # the sha256 of the release (cert-manager/cmctl checksums.txt).
+      # baseline-set-secret.sh of the charts repo writes an OpenBao key, which
+      # is the source of a rotated value. The test never writes a Kubernetes
+      # Secret (ADR-0014).
+      - name: Install the rotation test tools
+        id: rotation-tools
+        env:
+          CMCTL_VERSION: v2.6.1
+          CMCTL_SHA256: 0af054c26a2b64ce286fa868d029164867695a93c3eb893662ce16f35e708db0
+        run: |
+          set -euo pipefail
+          python3 -m pip install --quiet -r requirements-ci.txt
+          curl -fsSL -o /tmp/cmctl "https://github.com/cert-manager/cmctl/releases/download/${CMCTL_VERSION}/cmctl_linux_amd64"
+          echo "${CMCTL_SHA256}  /tmp/cmctl" | sha256sum -c -
+          sudo install -m 0755 /tmp/cmctl /usr/local/bin/cmctl
+          for t in cmctl jq openssl kubectl; do command -v "$t" >/dev/null || { echo "::error::$t is required"; exit 1; }; done
+
+      # The charts script of the release that drill runs, never charts main.
+      # The rotation test calls baseline-set-secret.sh, and its interface
+      # follows the chart release. A checkout of main gave the test the
+      # script of a release that this cluster does not run.
+      - name: The charts tag that gitops/envs/drill pins
+        id: charts-tag
+        if: ${{ steps.rotation-tools.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          . gitops/scripts/lib/chart-version.sh
+          pinned="$(env_chart_version "${ENV}")"
+          [[ "$pinned" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "::error::gitops/envs/${ENV} pins '${pinned}', which is not a release version"; exit 1; }
+          echo "tag=v${pinned}" | tee -a "$GITHUB_OUTPUT"
+
+      - name: Checkout charts, for baseline-set-secret.sh
+        if: ${{ steps.charts-tag.outcome == 'success' }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+        with:
+          repository: zeroroot-ai/charts
+          ref: ${{ steps.charts-tag.outputs.tag }}
+          path: charts
+
+      # The monthly run starts a rotation of the access keys of the drill IAM
+      # users. The later daily runs finish it (the step "Continue an open
+      # access key rotation" of the up job). It runs BEFORE the credential
+      # class test: that test rotates the seal key in the keyring of this
+      # runner only, and substrate-rotate.sh reads the keyring from AWS
+      # (drill sweep row 42).
+      - name: Start the access key rotation of the drill IAM users
+        id: keys-start
+        if: ${{ steps.charts-tag.outcome == 'success' }}
+        timeout-minutes: 60
+        env:
+          WAIT_SECS: "300"
+        run: scripts/drill-rotate-keys.sh start
+
+      - name: Rotate each credential class, and prove its path
+        id: rotation
+        # A failed key rotation does not skip the class test: they prove
+        # different things.
+        if: ${{ always() && steps.charts-tag.outcome == 'success' }}
+        # The step limit leaves the job time for the issue step and the
+        # teardown. A class that the limit stops keeps its "did not finish"
+        # line in the results, so it still opens its issue. The fixed waits
+        # of the 15 tested classes add up to about 240 minutes, plus the
+        # Velero queue (the job budget above), so 150 minutes stopped the run
+        # inside a class.
+        timeout-minutes: 260
+        env:
+          CHARTS_ROOT: ${{ github.workspace }}/charts
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        # The keyring of this run's stage 0. The drill env lives for one run,
+        # so the class keyring-generated-keys rotates its real seal key.
+        run: |
+          export SUBSTRATE_ENV_FILE="${SUBSTRATE_DIR}/${ENV}/substrate.env"
+          export KEYRING_FILE="${SUBSTRATE_DIR}/${ENV}/keyring.env"
+          make with-cluster ENV="${ENV}" CMD="test/rotation/exit-test-rotation.sh credential-classes.yaml ${RUNNER_TEMP}/rotation-results.tsv"
+
+      # The teardown job writes the issues, and it reads the results here.
+      # hashFiles() reads only the workspace, so a step says whether the
+      # results file exists.
+      - name: The rotation test wrote results
+        id: results
+        if: ${{ always() }}
+        run: |
+          if [ -s "${RUNNER_TEMP}/rotation-results.tsv" ]; then echo "present=true"; else echo "present=false"; fi | tee -a "$GITHUB_OUTPUT"
+
+      - name: Keep the rotation results for the teardown job
+        id: keep-results
+        if: ${{ always() && steps.results.outputs.present == 'true' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: rotation-results
+          path: ${{ runner.temp }}/rotation-results.tsv
+          retention-days: 7
+          if-no-files-found: error
+
+  # THE TEARDOWN JOB. It runs after the other jobs, pass, fail, cancel or time
+  # out, with a credential of its own. Before this job, the teardown was the
+  # last step of one long job and used the credential of that job. A step
+  # that used the job's time left the teardown with a credential that had
+  # ended (drill sweep row 19).
+  #
+  # BUT ONLY AFTER A BRINGUP STARTED (hosted#470). When a step before the
+  # first change fails (the OIDC role, the stage 0 state), the run made
+  # nothing. The teardown then failed on a missing tool and hid the first
+  # cause.
+  #
+  # This is mechanism 2 of 3 in the header.
+  teardown:
+    name: tear down, and ask the account what survived
+    needs: [up, restore, rotation]
+    if: ${{ always() && needs.up.outputs.started != 'false' }}
+    runs-on: ubuntu-latest
+    environment: drill
+    timeout-minutes: 60
+    env:
+      ENV: drill
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # Stage 0 state, the masked seal key, a credential of this job's own,
+      # Terraform and the pinned tools (.github/actions/drill-setup).
+      - name: Set up the job from nothing
+        uses: ./.github/actions/drill-setup
+        with:
+          env: ${{ env.ENV }}
+          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          session-name: gh-actions-drill-teardown-${{ github.run_id }}
+
+      - name: Tear down, and ask the account what survived
+        id: teardown
+        run: make teardown ENV="${ENV}" MODE=wipe
+
+      # The drill owns its Postgres archive, and the archive name is fixed in
+      # git. After the restore half has read it, the run empties it, pass or
+      # fail, so the next run's archive gate finds it empty (hosted#641). A
+      # run that dies before this step is refused at the next run's gate.
+      - name: Empty the drill Postgres archive
+        id: archive-clear
+        if: ${{ always() }}
+        run: make drill-archive-clear ENV="${ENV}"
+
+      - name: Read the rotation results of the rotation job
+        if: ${{ always() && needs.rotation.outputs.results == 'true' }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333  # v8.0.2
+        with:
+          name: rotation-results
+          path: ${{ runner.temp }}
+
+      # A run that planned the restore half and did not finish it is red.
+      - name: The planned restore half ran and passed
+        id: restore-ran
+        if: ${{ always() }}
+        env:
+          RESTORE_PLANNED: ${{ needs.up.outputs.restore_planned }}
+          O_RESTORE: ${{ needs.restore.outputs.restore }}
+        run: |
+          set -euo pipefail
+          if [ "$RESTORE_PLANNED" = true ] && [ "$O_RESTORE" != success ]; then
+            echo "::error::this run planned the restore half, and the restore step is ${O_RESTORE:-not run}. A skipped restore is not a pass"
+            exit 1
+          fi
+          echo "restore planned: ${RESTORE_PLANNED:-false}, restore outcome: ${O_RESTORE:-not run}"
+
+      # A run that planned the rotation test and did not run it is red.
+      - name: The planned rotation test ran
+        id: rotation-ran
+        if: ${{ always() }}
+        env:
+          ROTATION_PLANNED: ${{ needs.up.outputs.rotation_planned }}
+        run: |
+          set -euo pipefail
+          if [ "$ROTATION_PLANNED" = true ] && [ ! -s "${RUNNER_TEMP}/rotation-results.tsv" ]; then
+            echo "::error::this run planned the rotation test, and the rotation job kept no result. A skipped rotation test is not a pass"
+            exit 1
+          fi
+          echo "rotation planned: ${ROTATION_PLANNED:-false}"
+
+      # THE COMMITS OF THE RUN (drill sweep row 21, coordinator decision of
+      # 2026-10-13). The app-of-apps of drill tracks the commit of this run
+      # (GITOPS_REF). A merge to main during the run does not fail the run:
+      # the summary records the run commit, the main HEAD at the end, and
+      # whether the gitops tree of drill differs between them, so a reader
+      # can tell which tree a result belongs to. It never fails.
+      - name: Record the commits of the run
+        id: commits
+        if: ${{ always() }}
+        run: |
+          set -uo pipefail
+          main_sha="unknown"
+          if git fetch --quiet --depth=1 origin main 2>/dev/null; then
+            main_sha="$(git rev-parse FETCH_HEAD)"
+            if git diff --quiet "${GITHUB_SHA}" FETCH_HEAD -- gitops ':!gitops/envs/staging' ':!gitops/envs/prod' 2>/dev/null; then
+              tree="the same"
+            else
+              tree="different: $(git diff --stat "${GITHUB_SHA}" FETCH_HEAD -- gitops ':!gitops/envs/staging' ':!gitops/envs/prod' | tail -1)"
+            fi
+          else
+            tree="unknown (main could not be read)"
+          fi
+          printf '%s\n' "" "### Commits" "" \
+            "- run commit: \`${GITHUB_SHA}\`" \
+            "- main at the end of the run: \`${main_sha}\`" \
+            "- the gitops tree of drill between them: ${tree}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Report, and one issue per failed stage
+        if: always()
+        env:
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+          O_UP: ${{ needs.up.outputs.up }}
+          O_CEILING: ${{ needs.up.outputs.ceiling }}
+          O_SMOKE: ${{ needs.up.outputs.smoke }}
+          O_RESTORE: ${{ needs.restore.outputs.restore }}
+          O_RESTORE_RAN: ${{ steps.restore-ran.outcome }}
+          O_SETTLE: ${{ needs.restore.outputs.settle }}
+          O_ROTATION: ${{ needs.rotation.outputs.rotation }}
+          O_ROTATION_RAN: ${{ steps.rotation-ran.outcome }}
+          R_UP: ${{ needs.up.result }}
+          R_RESTORE: ${{ needs.restore.result }}
+          R_ROTATION: ${{ needs.rotation.result }}
+          O_TEARDOWN: ${{ steps.teardown.outcome }}
+          O_ARCHIVE: ${{ steps.archive-clear.outcome }}
+        run: |
+          set -euo pipefail
+          mark() { case "$1" in success) echo "✅";; failure) echo "❌";; *) echo "⏭";; esac; }
+          printf '%s\n' \
+            "## drill" "" \
+            "| stage | outcome |" "|---|---|" \
+            "| recreate from nothing | $(mark "$O_UP") $O_UP |" \
+            "| the node armed its ceiling | $(mark "$O_CEILING") $O_CEILING |" \
+            "| Ready + smoke | $(mark "$O_SMOKE") $O_SMOKE |" \
+            "| preserve + restore, records read back | $(mark "$O_RESTORE") $O_RESTORE |" \
+            "| the planned restore half ran | $(mark "$O_RESTORE_RAN") $O_RESTORE_RAN |" \
+            "| the recovery parameters left the running Cluster safely | $(mark "$O_SETTLE") $O_SETTLE |" \
+            "| rotation of each credential class | $(mark "$O_ROTATION") $O_ROTATION |" \
+            "| the planned rotation test ran | $(mark "$O_ROTATION_RAN") $O_ROTATION_RAN |" \
+            "| jobs: up / restore / rotation | ${R_UP:-} / ${R_RESTORE:-} / ${R_ROTATION:-} |" \
+            "| teardown, and the account asked | $(mark "$O_TEARDOWN") $O_TEARDOWN |" \
+            "| the drill Postgres archive emptied | $(mark "$O_ARCHIVE") $O_ARCHIVE |" "" \
+            "Run: ${RUN_URL}. A stage with no outcome did not run, or its job stopped before it." \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          # A job that GitHub cancelled (its time limit, or a person) is a
+          # failed stage too: the steps after the stop have no outcome. A
+          # failed step has its own line, so only a cancel opens this one.
+          cancelled=""
+          for r in "up:$R_UP" "restore:$R_RESTORE" "rotation:$R_ROTATION"; do
+            [ "${r#*:}" != cancelled ] || cancelled="${cancelled:+$cancelled }${r%%:*}"
+          done
+          job_outcome=""; [ -z "$cancelled" ] || job_outcome=failure
+          for stage in "recreate from nothing:$O_UP" "the node armed its ceiling:$O_CEILING" "Ready + smoke:$O_SMOKE" "preserve + restore:$O_RESTORE" "the planned restore half ran:$O_RESTORE_RAN" "restore-settle on a running Cluster:$O_SETTLE" "the planned rotation test ran:$O_ROTATION_RAN" "a job finished in its time limit:$job_outcome" "teardown:$O_TEARDOWN" "the drill Postgres archive emptied:$O_ARCHIVE"; do
+            name="${stage%%:*}"; outcome="${stage##*:}"
+            [ "$outcome" = "failure" ] || continue
+            title="drill: ${name} failed"
+            if [ -z "$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')" ]; then
+              gh issue create --repo "${GITHUB_REPOSITORY}" --label ready-for-agent --title "$title" \
+                --body "Stage **${name}** of the drill failed: ${RUN_URL}"$'\n\n'"The environment is torn down, so there is nothing to inspect live. Read the run log, root-cause it, and re-dispatch \`drill\`."
+            fi
+          done
+          # One issue for each failed line of the rotation results: a tested
+          # credential class, or the alert that could not be sent (hosted#444).
+          # No second issue while the first is open. An untested class opens
+          # none: its scope is an open decision.
+          results="${RUNNER_TEMP}/rotation-results.tsv"
+          [ -s "$results" ] || exit 0
+          while IFS=$'\t' read -r -u 3 class outcome reason; do
+            printf '| rotation: %s | %s |\n' "$class" "$outcome" >> "$GITHUB_STEP_SUMMARY"
+            [ "$outcome" = fail ] || continue
+            title="rotation: ${class} failed"
+            if [ -z "$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')" ]; then
+              gh issue create --repo "${GITHUB_REPOSITORY}" --label ready-for-agent --title "$title" \
+                --body "The monthly rotation test failed for **${class}**: ${RUN_URL}"$'\n\n'"Reason: ${reason}"$'\n\n'"The class is in \`credential-classes.yaml\`, and its test is in \`test/rotation/exit-test-rotation.sh\` (hosted#444). Fix the rotation path or the test, then dispatch \`drill\` with \`rotation: true\`."
+            fi
+          done 3< "$results"
+

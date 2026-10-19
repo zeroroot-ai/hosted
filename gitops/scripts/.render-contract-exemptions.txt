@@ -1,0 +1,15 @@
+# Sanctioned, staged render-contract debt (gitops#487).
+#
+# Format: <env>:<check>:<reason, including the tracking issue>
+#
+# An entry downgrades that check from failure to warning for that env. It
+# exists for exactly one shape of change: a promotion whose new chart version
+# breaks an overlay contract cannot ride with its own values fix
+# (check-promotion-isolation.sh, gitops#448), so the promotion PR declares the
+# staged break here and the immediately-following values PR deletes the line.
+# A STALE entry — one whose check now passes — fails the gate, so a line
+# cannot outlive the cutover window it covers. The `render` check is never
+# exemptible.
+
+
+prod:eso-store:prod pins 0.113.0, which predates the ADR-0083 secrets cutover (deploy#1733) and renders no gibson-secrets store now that the deleted backend keys are gone from its overlay. Closed by promoting prod behind a green staging (ADR-0080), together with dropping the dead keys from envs/prod/values.yaml. gitops#567

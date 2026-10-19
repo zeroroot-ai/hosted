@@ -1,0 +1,32 @@
+# gibson-velero values for staging. Read by envs/staging/gibson-velero.yaml
+# through the $values source.
+#
+# The chart refuses to render without bucket.name: "Velero writes to the
+# durable bucket stage 0 created. There is no default that is safe to invent."
+# Before this file, the Application passed no values at all, so it could not
+# render. Staging showed the app as Unknown with that error, installed no
+# Velero, and took no backups (hosted#226).
+#
+# These are env facts and belong in git, for the same reason as
+# platformPostgres.backup in values.yaml: the AWS path reads its Applications
+# from git and has no per-bringup values seam. The bucket is stage 0's durable
+# bucket (substrate.env BUCKET_NAME), the same bucket the Postgres archive
+# writes to. An empty endpoint means real AWS S3 for the bucket's region.
+# scripts/check-overlay-velero-bucket.py fails CI when this file is missing,
+# names no bucket, or names a different bucket from the Postgres archive.
+#
+# The credentials are not here. scripts/keyring-to-cluster.sh writes
+# velero/velero-bucket-credential and velero/velero-repo-credentials from the
+# bringup keyring.
+#
+# bucket.prefix: the keyring of the rebuild of 2026-10-11 (D73, D85) holds a
+# new VELERO_REPO_PASSWORD. kopia cannot open the repository under
+# backups/velero/ with it, so this env starts a new repository at a new path
+# under backups/velero/ (scripts/keyring.sh, ROTATION). The old repository
+# stays until the bucket lifecycle expires it. The recreate reads this prefix
+# for a restore (hosted#593).
+bucket:
+  name: "zeroroot-ai-staging-durable-447184491447"
+  prefix: "backups/velero/repo-20261011"
+  endpoint: ""
+  region: "us-east-1"

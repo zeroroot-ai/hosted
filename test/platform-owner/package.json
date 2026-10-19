@@ -1,0 +1,10 @@
+{
+  "name": "exit-test-platform-owner",
+  "private": true,
+  "description": "The browser driver of the Platform owner exit test (hosted#201). npm --prefix test/platform-owner install, then npx --prefix test/platform-owner playwright install --with-deps chromium.",
+  "type": "module",
+  "dependencies": {
+    "playwright": "1.64.1",
+    "otpauth": "9.5.2"
+  }
+}

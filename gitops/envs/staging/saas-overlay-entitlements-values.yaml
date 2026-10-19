@@ -1,0 +1,39 @@
+# SaaS overlay: entitlements-svc values for the staging environment.
+#
+# Deployed as a separate Argo Application (envs/staging/apps/entitlements-svc.yaml), not as part of the core umbrella.
+# ADR-0074 / deploy#1032.
+#
+# The core gibson Application in this env sets:
+#   gibson-workloads:
+#     gibson:
+#       entitlementsEndpoint: "gibson-entitlements-svc:9091"
+# (see envs/staging/values.yaml) — the daemon's seam knob pointing at the
+# Service this overlay deploys.
+
+# Images come from the umbrella chart's digest pins (deploy#1403).
+# Staging is the RELEASE CANDIDATE: it runs the exact artifact prod
+# promotes, so "staging verified it" is a true statement about prod's
+# bytes. Do not re-add an image override here — that is the defect.
+imagePullSecrets:
+  - name: ghcr-credentials
+
+replicas: 1
+
+postgres:
+  host: "platform-postgres-rw.gibson.svc.cluster.local"
+  port: 5432
+  database: "gibson_platform"
+  passwordSecretName: "gibson-platform-postgres-credentials"
+  passwordSecretKey: "password"
+  sslMode: "require"
+
+spiffe:
+  # The trust domain comes from global.spire.trustDomain in values.yaml of
+  # this env, which the Application loads first (ADR-0164).
+  # The SPIRE controller-manager in this env watches className
+  # "gibson-gibson" with watchClassless: false — verified by rendering this
+  # env's own pinned chart. The previous "gibson-gibson-spire" matched
+  # nothing, so the ClusterSPIFFEID was never reconciled, SPIRE issued no
+  # entry, and entitlements-svc blocked in its X509Source fetch before it
+  # could listen — a Running pod with no logs (gitops#355).
+  controllerManagerClassName: "gibson-gibson"

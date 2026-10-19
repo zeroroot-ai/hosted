@@ -1,0 +1,33 @@
+# Copy to terraform.tfvars (gitignored) and fill in.
+#
+# SCOPE OF THIS FILE, AFTER deploy#1397
+#
+# The env axis is NOT here any more. It lives in the committed
+# envs/staging.tfvars and envs/prod.tfvars, which `make eks-<target> ENV=<env>`
+# threads in with -var-file. What is left is the small set of values that are
+# genuinely per-OPERATOR or secret, and therefore must never be committed:
+#
+#   operator_cidrs   your workstation's public IP, /32. Scopes the EKS API
+#                    public endpoint so terraform's kubernetes/helm providers
+#                    can reach the control plane.
+#
+# Everything else that used to be duplicated across the two forked
+# terraform.tfvars.example files is now in envs/*.tfvars — do not re-add it
+# here. -var-file takes precedence over terraform.tfvars, so a value set in
+# both is silently won by envs/<env>.tfvars and the copy here is dead weight
+# that looks live.
+#
+# 203.0.113.0/24 below is the RFC 5737 TEST-NET-3 documentation range. Replace
+# it with your own IP. Never commit a real operator IP.
+
+operator_cidrs = ["203.0.113.10/32"]
+
+# ArgoCD's clone credential is no longer a Terraform var (ADR-0083). Its
+# repo-creds Secret is seeded from the org GitHub App by
+# scripts/keyring-to-cluster.sh (App members live in the keyring), and the
+# umbrella chart's OCI package is public, so nothing is passed here.
+
+# Ops SSO client secret (github | gitlab | oidc through the bundled Dex,
+# deploy#1214). Same rule — TF_VAR_argocd_sso_client_secret at apply time.
+# See eks/aws-org/runbooks/RUNBOOK-argocd-sso.md.
+# argocd_sso_client_secret = ""

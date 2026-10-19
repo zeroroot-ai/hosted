@@ -1,0 +1,108 @@
+name: drill-setup
+description: >-
+  The setup that each job of drill.yml needs, from nothing on a fresh runner:
+  a credential of the job's own (OIDC, eks-bringup), the stage 0 files of
+  drill read from AWS (the keyring and substrate.env from the Secrets Manager
+  secret zeroroot-ai/drill/keyring, ADR-0083), the seal key masked, Terraform,
+  the Python requirements and the pinned cluster tools. Nothing comes from the
+  disk of an earlier job, and the GitHub Environment holds no keyring.
+inputs:
+  env:
+    description: The environment name.
+    required: true
+  role-arn:
+    description: The EKS_BRINGUP_ROLE_ARN variable.
+    required: true
+  session-name:
+    description: The role session name, one for each job.
+    required: true
+runs:
+  using: composite
+  steps:
+    # configure-aws-credentials treats an unset role-to-assume as "look for
+    # credentials elsewhere" and then reports "Could not load credentials
+    # from any providers", which reads like a broken OIDC trust. Say which.
+    - name: The bringup role ARN variable must be set
+      shell: bash
+      env:
+        ROLE_ARN: ${{ inputs.role-arn }}
+      run: |
+        set -euo pipefail
+        if [ -z "${ROLE_ARN}" ]; then
+          echo "::error::Repo variable EKS_BRINGUP_ROLE_ARN is not set." >&2
+          echo "The eks-bringup role is defined in bootstrap/eks/aws-org/github-oidc.tf." >&2
+          echo "Apply that workspace, then set the variable to the role ARN:" >&2
+          echo "  gh variable set EKS_BRINGUP_ROLE_ARN -R ${GITHUB_REPOSITORY} --body arn:aws:iam::<account-id>:role/eks-bringup" >&2
+          exit 1
+        fi
+        echo "OK — role ARN is configured."
+
+    # A credential of this job's own. Six hours: longer than any job of
+    # drill.yml (each stops before the GitHub limit of 360 minutes), so the
+    # credential never ends before its job. The role allows it
+    # (max_session_duration, bootstrap/eks/aws-org/github-oidc.tf).
+    - name: Configure AWS credentials (OIDC role assumption)
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        role-session-name: ${{ inputs.session-name }}
+        aws-region: us-east-1
+        role-duration-seconds: 21600
+
+    - name: Verify AWS credentials
+      shell: bash
+      run: aws sts get-caller-identity
+
+    # The keyring and substrate.env of drill, from its Secrets Manager secret
+    # (scripts/stage0-store.sh pull). The keyring file lands on disk mode
+    # 0600 and is never echoed. Every member value is registered with the
+    # runner's masker.
+    - name: Read the stage 0 files of the environment from AWS
+      shell: bash
+      env:
+        ENV: ${{ inputs.env }}
+      run: |
+        set -euo pipefail
+        SUBSTRATE_DIR="${RUNNER_TEMP}/substrate"
+        echo "SUBSTRATE_DIR=${SUBSTRATE_DIR}" >> "$GITHUB_ENV"
+        scripts/stage0-store.sh pull "${ENV}" "${SUBSTRATE_DIR}/${ENV}"
+        while IFS= read -r line; do
+          case "$line" in ''|'#'*) continue ;; esac
+          v="${line#*=}"
+          if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+        done < "${SUBSTRATE_DIR}/${ENV}/keyring.env"
+        test "$(grep -c '^KEYRING_FILE=' "${SUBSTRATE_DIR}/${ENV}/substrate.env")" = 1
+
+    # THE SEAL KEY IS NEVER PRINTED, AND IS REGISTERED WITH THE MASKER. The
+    # value is read from a keyring file on the runner, so nothing else taught
+    # the masker about it. Identity is proven with a 12-hex prefix of its
+    # sha256, which is not reversible.
+    - name: The keyring's seal key is present, and masked from here on
+      shell: bash
+      env:
+        ENV: ${{ inputs.env }}
+      run: |
+        set -euo pipefail
+        v="$(scripts/keyring.sh get "${SUBSTRATE_DIR}/${ENV}/keyring.env" OPENBAO_SEAL_KEY)"
+        if [ -z "$v" ]; then
+          echo "::error::the keyring holds no OPENBAO_SEAL_KEY. Stage 0 did not write one, or this run is pointed at the wrong keyring (README.md, Rotation)."
+          exit 1
+        fi
+        echo "::add-mask::$v"
+        printf '✓ OPENBAO_SEAL_KEY present and now masked (sha256 %s)\n' \
+          "$(printf '%s' "$v" | sha256sum | cut -c1-12)"
+
+    - name: Install Terraform
+      uses: ./.github/actions/install-terraform
+
+    # The bringup reads the overlay with PyYAML (the edge certificate names,
+    # scripts/lib/edge-cert.sh), at the version requirements-ci.txt pins.
+    - name: Install the Python requirements
+      shell: bash
+      run: python3 -m pip install --quiet -r requirements-ci.txt
+
+    # Pinned by version and sha256. The drill cluster publishes no API port
+    # (api_allow_cidrs = []), so every kubectl goes through an SSM forward,
+    # and the aws CLI calls the session-manager-plugin for it.
+    - name: Install helm, kubectl and the SSM session-manager plugin
+      uses: ./.github/actions/install-cluster-tools

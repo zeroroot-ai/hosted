@@ -1,0 +1,91 @@
+# The store that gives Alertmanager the SMTP relay credential (hosted#423).
+#
+# WHY NOT THE CLUSTER STORE. The chart's ClusterSecretStore `gibson-secrets`
+# serves only the release namespace (`spec.conditions`). An ExternalSecret in
+# `monitoring` that names it fails with "using cluster store gibson-secrets is
+# not allowed from namespace monitoring". Measured on the staging rebuild of
+# 2026-10-06.
+#
+# So this store uses the ESO kubernetes provider and reads ONE Secret: the
+# relay credential that the chart already mirrors into `gibson` as
+# `gibson-email-smtp` (keys username, password). It is the pattern of the
+# chart's setec bridge (gibson-cross-ns-setec):
+#
+#   - the reader ServiceAccount lives here, in `monitoring`
+#   - a Role in `gibson` lets it read `gibson-email-smtp` and nothing else
+#   - a Role here lets the ESO controller (gibson/external-secrets) mint a
+#     token for that ServiceAccount, and for no other one
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: alertmanager-smtp-reader
+  namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alertmanager-smtp-reader
+  namespace: gibson
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["gibson-email-smtp"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alertmanager-smtp-reader
+  namespace: gibson
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alertmanager-smtp-reader
+subjects:
+  - kind: ServiceAccount
+    name: alertmanager-smtp-reader
+    namespace: monitoring
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: alertmanager-smtp-reader-token
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: ["serviceaccounts/token"]
+    resourceNames: ["alertmanager-smtp-reader"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: alertmanager-smtp-reader-token
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: alertmanager-smtp-reader-token
+subjects:
+  - kind: ServiceAccount
+    name: external-secrets
+    namespace: gibson
+---
+apiVersion: external-secrets.io/v1
+kind: SecretStore
+metadata:
+  name: gibson-email-smtp
+  namespace: monitoring
+spec:
+  provider:
+    kubernetes:
+      remoteNamespace: gibson
+      server:
+        url: kubernetes.default
+        caProvider:
+          type: ConfigMap
+          name: kube-root-ca.crt
+          key: ca.crt
+      auth:
+        serviceAccount:
+          name: alertmanager-smtp-reader

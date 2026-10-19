@@ -1,0 +1,32 @@
+# Plugin bring-up overlay (ADR-0065 R5).
+#
+# Layered ON TOP of helm/gibson/values-baseline.yaml to bring up the first-party
+# reference plugins on a plain kind cluster. It lives OUTSIDE helm/ and is not
+# a `values*` file, so digest-pin-check does not scan it. It still pins the
+# plugin image by digest.
+#
+# Usage:
+#   make baseline-plugins            # recreate ENV=kind + this overlay
+#   OVERLAY=plugins make recreate ENV=kind   # the same, by its name (hosted#425)
+#
+# Keyed under `gibson-workloads:` because the plugin templates live in the
+# gibson-workloads subchart; the umbrella passes this subtree straight through.
+gibson-workloads:
+  plugins:
+    # github reference plugin — a pod-runtime Deployment pulled from the image
+    # that the gibson image workflow publishes (gibson#790). The digest is the
+    # one that the gibson catalog entry github-plugin.yaml pins. It enrols
+    # with the daemon over capability-grant (its ServiceAccount token is the one-time bootstrap
+    # credential). A tenant admin grants it cred:github_token
+    # (GrantsService.WriteSecretGrants), and it resolves the secret at start
+    # through the secrets broker over the daemon gRPC channel — no
+    # ExternalSecret, nothing passed here.
+    github:
+      enabled: true
+      runtime: pod
+      image:
+        repository: ghcr.io/zeroroot-ai/gibson-plugin-github
+        digest: sha256:4e56c026ffa124c05bbc858853f4a8a2668a8cf73f7ad39bbe685c75253687d6
+        pullPolicy: IfNotPresent
+      networkPolicy:
+        enabled: true

@@ -1,0 +1,112 @@
+#!/usr/bin/env bash
+# ----------------------------------------------------------------------------
+# Agent init (hosted#453). Cloud-init runs this once, on the first boot of
+# the second node of a two-node cluster.
+#
+# It does three things, in this order:
+#   0. raise the kernel's inotify limits, as the server does;
+#   1. install the host iptables, as the server does;
+#   2. install k3s in agent mode, so this node joins the server with the
+#      token that both instances got from Terraform.
+#
+# It installs no sandbox runtime. The sandbox runtime is the launcher pod of
+# setec, and a node needs /dev/kvm only. The instance type decides that, the
+# same way it does for the server.
+#
+# The ceiling is armed first, before anything that can hang, for the reason
+# node-init.sh.tftpl gives. tests/harness/drill-teardown.bats asserts the
+# order in this file too.
+#
+# It is idempotent. A rerun on a node that already runs k3s is a no-op.
+# ----------------------------------------------------------------------------
+set -euo pipefail
+exec > >(tee -a /var/log/node-init.log) 2>&1
+
+echo "agent-init: start $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+%{ if self_terminate_after_minutes > 0 ~}
+# THE CEILING IS ARMED FIRST. The same timer as the server: it re-arms on
+# every boot, and it fails closed with a 20-minute fallback.
+cat > /etc/systemd/system/self-terminate.service <<'UNIT'
+[Unit]
+Description=Power off this instance (throwaway environment ceiling)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/systemctl --no-block poweroff
+UNIT
+cat > /etc/systemd/system/self-terminate.timer <<'UNIT'
+[Unit]
+Description=Terminate this instance ${self_terminate_after_minutes} minutes after every boot
+
+[Timer]
+OnBootSec=${self_terminate_after_minutes}min
+AccuracySec=1min
+Persistent=false
+
+[Install]
+WantedBy=timers.target
+UNIT
+systemctl daemon-reload
+systemctl enable --now self-terminate.timer || true
+
+if [ "$(systemctl is-active self-terminate.timer 2>/dev/null)" = active ]; then
+  echo "agent-init: armed self-termination at +${self_terminate_after_minutes}m"
+  systemctl list-timers self-terminate.timer --no-pager || true
+else
+  echo "agent-init: FATAL could not arm the self-termination timer. Falling back to a 20-minute ceiling so this node is diagnosable and still cannot run unbounded." >&2
+  systemctl status self-terminate.timer --no-pager >&2 2>&1 || true
+  systemd-run --on-active=20min /usr/bin/systemctl --no-block poweroff \
+    || { echo "agent-init: FATAL the fallback could not be armed either; powering off now" >&2; /sbin/poweroff --force; }
+fi
+%{ endif ~}
+
+# 0. Kernel limits, the same values as the server.
+cat > /etc/sysctl.d/90-zeroroot-node.conf <<'SYSCTL'
+fs.inotify.max_user_instances = 8192
+fs.inotify.max_user_watches = 1048576
+SYSCTL
+sysctl --system >/dev/null
+echo "agent-init: inotify limits $(sysctl -n fs.inotify.max_user_instances) instances, $(sysctl -n fs.inotify.max_user_watches) watches"
+
+# 1. iptables, the same reason as the server.
+if ! command -v iptables >/dev/null 2>&1; then
+  dnf install -y iptables-nft >/dev/null 2>&1 || dnf install -y iptables >/dev/null 2>&1 || true
+  command -v iptables >/dev/null 2>&1 \
+    && echo "agent-init: installed host iptables" \
+    || echo "agent-init: no host iptables package available, k3s uses its own"
+fi
+
+# 1b. The ECR credential provider of the kubelet, the same as the server.
+${ecr_credential_provider}
+
+# ---------------------------------------------------------------------------
+# 2. k3s, in agent mode.
+#
+# K3S_URL names the private address of the server: the API is not published,
+# and the security group admits the group to itself. The agent retries until
+# the server answers, so the order in which the two instances boot does not
+# matter.
+#
+# The node carries the same labels as the server. It is a node of the same
+# class, which is what a two-node proof asks for (D57).
+#
+# No --node-external-ip, for the reason node-init.sh.tftpl gives.
+# ---------------------------------------------------------------------------
+if systemctl is-active --quiet k3s-agent; then
+  echo "agent-init: k3s-agent is already running"
+else
+  curl -fsSL --retry 10 --retry-delay 5 --retry-all-errors --connect-timeout 20 https://get.k3s.io -o /tmp/k3s-install.sh
+  INSTALL_K3S_VERSION="${k3s_version}" K3S_URL="https://${server_ip}:6443" K3S_TOKEN="${agent_token}" sh /tmp/k3s-install.sh agent \
+    --node-label "zeroroot.ai/cluster=${cluster_name}" \
+    --node-label "workload=system" \
+    --node-label "setec.zeroroot.ai/sandbox-host=true" \
+    --node-label "node.kubernetes.io/instance-type=${instance_type}"
+  echo "agent-init: installed k3s ${k3s_version} as an agent of ${server_ip}"
+fi
+
+# The readiness marker. The recreate verb does not read it: it counts Ready
+# nodes through the API. It is here for an operator who reads the node.
+install -d -m 0700 /var/lib/rancher/k3s/agent
+touch /var/lib/rancher/k3s/agent/node-init.done
+echo "agent-init: done $(date -u +%Y-%m-%dT%H:%M:%SZ)"

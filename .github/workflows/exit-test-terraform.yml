@@ -1,0 +1,410 @@
+# ----------------------------------------------------------------------------
+# Launch blocker 1 — the exit test.
+#
+# In plain words: the script that builds the AWS cluster must run, it must
+# carve nothing out of the destroy, and it must own no bucket. The bucket that
+# outlives a cluster is stage 0's (ADR-0083).
+#
+# Measured as (zeroroot-ai/.github#284, deploy#1588, deploy#1743):
+#   1. `terraform plan` on the environment's OWN stage 1 root exits 0, with
+#      nothing in the replace set. Staging is bootstrap/ec2/gibson and
+#      production is bootstrap/eks/gibson (ADR-0095);
+#   2. that root carries zero retain constructs: no prevent_destroy, no
+#      `state rm`, no teardown tag allowlist, no import script, no EBS capture,
+#      and no reset target (scripts/check-no-retain.py);
+#   3. the plan declares no managed aws_s3_bucket (the same script, --plan).
+#
+# Three jobs, and the split is deliberate:
+#
+#   guards — runs on every PR, needs no AWS at all. It proves both assertion
+#            scripts still catch their defects, using fixtures derived from a
+#            real `terraform show -json` run and injected constructs, then runs
+#            the static retain scan on the tree. A guard that cannot fail is
+#            worse than no guard, so the fixtures are the first thing that
+#            runs and the job fails if a bad plan is NOT rejected.
+#
+#   plan   — the exit test proper, on push to main / schedule / dispatch. It
+#            reads live state read-only and asserts the invariants against a
+#            genuine plan. It works with the estate torn down: an empty state
+#            plans as all-create, which is exactly the condition under which
+#            the defects must stay absent. Deliberately NOT on pull_request —
+#            it measures the workspace, not the diff, so a PR must not be
+#            marked red by live state it did not cause.
+#
+#   apex-zone-plan — deploy#1741 (ADR-0083). The zeroroot.ai apex zone and
+#            its mail records are company property, owned by substrate/apex-zone,
+#            a permanent workspace with no teardown target. Its plan against
+#            the live zone must be EMPTY: `terraform plan -detailed-exitcode`
+#            exits 0. Exit 2 means the code and the live zone disagree, and
+#            the rule is to fix the code toward reality, never the reverse.
+#            Same role, same read-only posture, same triggers as `plan`.
+#
+# The `plan` job assumes eks-plan-readonly (bootstrap/eks/aws-org/github-oidc.tf) —
+# ReadOnlyAccess, never admin, and -lock=false so it never takes the state
+# lock. It cannot change anything it measures.
+#
+# Why there is no `preflight ENV=staging` job here (deploy#1742): preflight
+# runs as the PLATFORM credential from the bringup keyring and proves that
+# credential cannot delete. The read-only role is not that credential, and
+# the keyring reaches GitHub only as an Environment secret, which is
+# deploy#1745. Until then the proof that stage 0 stands is this `plan` job:
+# its init reads state from the durable bucket stage 0 created, and its plan
+# resolves the sub-zone stage 0 delegated.
+#
+# OPERATOR PREREQUISITE: bootstrap/eks/aws-org must be applied before `plan` can
+# authenticate — the role does not exist until then, and the same apply fixes
+# the eks-bringup trust policy the verb workflows and promote-staging.yml need
+# (deploy#1746 replaced the stranded eks-acceptance role with it).
+# ----------------------------------------------------------------------------
+# ADR-0080: never on pull_request. This is an exit test — it measures state on
+# main for the launch scorecard and runs on push to main and on its schedule.
+# The merge gate is the ten-minute set in ci.yml.
+name: exit-test-terraform
+
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        description: Which workspace to plan
+        type: choice
+        options: [staging, prod]
+        default: staging
+  push:
+    branches: [main]
+    paths:
+      - 'bootstrap/eks/**'
+      # The second stage 1 root (hosted#159). The guards job reads it today.
+      # The plan job still plans the EKS root for both environments; moving
+      # staging's plan to this root lands with the bringup verbs, so blocker
+      # 1 keeps measuring one root at a time and never both by accident.
+      - 'bootstrap/ec2/**'
+      - '.github/workflows/exit-test-terraform.yml'
+  schedule:
+    # Daily, ahead of the 06:09Z launch scorecard run, so the board reads a
+    # fresh result rather than yesterday's.
+    - cron: '0 5 * * *'
+
+concurrency:
+  group: exit-test-terraform-${{ github.event.inputs.env || 'staging' }}-${{ github.ref }}
+  # A run that started finishes. On main an exit test is the proof (ADR-0080),
+  # so a newer push queues behind it and does not cancel it (hosted#585).
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write   # OIDC — aws-actions/configure-aws-credentials
+
+jobs:
+  guards:
+    name: guards (no AWS)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # The failing fixtures ship with the guard, per the standing rule in
+      # CLAUDE.md § 9. plan-bucket-replace.json is plan-clean.json with the
+      # audit and backups buckets flipped into the replace set — the exact
+      # shape deploy#1588 reported — and plan-cycle.log is verbatim output
+      # captured when the defect was live. plan-empty-state.json is the shape
+      # every green run of this test had while stage 1 was torn down: every
+      # managed change a bare create, nothing to replace, nothing measured.
+      # The checker and its fixtures live beside the EKS root and are generic:
+      # they read a plan file, not a directory. The selftest runs where they
+      # live, whatever environment the plan job measures.
+      - name: Assertion script rejects a bad plan
+        working-directory: bootstrap/eks/gibson
+        run: |
+          set -euo pipefail
+          echo "--- a clean plan must pass ---"
+          python3 scripts/check-plan-invariants.py scripts/testdata/plan-clean.json
+
+          echo "--- a plan replacing the audit/backups buckets must fail ---"
+          if python3 scripts/check-plan-invariants.py scripts/testdata/plan-bucket-replace.json; then
+            echo "GUARD BROKEN: the bucket-replacement fixture was accepted" >&2
+            exit 1
+          fi
+
+          echo "--- a dependency cycle must fail ---"
+          if python3 scripts/check-plan-invariants.py scripts/testdata/plan-clean.json \
+               --plan-log scripts/testdata/plan-cycle.log; then
+            echo "GUARD BROKEN: the cycle fixture was accepted" >&2
+            exit 1
+          fi
+
+          echo "--- a missing plan file must fail, not pass silently ---"
+          if python3 scripts/check-plan-invariants.py /nonexistent-plan.json; then
+            echo "GUARD BROKEN: a missing plan file was accepted" >&2
+            exit 1
+          fi
+
+          echo "--- a plan against an empty workspace must fail, not pass ---"
+          if python3 scripts/check-plan-invariants.py scripts/testdata/plan-empty-state.json; then
+            echo "GUARD BROKEN: a plan that measured nothing was accepted" >&2
+            exit 1
+          fi
+
+          echo "OK — the assertion script fails in all four directions."
+
+      # ADR-0073, hosted#418: exactly two SCPs attach to the workload account,
+      # and no policy attaches to nothing. The check reads the Terraform text
+      # of the org workspace, so it needs no AWS credential. The self-test
+      # runs four failing fixtures first.
+      - name: Exactly two SCPs attach to the workload account
+        run: |
+          set -euo pipefail
+          python3 scripts/check-scp-attachments.py --selftest
+          python3 scripts/check-scp-attachments.py
+
+      # Zero retain constructs (ADR-0083, deploy#1743). The self-test injects
+      # each construct into a copy of stage 1 and a bucket into a plan, and
+      # the guard must reject every one before the real scan counts.
+      - name: Zero retain constructs in stage 1
+        run: |
+          set -euo pipefail
+          python3 scripts/check-no-retain.py --selftest
+          python3 scripts/check-no-retain.py
+
+      # Stage 1 stays thin (ADR-0083, deploy#1744): a resource-type denylist
+      # (Aurora, Secrets Manager, KMS, WAFv2, GuardDuty, SES, ACM, and the
+      # classes they arrive with) and a block-count ceiling over bootstrap/eks/gibson.
+      # The self-test injects one resource per class, a comment decoy and an
+      # over-ceiling tree, and the guard must reject every one first.
+      - name: Stage 1 shape — denylist and block-count ceiling
+        run: |
+          set -euo pipefail
+          python3 scripts/check-stage1-shape.py --selftest
+          python3 scripts/check-stage1-shape.py
+
+  plan:
+    name: plan (${{ github.event.inputs.env || 'staging' }})
+    needs: guards
+    # Not on pull_request. This job measures the state of the AWS workspace,
+    # not the diff in the PR — so a PR would be marked red by live state it did
+    # not cause, and a fork PR could never assume the role at all. The board
+    # reads "the named workflow's latest run on main", which is what push,
+    # schedule and dispatch give it. `guards` still runs on every PR.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      ENV: ${{ github.event.inputs.env || 'staging' }}
+      AWS_REGION: us-east-1
+      # WHICH STAGE 1 THIS ENVIRONMENT HAS (ADR-0095, hosted#159). Staging is
+      # one EC2 instance running k3s; production is EKS. The plan must read
+      # the root the environment actually builds, or blocker 1 measures an
+      # estate nobody stands up.
+      STAGE1_DIR: ${{ (github.event.inputs.env || 'staging') == 'prod' && 'bootstrap/eks/gibson' || 'bootstrap/ec2/gibson' }}
+      STATE_KEY: ${{ (github.event.inputs.env || 'staging') == 'prod' && 'tfstate/eks-gibson/terraform.tfstate' || 'tfstate/ec2-gibson/terraform.tfstate' }}
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      # configure-aws-credentials treats an unset role-to-assume as "look for
+      # credentials elsewhere", then retries 12 times over 100 seconds and
+      # reports "Could not load credentials from any providers" — which reads
+      # like a broken OIDC trust rather than an unset variable. Say which it is.
+      - name: Preflight — the role ARN variable must be set
+        env:
+          ROLE_ARN: ${{ vars.EKS_PLAN_READONLY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROLE_ARN}" ]; then
+            echo "::error::Repo variable EKS_PLAN_READONLY_ROLE_ARN is not set." >&2
+            echo "The eks-plan-readonly role is defined in bootstrap/eks/aws-org/github-oidc.tf." >&2
+            echo "Apply that workspace, then set the variable to the role ARN:" >&2
+            echo "  gh variable set EKS_PLAN_READONLY_ROLE_ARN -R zeroroot-ai/hosted \\" >&2
+            echo "    --body arn:aws:iam::<prod-account-id>:role/eks-plan-readonly" >&2
+            exit 1
+          fi
+          echo "OK — role ARN is configured."
+
+      - name: Configure AWS credentials (OIDC role assumption)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+        with:
+          role-to-assume: ${{ vars.EKS_PLAN_READONLY_ROLE_ARN }}
+          role-session-name: gh-actions-exit-test-terraform-${{ github.run_id }}
+          aws-region: us-east-1
+          role-duration-seconds: 3600
+
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      - name: Install Terraform
+        uses: ./.github/actions/install-terraform
+
+      # Backend config matches the `eks-init` target in the Makefile. Kept
+      # inline rather than calling `make eks-init` so a Makefile refactor
+      # cannot silently repoint this job at a different state file. The state
+      # lives under tfstate/ in the env's durable bucket (stage 0, ADR-0083),
+      # SSE-S3 and S3 native locking: no lock table, no KMS key.
+      - name: terraform init
+        working-directory: ${{ env.STAGE1_DIR }}
+        run: |
+          set -euo pipefail
+          acct="$(aws sts get-caller-identity --query Account --output text)"
+          terraform init -reconfigure -input=false -no-color \
+            -backend-config="key=${STATE_KEY}" \
+            -backend-config="bucket=zeroroot-ai-${ENV}-durable-${acct}" \
+            -backend-config="use_lockfile=true"
+
+      # -lock=false because this job only reads. It must never block a real
+      # apply, and it must never be blocked by one.
+      #
+      # `|| true` on the plan is load-bearing and is NOT swallowing the
+      # failure: a dependency cycle makes plan exit 1 and write no plan file,
+      # and the assertion step below is what reports that — with the cycle
+      # named from the log, rather than as a bare non-zero exit. The step after
+      # it fails the job either way.
+      - name: terraform plan
+        id: plan
+        working-directory: ${{ env.STAGE1_DIR }}
+        run: |
+          set -uo pipefail
+          # -refresh=false: blocker 1 asserts a property of the CONFIGURATION
+          # — no retain constructs, no managed bucket, nothing in the replace
+          # set. A refresh additionally reads live state, and `bootstrap/eks/gibson`
+          # manages two kubernetes_storage_class resources, so refreshing needs
+          # the cluster's API. That endpoint is public-but-CIDR-restricted to an
+          # operator address, and a GitHub runner is not in it, so whenever a
+          # staging cluster happens to STAND the refresh times out and blocker 1
+          # reads red for a reason unrelated to the configuration:
+          #   Error: Get ".../storageclasses/gp3": dial tcp ...: i/o timeout
+          # The signal must not depend on whether a cluster is up (observed
+          # 2026-09-02 while deploy#1746 ran the staging loop).
+          terraform plan -input=false -lock=false -no-color -refresh=false \
+            -var-file="envs/${ENV}.tfvars" \
+            -out=exit-test.tfplan 2>&1 | tee plan.log
+          echo "terraform_exit=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+
+      - name: terraform show -json
+        working-directory: ${{ env.STAGE1_DIR }}
+        run: |
+          set -uo pipefail
+          if [ -f exit-test.tfplan ]; then
+            terraform show -json exit-test.tfplan > plan.json
+          fi
+
+      - name: EXIT TEST — plan exits 0, no S3 bucket in the replace set
+        working-directory: ${{ env.STAGE1_DIR }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.plan.outputs.terraform_exit }}" != "0" ]; then
+            echo "terraform plan exited ${{ steps.plan.outputs.terraform_exit }} — blocker 1 is NOT passing." >&2
+          fi
+          python3 "$GITHUB_WORKSPACE/bootstrap/eks/gibson/scripts/check-plan-invariants.py" plan.json --plan-log plan.log
+          if [ "${{ steps.plan.outputs.terraform_exit }}" != "0" ]; then
+            exit 1
+          fi
+
+      # Stage 1 owns no bucket (ADR-0083). The durable bucket is stage 0's,
+      # and this plan reads state from it (modules/s3 was deleted in
+      # deploy#1744).
+      - name: EXIT TEST — the plan declares no bucket
+        working-directory: ${{ env.STAGE1_DIR }}
+        run: python3 "$GITHUB_WORKSPACE/scripts/check-no-retain.py" --plan plan.json
+
+      # No banned class in the live plan either (ADR-0083, deploy#1744).
+      # The static denylist cannot see a registry module minting its own
+      # aws_kms_key; the plan can.
+      - name: EXIT TEST — the plan creates no deleted-class resource
+        working-directory: ${{ env.STAGE1_DIR }}
+        run: python3 "$GITHUB_WORKSPACE/scripts/check-stage1-shape.py" --plan plan.json
+
+      - name: Upload plan artifacts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: terraform-plan-${{ env.ENV }}
+          path: |
+            ${{ env.STAGE1_DIR }}/plan.log
+            ${{ env.STAGE1_DIR }}/plan.json
+          retention-days: 14
+
+  apex-zone-plan:
+    name: apex-zone plan is empty
+    needs: guards
+    # Not on pull_request, for the same reason as `plan` above.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      AWS_REGION: us-east-1
+    steps:
+      - name: Checkout deploy
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Preflight — the role ARN variable must be set
+        env:
+          ROLE_ARN: ${{ vars.EKS_PLAN_READONLY_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROLE_ARN}" ]; then
+            echo "::error::Repo variable EKS_PLAN_READONLY_ROLE_ARN is not set (see the plan job above)." >&2
+            exit 1
+          fi
+          echo "OK — role ARN is configured."
+
+      # The same read-only role as `plan`. ReadOnlyAccess covers route53 and
+      # ses Get/List, and the role's kms:Decrypt-via-S3 grant reads the state.
+      # -lock=false below means the lock table is never touched.
+      - name: Configure AWS credentials (OIDC role assumption)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+        with:
+          role-to-assume: ${{ vars.EKS_PLAN_READONLY_ROLE_ARN }}
+          role-session-name: gh-actions-exit-test-apex-zone-${{ github.run_id }}
+          aws-region: us-east-1
+          role-duration-seconds: 3600
+
+      - name: Verify AWS credentials
+        run: aws sts get-caller-identity
+
+      # apex_zone_id is REQUIRED with no default (#111), so the id is read
+      # from the live account through the role above and never stored in a
+      # secret or a variable. It is a disclosure item, so the log masks it.
+      - name: Resolve the live apex zone id
+        run: |
+          set -euo pipefail
+          id="$(scripts/apex-zone-id.sh)"
+          echo "::add-mask::${id}"
+          echo "TF_VAR_apex_zone_id=${id}" >> "$GITHUB_ENV"
+          echo "OK — apex zone id resolved from the live account."
+
+      - name: Install Terraform
+        uses: ./.github/actions/install-terraform
+
+      # The apex has one state, in the prod backend, under a key that is not
+      # env-prefixed (substrate/apex-zone/backend.tf). Kept inline, like `plan`.
+      - name: terraform init
+        working-directory: substrate/apex-zone
+        run: |
+          set -euo pipefail
+          acct="$(aws sts get-caller-identity --query Account --output text)"
+          terraform init -input=false -no-color \
+            -backend-config="bucket=zeroroot-ai-prod-tfstate-${acct}-us-east-1" \
+            -backend-config="dynamodb_table=zeroroot-ai-prod-tf-locks" \
+            -backend-config="kms_key_id=alias/zeroroot-ai-prod-tf-bootstrap"
+
+      # -detailed-exitcode: 0 empty, 1 error, 2 a diff. Only 0 passes. A diff
+      # here is either drift on the live zone or a code change that was never
+      # applied, and both are findings, never something this job fixes.
+      - name: EXIT TEST — the apex-zone plan is empty
+        working-directory: substrate/apex-zone
+        run: |
+          set -uo pipefail
+          terraform plan -input=false -lock=false -no-color -detailed-exitcode 2>&1 | tee plan.log
+          rc="${PIPESTATUS[0]}"
+          case "$rc" in
+            0) echo "OK — substrate/apex-zone matches the live apex zone." ;;
+            2) echo "::error::substrate/apex-zone plan is NOT empty. The code and the live zone disagree; fix the code toward reality (deploy#1741)." >&2; exit 1 ;;
+            *) echo "::error::terraform plan on substrate/apex-zone failed (exit $rc)." >&2; exit 1 ;;
+          esac
+
+      - name: Upload plan log
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: terraform-plan-apex-zone
+          path: substrate/apex-zone/plan.log
+          retention-days: 14

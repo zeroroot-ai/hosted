@@ -1,0 +1,16 @@
+name: install-terraform
+description: >-
+  Install the Terraform version .terraform-version pins, with retries and a
+  checksum. Replaces hashicorp/setup-terraform, which failed blocker 1 on one
+  ECONNRESET (run 35563392735) and never retried. No wrapper: `terraform` on
+  PATH is the real binary, so exit codes and stdout are its own. The pin lives
+  in .terraform-version and nowhere else. The offline suite is
+  tests/harness/install-terraform.bats.
+runs:
+  using: composite
+  steps:
+    - name: Install Terraform
+      shell: bash
+      env:
+        TERRAFORM_INSTALL_DIR: ${{ runner.temp }}/terraform-bin
+      run: "$GITHUB_ACTION_PATH/install.sh"

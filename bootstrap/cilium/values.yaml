@@ -1,0 +1,65 @@
+# Cilium values that each substrate uses (hosted#436, ADR-0083).
+#
+# Cilium is the network plugin of every cluster. The chart renders
+# CiliumNetworkPolicy for egress by host name, so each node must enforce it.
+# The version is in the file VERSION beside this file. It is the only pin.
+
+# Cilium replaces kube-proxy (the setec proof setec#182, hand-off on
+# hosted#446). With kube-proxy, a DNS rule of a policy did not see the
+# lookups of a Firecracker machine in a launcher pod. Each substrate runs
+# with no kube-proxy, and each flavor names the API server, because no
+# kubernetes Service answers before Cilium does.
+#
+# The edge is still a NodePort Service with externalTrafficPolicy: Local.
+# Cilium serves it and keeps the client address on that path (ADR-0079).
+kubeProxyReplacement: true
+
+# The socket load balancer acts in the host namespace only. In a pod, the
+# packet keeps its Service address, so the machine in a launcher pod reaches
+# a Service through the pod interface, where its policy applies (setec#182).
+socketLB:
+  hostNamespaceOnly: true
+
+# The node gets its pod range from Kubernetes.
+ipam:
+  mode: kubernetes
+
+# A NetworkPolicy ipBlock can select a node address. The platform policies
+# name the API server by address, and on a one-node cluster that address is a
+# node. Without this mode Cilium does not match a node with a CIDR rule.
+policyCIDRMatchMode: nodes
+
+# One operator. The default of two cannot schedule on a one-node cluster.
+operator:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 10m
+      memory: 64Mi
+
+# A lookup that no DNS rule of a policy permits gets the answer NXDOMAIN, not
+# REFUSED. A pod tries each search domain of its resolv.conf before the name
+# itself, and the chart permits only the names that each pod needs (charts#518).
+# glibc and musl stop the whole lookup at the first REFUSED, so a permitted
+# outside host would never resolve on a node with a search domain of its own.
+# On NXDOMAIN the resolver tries the next search domain, as it does for any
+# name that does not exist. cilium_verify (scripts/lib/cilium.sh) refuses a
+# cluster with another answer.
+dnsProxy:
+  dnsRejectResponseCode: nameError
+
+# No separate Envoy DaemonSet. The DNS proxy that toFQDNs needs is in the
+# agent. This keeps the node inside the budget of a small cluster.
+envoy:
+  enabled: false
+
+hubble:
+  enabled: false
+
+# The agent states what it asks for, so scripts/check-2core-overlay.py can
+# count it. The agent and the operator together ask for 100m, which is what
+# kindnet asked for. The CI node has 15m of spare CPU in its budget.
+resources:
+  requests:
+    cpu: 90m
+    memory: 128Mi

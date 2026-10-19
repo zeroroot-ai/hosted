@@ -1,0 +1,12 @@
+# The job sets ENV, and a later step runs the verb with that value.
+# The guard must reject it (hosted#403).
+on:
+  workflow_dispatch:
+jobs:
+  prove:
+    runs-on: ubuntu-latest
+    env:
+      ENV: staging
+    steps:
+      - name: From zero
+        run: make teardown ENV="${ENV}" MODE=wipe

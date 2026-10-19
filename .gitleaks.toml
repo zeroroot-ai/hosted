@@ -1,0 +1,20 @@
+# gitleaks configuration for hosted. Read by the gitleaks gate in the reusable
+# CI (zeroroot-ai/.github, attic#18) and by anyone running `gitleaks dir .`.
+title = "hosted secret detection"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and shell variables that are shaped like credentials but are not"
+# The bats suites under tests/harness write throwaway keyrings with base64
+# strings such as "velero-repo-password-for-the-bats". They are fixtures.
+paths = [
+  '''^tests/harness/.*\.bats$''',
+  '''\.gitleaks\.toml$''',
+]
+# stripe-webhook-preflight.sh passes the Stripe key to curl through a shell
+# variable. The literal is the variable name, not a key.
+regexes = [
+  '''^"?\$\{?SK\}?:?"?$''',
+]

@@ -1,0 +1,69 @@
+# SaaS overlay: billing-webhook Argo Application for staging.
+#
+# ADR-0074: the SaaS overlay composition — a separate Argo Application layered
+# on top of the core `gibson` umbrella. Self-hosted installs NEVER have this
+# Application.
+#
+# ZeroRoot SaaS = core gibson umbrella Application (envs/staging/gibson.yaml)
+#               + the saas-overlay Applications in this directory
+#
+# This Application deploys the billing service (deploy#1132, billing#20): the
+# Stripe webhook and the two redirect endpoints, behind the envoy.extraRoutes
+# entries of this env (charts#375). It projects each tenant's
+# subscription_status into tenant_quotas, where entitlements-svc reads it to
+# payment-gate plan limits.
+#
+# This repo owns both halves: the chart under gitops/saas-overlay/ and the
+# env-specific values overlay under gitops/envs/.
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: gibson-billing-webhook
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  sources:
+    # source[0] — the SaaS overlay chart. It lives in this repo under
+    # gitops/saas-overlay/ since the deploy repo was deleted (ADR-0086), so it
+    # tracks `main` like every other source under gitops/envs/. The old
+    # v0.109.2 pin named a tag of a repo that no longer exists.
+    - repoURL: https://github.com/zeroroot-ai/hosted
+      targetRevision: main
+      path: gitops/saas-overlay/billing-webhook
+      helm:
+        valueFiles:
+          # The env's values.yaml first, for global.spire.trustDomain and
+          # global.domain: the one place that names the trust domain and the
+          # public domain of this install (ADR-0164).
+          - $values/gitops/envs/staging/values.yaml
+          - $values/gitops/envs/staging/saas-overlay-billing-webhook-values.yaml
+    # source[1] — this repo as the $values ref.
+    - repoURL: https://github.com/zeroroot-ai/hosted
+      targetRevision: main
+      ref: values
+  destination:
+    server: https://kubernetes.default.svc
+    # Deployed into the same namespace as the core platform.
+    namespace: gibson
+  syncPolicy:
+    automated:
+      prune: true
+      selfHeal: true
+    syncOptions:
+      - CreateNamespace=true
+      # ApplyOutOfSyncOnly is deliberately ABSENT (gitops#363). With it enabled,
+      # a sync applies only what the comparison at sync-start marked OutOfSync —
+      # and when that comparison is computed against the previous revision, the
+      # resources a promotion actually changes look in-sync, get skipped, and the
+      # operation reports "successfully synced (no more tasks)". The next refresh
+      # marks them OutOfSync against the new revision, but nothing re-drives it
+      # where selfHeal is false. Reproduced on dev: a chartVersion move left the
+      # live Envoy ConfigMap on the old content with the app reporting Succeeded,
+      # indefinitely. The option is a throughput optimisation for applications
+      # with thousands of objects; this one has ~150, so applying them all is the
+      # cheap side of the trade.
+      - ServerSideApply=true
+      - ServerSideDiff=true
+      - RespectIgnoreDifferences=true

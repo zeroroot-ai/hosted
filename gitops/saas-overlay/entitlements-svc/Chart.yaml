@@ -1,0 +1,38 @@
+apiVersion: v2
+name: gibson-entitlements-svc
+description: |
+  SaaS overlay: entitlements-svc Deployment + Service +
+  ClusterSPIFFEID for the ZeroRoot-hosted (SaaS) deployment audience.
+
+  This chart is NOT part of the core `gibson` umbrella. It is composed by
+  ZeroRoot's private gitops as a separate Argo Application alongside the
+  core umbrella, following the SaaS overlay pattern defined in ADR-0074.
+
+  Self-hosted installs NEVER install this chart.
+
+  The chart sets the daemon's ENTITLEMENTS_ENDPOINT (a seam knob in the core
+  gibson-workloads chart, ADR-0074 / deploy#1032) via a values override on
+  the core Application. See the gitops envs/{staging,prod}/saas-overlay.yaml
+  for the composition wiring.
+
+  Closed image reference: ghcr.io/zeroroot-ai/billing (cmd/entitlements-svc).
+  This is the ONLY place the closed billing image is named. The core umbrella
+  carries zero closed/SaaS image references (enforced by the no-closed-refs
+  render guard in .github/workflows/chart-bats-tests.yml).
+
+  ADR-0074: self-hosted vs SaaS seam model.
+  Relates: deploy#1032 (tracer bullet), deploy#1031 (PRD).
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+maintainers:
+  - name: ZeroRoot AI
+    email: team@zeroroot.ai
+keywords:
+  - gibson
+  - entitlements
+  - saas-overlay
+  - billing
+home: https://github.com/zeroroot-ai/hosted
+sources:
+  - https://github.com/zeroroot-ai/hosted

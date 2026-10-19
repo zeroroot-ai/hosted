@@ -1,0 +1,67 @@
+# exit-test-misdirected-authority — the browser edge answers a coalesced
+# HTTP/2 request with 421, so a browser retries on the right connection.
+#
+# The exit test, in plain words: A REQUEST THAT RIDES THE WRONG CONNECTION
+# GETS 421, AND A REQUEST ON THE RIGHT CONNECTION GETS THROUGH.
+#
+# Every public hostname on the edge shares one certificate and one address,
+# so a browser reuses the HTTP/2 connection it opened to app.<domain> for a
+# request to api.<domain>. Envoy picks the filter chain by the connection's
+# SNI, so that request landed on a chain with no virtual host for it and got
+# 404. Measured 2026-09-29 on staging: the GitLab connector's OAuth redirect
+# to api.<domain>/connectors/oauth/callback never reached the daemon.
+#
+# Runs entirely under Docker on the runner, on the same edge harness as
+# exit-test-rate-limit and exit-test-waf. No cluster, no AWS, no staging.
+# Both halves are asserted: an edge that answers 421 to everything is an
+# outage, one that never answers 421 leaves the bug in place.
+#
+# Runs on main and on a schedule, never on a PR (ADR-0080).
+name: exit-test-misdirected-authority
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '55 5 * * *'
+
+permissions:
+  contents: read
+  packages: read
+
+concurrency:
+  group: exit-test-misdirected-authority-${{ github.ref }}
+  # A run that started finishes. On main an exit test is the proof (ADR-0080),
+  # so a newer push queues behind it and does not cancel it (hosted#585).
+  cancel-in-progress: false
+
+jobs:
+  misdirected:
+    name: a coalesced HTTP/2 request gets 421, the right connection gets through
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout hosted
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
+
+      - name: Edge harness up
+        id: harness
+        uses: ./.github/actions/edge-harness
+
+      - name: EXIT TEST — a coalesced request gets 421 on both edge chains
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC1090
+          source "${{ steps.harness.outputs.env-file }}"
+          test/edge/exit-test-misdirected-authority.sh
+
+      - name: Diagnostics on failure
+        if: failure()
+        run: |
+          echo "--- transform summary ---"; cat "${RUNNER_TEMP}/edge-harness/harness.json" || true
+          echo "--- docker logs edge-envoy ---"; docker logs edge-envoy 2>&1 | tail -120 || true
+
+      - name: Harness down
+        if: always()
+        run: test/edge/harness.sh down

@@ -1,0 +1,46 @@
+# Caller workflow for the org tree guards of zeroroot-ai/.github.
+#
+#   adr-citations   fails on a citation of an ADR number that docs/adr-index.md
+#                   does not hold as live (hosted#433, ADR-0068). The index is
+#                   a copy of docs/adr-index.md of zeroroot-ai/gibson. The
+#                   guard never fetches it. adr-index-fresh.yml fails on main
+#                   when the copy differs from gibson. Then copy the file
+#                   from gibson again. `make check-adr-citations` runs the
+#                   same pinned script locally.
+#
+# The reusable runs its own failing fixtures before it scans this tree
+# (actions/adr-citations/check-adr-citations.py --selftest in
+# zeroroot-ai/.github). A guard that cannot fail never reports a clean tree.
+#
+# The reusable is pinned to a commit SHA, like every other first-party
+# reusable this org calls. The comment names the release so that Dependabot
+# can bump it.
+#
+# The merge_group trigger is not optional on a repository with a merge queue. A
+# required status check that never runs on merge_group stalls the queue until
+# it times out.
+#
+# Per-repo exemptions: the file .adr-citations-allow at the repository root
+# lists repo-relative paths, each under a `# why:` comment. An entry that
+# exempts no finding fails the run.
+#
+# Check name: adr-citations / adr-citations
+
+name: tree-guards
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  merge_group:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: tree-guards-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  adr-citations:
+    uses: zeroroot-ai/.github/.github/workflows/adr-citations.yml@58931387de5d0f2925ee29fa9781822b1e3a100d # v0.20.0

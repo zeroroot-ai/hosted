@@ -1,0 +1,15 @@
+# test/demo/diagnostics.values.yaml: diagnostics only, layered on the
+# baseline install for the enroll job (exit-test-demo-enrollment.yml).
+#
+# dashboard#107: the dashboard's heap grows about 1 MB/s from boot in this
+# test, on every run, until it dies, and nothing reproduces it off the
+# cluster. On SIGUSR2 Node writes a heap snapshot to /tmp, the one writable
+# place (the pod's /shared is mounted read-only, so the earlier
+# near-heap-limit snapshot there was never written). The workflow signals the
+# LIVE process before the drill and copies the snapshot out, so it holds
+# hundreds of MB of whatever is leaking. This changes no behavior the test
+# asserts. Delete this file when dashboard#107 closes.
+gibson-workloads:
+  dashboard:
+    extraConfig:
+      NODE_OPTIONS: "--heapsnapshot-signal=SIGUSR2 --diagnostic-dir=/tmp"

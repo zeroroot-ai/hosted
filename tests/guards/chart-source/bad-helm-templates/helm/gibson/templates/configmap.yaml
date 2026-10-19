@@ -1,0 +1,2 @@
+# A template path under a helm directory. The guard must reject it.
+kind: ConfigMap

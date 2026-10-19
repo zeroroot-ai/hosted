@@ -1,0 +1,4 @@
+# A Helm template with no Chart.yaml beside it. The guard must reject it.
+kind: ConfigMap
+metadata:
+  name: {{ include "x.fullname" . }}
