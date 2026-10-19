@@ -50,8 +50,8 @@ minutes (`bootstrap/ec2/gibson/envs/drill.tfvars`), so a node that a dead run
 leaves cannot bill for long.
 
 **Certificates.** Let's Encrypt issues at most 5 certificates for one exact
-set of names in 7 days. A daily drill that asks for a new edge certificate on
-each recreate uses that limit in 5 days. The drill reached it on 2026-10-12.
+set of names in 7 days. A drill that asks for a new edge certificate on
+each recreate, run once a day, uses that limit in 5 days. The drill reached it on 2026-10-12.
 So:
 
 1. The teardown keeps the edge certificate in the Secrets Manager secret
@@ -88,7 +88,7 @@ blocker 5):
 - `make check-promotion-pr` runs on every pull request. A change set moves
   the prod pin only to the version staging pins, and never a pin and its
   `values.yaml` together (gitops#448).
-- `exit-test-chart-signing.yml` runs on `main` and daily. It checks the
+- `exit-test-chart-signing.yml` runs on `main` and on dispatch. It checks the
   order offline, then pulls each pinned version with no token and checks that
   the tag still resolves to the recorded digest and that the digest carries
   the `zeroroot-ai/charts` cosign signature.

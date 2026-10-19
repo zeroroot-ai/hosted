@@ -43,7 +43,7 @@ make restart-<svc>                         # daemon | dashboard | ext-authz | te
 - **`MODE` on teardown has no default.** `wipe` and `preserve` differ in what survives, and guessing is how an estate disappears.
 - **A healthy-looking cluster can be serving stale secrets.** Nothing deletes a Secret when its source stops answering, so every pod stays Running while every ExternalSecret fails. Only Argo dissents, with one word. Check the ExternalSecrets, not the pods.
 - **The gitops branch is `main` only.** There is no branch per environment; promotion is a per-env overlay on one branch.
-- **Exit tests never run on a PR.** They run on `main` and on a schedule (ADR-0080). The merge gate is the merge criterion. A green exit test is not, and no manual cluster run is.
+- **Exit tests never run on a PR.** They run on `main` and on dispatch (ADR-0080). No workflow runs on a schedule (owner order, 2026-10-19; `make check-no-schedule`). The merge gate is the merge criterion. A green exit test is not, and no manual cluster run is.
 - **ArgoCD ops uses its own IdP, not Zitadel.** They are different trust paths; do not wire one to the other.
 
 ## Links

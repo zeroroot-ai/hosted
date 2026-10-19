@@ -35,7 +35,7 @@ The workstation held one kind cluster as the dev Environment. That cluster, its 
 _Avoid_: "my kind cluster" per agent, a cluster run as a condition of a merge
 
 **Merge gate** [grill 2026-08-25 Q2=A]:
-The set of checks a PR must pass before it merges, and its budget: the required aggregator finishes in **10 minutes** or the slow job leaves the set. In the set: formatting, lint, unit tests, the render guards (bats and the chart guards), the secret, RBAC and image-registry guards, CodeQL, govulncheck. Out of the set, running on push to `main` and on the daily schedule only, never on `pull_request`: every exit test, the baseline install, the Docker edge harness. They are not part of the merge.
+The set of checks a PR must pass before it merges, and its budget: the required aggregator finishes in **10 minutes** or the slow job leaves the set. In the set: formatting, lint, unit tests, the render guards (bats and the chart guards), the secret, RBAC and image-registry guards, CodeQL, govulncheck. Out of the set, running on push to `main` and on dispatch only, never on `pull_request` and never on a schedule: every exit test, the baseline install, the Docker edge harness. They are not part of the merge.
 _Avoid_: "CI green" meaning every workflow (only the gate blocks), running a cluster on a PR
 
 **Done** [owner decision 2026-10-05, ADR-0080]:

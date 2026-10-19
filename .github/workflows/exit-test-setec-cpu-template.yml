@@ -16,8 +16,6 @@
 name: exit-test-setec-cpu-template
 
 on:
-  schedule:
-    - cron: '40 7 * * *'
   workflow_dispatch:
     inputs:
       env:

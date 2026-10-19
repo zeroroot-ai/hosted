@@ -16,8 +16,8 @@
 # relay behind it differs, so this test keeps measuring the same chain when
 # SES lands. The estate is torn down, so the test brings up its own cluster:
 # `make recreate ENV=kind`, the verb an operator runs, with the CI rung that
-# fits a 2-vCPU runner (the same shape charts exit-test-baseline-install proves
-# daily) plus ONE overlay, test/signup/values.yaml, that swaps the baseline
+# fits a 2-vCPU runner (the same shape charts exit-test-baseline-install proves)
+# plus ONE overlay, test/signup/values.yaml, that swaps the baseline
 # profile's non-delivering "log" transport for the Mailpit sink.
 #
 # WHAT THE DRILL PROVES (test/signup/exit-test-signup.sh):
@@ -45,7 +45,7 @@
 # drill having run against a delivered mail.
 #
 # ADR-0080: never on pull_request. It measures state on main for the board
-# and runs on push to main and on its schedule. The merge gate is ci.yml,
+# and runs on push to main and on dispatch. The merge gate is ci.yml,
 # which runs the guards through `make check`.
 name: exit-test-signup
 
@@ -66,10 +66,6 @@ on:
       - 'test/platform-owner/**'
       - 'Makefile'
       - '.github/workflows/exit-test-signup.yml'
-  schedule:
-    # Daily, ahead of the launch scorecard run. 04:00 is the baseline install,
-    # 05:20 chart signing, 05:40 the rate limit; this one takes the slot between.
-    - cron: '30 4 * * *'
 
 concurrency:
   group: exit-test-signup-${{ github.ref }}
@@ -114,7 +110,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
-      # The chart source. A dispatch names the ref; push and schedule install
+      # The chart source. A dispatch names the ref; a push installs
       # charts main: the exit test measures the platform as it ships today.
       - name: Check out zeroroot-ai/charts
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7

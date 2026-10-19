@@ -1,0 +1,7 @@
+name: good
+# A comment that says schedule is not a trigger.
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+jobs: {}

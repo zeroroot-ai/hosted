@@ -34,7 +34,7 @@
 # fails. That proves the enforcement is real on the cluster of this run.
 #
 # ADR-0080: never on pull_request. It measures state on main and runs on push
-# to main and on its schedule. The merge gate is ci.yml, which runs the
+# to main and on dispatch. The merge gate is ci.yml, which runs the
 # guards through `make check`.
 name: exit-test-identity
 
@@ -56,11 +56,6 @@ on:
       - 'Makefile'
       - '.github/workflows/exit-test-identity.yml'
       - '.github/actions/demo-enrollment-install/**'
-  schedule:
-    # Daily, after the baseline install (04:00), the signup drill (04:30),
-    # the Platform owner drill, the demo enrollment (06:00), chart signing
-    # (05:20) and the rate limit (05:40).
-    - cron: '20 6 * * *'
 
 concurrency:
   group: exit-test-identity-${{ github.ref }}

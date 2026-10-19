@@ -11,18 +11,19 @@ name: drill
 #   rotate     rotate each credential class of credential-classes.yaml at its
 #              source, and prove the path that uses it (hosted#444)
 #
+# A DRILL RUNS ONLY ON DISPATCH (owner order of 2026-10-19: no workflow runs
+# on a schedule). scripts/check-no-schedule.py fails a `schedule:` trigger.
+#
 # WHICH RUN DOES THE RESTORE HALF (hosted#443). scripts/drill-plan.sh decides:
-# a dispatch follows its `restore` input, and a scheduled run does it on
-# Sunday. A scheduled run has no inputs, so the step used to read an empty
-# value and no scheduled run ever restored. When the plan selects the restore
+# a dispatch follows its `restore` input. When the plan selects the restore
 # half and it does not succeed, the run fails: a skipped restore is not green.
 #   teardown   MODE=wipe, then the account is asked what survived
 #
 # WHICH RUN DOES THE ROTATION TEST (hosted#444). scripts/drill-plan.sh decides
-# that too. The monthly schedule starts a rotation run: a bringup, the
-# rotation test of each tested class of credential-classes.yaml, and a
-# teardown, with no restore half. A dispatch follows its `rotation` input. One
-# run never does the restore half and the rotation test together. A tested
+# that too: a dispatch follows its `rotation` input. A rotation run is a
+# bringup, the rotation test of each tested class of credential-classes.yaml,
+# and a teardown. With the restore half on too, the rotation job runs after
+# the restore job, on the restored cluster, never beside it. A tested
 # class that fails opens one issue, and the test sends the alert
 # CredentialRotationFailed through the Alertmanager of drill. When the plan
 # selects the rotation test and it does not run, the run fails and opens one
@@ -43,7 +44,7 @@ name: drill
 #      envs/drill.tfvars). No network, no GitHub, no state file, no credential.
 #      This is what covers a cancelled job and a runner that vanishes.
 #   2. the teardown step below, which runs `if: always()`.
-#   3. scripts/reap-throwaway.sh on a schedule, for the minute between the API
+#   3. scripts/reap-throwaway.sh, run by hand, for the minute between the API
 #      returning an instance and cloud-init arming it.
 #
 # A green run is not what proves the teardown. The last step asks AWS what still
@@ -80,31 +81,11 @@ on:
         type: string
         default: ""
       node_count:
-        description: "How many nodes the drill cluster has. 2 adds a second instance of the same type as a k3s agent, for a proof that needs two nodes (hosted#453). The scheduled run keeps 1."
+        description: "How many nodes the drill cluster has. 2 adds a second instance of the same type as a k3s agent, for a proof that needs two nodes (hosted#453). The default is 1."
         required: false
         type: choice
         options: ["1", "2"]
         default: "1"
-  schedule:
-    # 04:10 UTC daily. ADR-0080 keeps exit tests off pull requests; this is the
-    # same lane. It is a drill against a throwaway environment, so unlike the
-    # old staging cycle a failed run leaves nothing anybody needs.
-    - cron: "10 4 * * *"
-    # 12:10 UTC on the first day of each month: the rotation run (hosted#444).
-    # It is a run of its own, after the daily run, so the restore half and the
-    # rotation test never share a job. scripts/drill-plan.sh holds both cron
-    # lines.
-    #
-    # WHY 12:10. Both runs use the one environment `drill`, so they share the
-    # one concurrency group below: two runs on one environment destroy each
-    # other's cluster. In a group, GitHub keeps one pending run and cancels
-    # an older pending run when a newer one queues. The daily run starts at
-    # 04:10. A weekday run (up and teardown) ends by 10:40 at the latest
-    # (THE BUDGET below), so at 12:10 the rotation run starts at once. A
-    # Sunday run with the restore half can end near 16:30. On a 1st that is
-    # a Sunday the rotation run waits in the group, and no other run queues
-    # before the next daily run at 04:10, so nothing replaces it.
-    - cron: "10 12 1 * *"
 
 concurrency:
   group: drill
@@ -145,7 +126,7 @@ permissions:
 #             345 minutes: 10 setup + 5 tools + the start of 60 (four users,
 #             each a Terraform apply, a restart of its readers and a wait of
 #             5 min for the new key in use, and for smtp up to 10 min for
-#             the derived Secret; a later daily run continues each rotation)
+#             the derived Secret; a later drill run continues each rotation)
 #             + the step limit of 260 + 10.
 #             The step limit is the sum of the fixed waits of the 15 tested
 #             classes, read from exit-test-rotation.sh: the operator and
@@ -172,7 +153,7 @@ permissions:
 # settle probe of up to 20 minutes) takes 30 to 40 minutes, and 40 + 345 =
 # 385 fits in the ceiling of 420.
 #
-# In a monthly run the up job can also continue an open key rotation (30
+# In a rotation run the up job can also continue an open key rotation (30
 # minutes), and 25 + 30 + 345 = 400 still fits in the ceiling of 420.
 jobs:
   up:
@@ -199,9 +180,9 @@ jobs:
       # (scripts/recreate-ec2.sh, var.git_revision). The teardown job records
       # the run commit and main in the summary ("Record the commits of the run").
       GITOPS_REF: ${{ github.sha }}
-      # Empty on the schedule, so the scheduled run uses the default type.
+      # Empty uses the default type of envs/drill.tfvars.
       INSTANCE_TYPE: ${{ inputs.instance_type }}
-      # Empty on the schedule, so the scheduled run keeps one node.
+      # Empty keeps one node.
       NODE_COUNT: ${{ inputs.node_count }}
     steps:
       - name: Checkout deploy
@@ -213,10 +194,9 @@ jobs:
           EVENT: ${{ github.event_name }}
           RESTORE_INPUT: ${{ inputs.restore }}
           ROTATION_INPUT: ${{ inputs.rotation }}
-          SCHEDULE: ${{ github.event.schedule }}
         run: |
           set -euo pipefail
-          scripts/drill-plan.sh "$EVENT" "$RESTORE_INPUT" "$(date -u +%u)" "$ROTATION_INPUT" "$SCHEDULE" | tee -a "$GITHUB_OUTPUT"
+          scripts/drill-plan.sh "$EVENT" "$RESTORE_INPUT" "$ROTATION_INPUT" | tee -a "$GITHUB_OUTPUT"
           echo "started=false" >> "$GITHUB_OUTPUT"
 
       # A type that is not on the list fails here, before a credential or
@@ -321,7 +301,7 @@ jobs:
           if-no-files-found: ignore
 
       # THE ACCESS KEY ROTATION OF THE DRILL IAM USERS (ADR-0083, row 24).
-      # The monthly rotation job starts it, and it takes longer than one run.
+      # The rotation job starts it, and it takes longer than one run.
       # Each run continues an open rotation on the cluster that the smoke
       # proved: the old key is deleted once AWS reports it unused since the
       # switch. A rotation that must wait more stops, and the next run goes
@@ -492,8 +472,8 @@ jobs:
           ref: ${{ steps.charts-tag.outputs.tag }}
           path: charts
 
-      # The monthly run starts a rotation of the access keys of the drill IAM
-      # users. The later daily runs finish it (the step "Continue an open
+      # The rotation run starts a rotation of the access keys of the drill IAM
+      # users. The later drill runs finish it (the step "Continue an open
       # access key rotation" of the up job). It runs BEFORE the credential
       # class test: that test rotates the seal key in the keyring of this
       # runner only, and substrate-rotate.sh reads the keyring from AWS
@@ -724,7 +704,7 @@ jobs:
             title="rotation: ${class} failed"
             if [ -z "$(gh issue list --repo "${GITHUB_REPOSITORY}" --state open --search "\"$title\" in:title" --json number --jq '.[0].number // empty')" ]; then
               gh issue create --repo "${GITHUB_REPOSITORY}" --label ready-for-agent --title "$title" \
-                --body "The monthly rotation test failed for **${class}**: ${RUN_URL}"$'\n\n'"Reason: ${reason}"$'\n\n'"The class is in \`credential-classes.yaml\`, and its test is in \`test/rotation/exit-test-rotation.sh\` (hosted#444). Fix the rotation path or the test, then dispatch \`drill\` with \`rotation: true\`."
+                --body "The rotation test failed for **${class}**: ${RUN_URL}"$'\n\n'"Reason: ${reason}"$'\n\n'"The class is in \`credential-classes.yaml\`, and its test is in \`test/rotation/exit-test-rotation.sh\` (hosted#444). Fix the rotation path or the test, then dispatch \`drill\` with \`rotation: true\`."
             fi
           done 3< "$results"
 

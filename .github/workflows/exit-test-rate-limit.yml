@@ -14,7 +14,7 @@
 # The scorecard reads the latest run of THIS workflow by name. It must stay
 # `exit-test-rate-limit.yml`.
 # ADR-0080: never on pull_request. This is an exit test — it measures state on
-# main for the launch scorecard and runs on push to main and on its schedule.
+# main for the launch scorecard and runs on push to main and on dispatch.
 # The merge gate is the ten-minute set in ci.yml.
 name: exit-test-rate-limit
 
@@ -22,9 +22,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-  schedule:
-    # Daily, so the scorecard's "last run" is never older than a day.
-    - cron: '40 5 * * *'
 
 permissions:
   contents: read

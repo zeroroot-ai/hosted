@@ -16,15 +16,13 @@
 # Both halves are asserted: an edge that answers 421 to everything is an
 # outage, one that never answers 421 leaves the bug in place.
 #
-# Runs on main and on a schedule, never on a PR (ADR-0080).
+# Runs on main and on dispatch, never on a PR (ADR-0080).
 name: exit-test-misdirected-authority
 
 on:
   workflow_dispatch:
   push:
     branches: [main]
-  schedule:
-    - cron: '55 5 * * *'
 
 permissions:
   contents: read

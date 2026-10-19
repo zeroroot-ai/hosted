@@ -32,8 +32,8 @@ def offenders(paths: list[pathlib.Path]) -> list[str]:
         triggers = on if isinstance(on, dict) else {k: None for k in (on or [])}
         if "pull_request" in triggers or "pull_request_target" in triggers:
             bad.append(str(p.relative_to(ROOT)))
-        if not any(k in triggers for k in ("push", "schedule", "workflow_dispatch")):
-            bad.append(f"{p.relative_to(ROOT)}: no push/schedule/dispatch trigger — nothing would ever run it")
+        if not any(k in triggers for k in ("push", "workflow_dispatch")):
+            bad.append(f"{p.relative_to(ROOT)}: no push or dispatch trigger, so nothing would ever run it")
     return bad
 
 
@@ -59,7 +59,7 @@ def main(argv: list[str]) -> int:
         for b in bad:
             print("   ", b)
         return 1
-    print(f"✅ {len(paths)} exit-test workflows run on main/schedule/dispatch only")
+    print(f"✅ {len(paths)} exit-test workflows run on main or dispatch only")
     return 0
 
 

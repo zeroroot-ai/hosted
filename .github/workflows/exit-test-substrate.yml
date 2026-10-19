@@ -11,7 +11,7 @@
 # root and its own proof.
 #
 # WHEN IT RUNS (ADR-0080):
-#   kind  on a daily schedule and on dispatch. The run makes its own kind
+#   kind  on dispatch with substrate kind. The run makes its own kind
 #         cluster with `make recreate ENV=kind`, so nothing has to stand first.
 #         kind has no substrate overlay in the chart: the run installs the CI
 #         rung and proves the contract through the kind node port.
@@ -32,10 +32,6 @@ on:
         required: true
         type: choice
         options: [kind, eks]
-  schedule:
-    # Daily, after the other kind exit tests. A scheduled run has no inputs,
-    # so SUBSTRATE falls back to kind below.
-    - cron: '50 6 * * *'
 
 permissions:
   contents: write
