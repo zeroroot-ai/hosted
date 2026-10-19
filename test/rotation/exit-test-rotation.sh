@@ -73,7 +73,9 @@ RESULTS="${2:-}"
 [[ "${ROTATION_RUN:-}" =~ ^[1-9][0-9]*$ ]] \
   || { echo "could not run: ROTATION_RUN is '${ROTATION_RUN:-}', not a run number" >&2; exit 2; }
 START="$(date +%s)"
-: > "$RESULTS"
+# A child run of one class (ROTATION_ONE_CLASS, see "the classes of the
+# list") must not empty the results of its parent.
+[ -n "${ROTATION_ONE_CLASS:-}" ] || : > "$RESULTS"
 
 # A class function prints its steps and returns non-zero with the reason in
 # $REASON. It never exits the script, so one failed class does not hide the
@@ -2299,9 +2301,14 @@ time_bound_of() {
     neo4j-password)            b=0 ;;
     platform-signing-keys)     b=$(( w + CG_SVID_SLACK_S )) ;;
     platform-generated-secrets) b=$(( 2 * w + SETTLE_S )) ;;
-    openfga-preshared-key)     b=$(( w + 2 * KUBELET_SYNC_WAIT + RESTART_WAIT_S )) ;;
+    # One kubelet wait: the rest after the second write is the only one that
+    # can fall after the deadline (review of fix/rotation-bound-followups).
+    openfga-preshared-key)     b=$(( w + KUBELET_SYNC_WAIT + RESTART_WAIT_S )) ;;
     zitadel-bringup-tokens)    b=$(( 2 * w + ROLLOUT_WAIT_S + RECONCILE_PASS_S )) ;;
-    keyring-generated-keys)    b=$(( 6 * (BAO_DELETE_WAIT_S + BAO_STATE_WAIT_S) + 3 * ROLLOUT_WAIT_S
+    # Six OpenBao restarts, two Velero restarts (the third restart only runs
+    # on the failure path, which then returns), the OpenBao rollout, two
+    # backups and the settle (review of hosted#807).
+    keyring-generated-keys)    b=$(( 6 * (BAO_DELETE_WAIT_S + BAO_STATE_WAIT_S) + 2 * ROLLOUT_WAIT_S
                                      + 2 * (VELERO_QUEUE_WAIT + VELERO_RUN_WAIT) + ROLLOUT_WAIT_S + SETTLE_S )) ;;
     setec-disk-signing-seed)   b=$(( 2 * SEED_WAIT + SANDBOX_WAIT )) ;;
     substrate-cloud-credentials) b=0 ;;
@@ -2309,6 +2316,57 @@ time_bound_of() {
     *) return 1 ;;
   esac
   printf '%s' $(( b + BOUND_SLACK_S ))
+}
+
+# --- one class, under a time limit -----------------------------------------
+# Each class runs in a child process of this script, under `timeout` at its
+# bound plus CLASS_TIMEOUT_MARGIN_S (review of hosted#807). A kubectl exec, get
+# or port-forward that hangs has no time limit of its own, so a hung class
+# would hold the step until GitHub stops it, and the later classes would get
+# no line. `timeout` stops the whole process group of the child, kubectl too.
+# The parent then writes the fail line of that class, and the next class
+# starts. The child writes its REASON to ROTATION_REASON_FILE.
+CLASS_TIMEOUT_MARGIN_S=60
+CLASS_KILL_AFTER_S=30
+DIAG_TIMEOUT_S=120
+if [ -n "${ROTATION_ONE_CLASS:-}" ]; then
+  REASON=""
+  rc=0; "$ROTATION_ONE_CLASS" ${ROTATION_ONE_ARG:+"$ROTATION_ONE_ARG"} || rc=$?
+  printf '%s' "$REASON" > "${ROTATION_REASON_FILE:?the parent names the reason file}"
+  exit "$rc"
+fi
+
+# run_class FN BOUND: run the class FN in a child under its time limit. Sets
+# REASON from the child, and returns the exit code of the child (124 or 137
+# when the limit stopped it).
+run_class() {
+  local reason_file rc=0
+  reason_file="$(mktemp)"
+  ROTATION_ONE_CLASS="$1" ROTATION_REASON_FILE="$reason_file" \
+    timeout --kill-after="$CLASS_KILL_AFTER_S" "$(( $2 + CLASS_TIMEOUT_MARGIN_S ))" \
+    bash "${BASH_SOURCE[0]}" "$CLASSES" "$RESULTS" || rc=$?
+  REASON="$(cat "$reason_file" 2>/dev/null || true)"
+  rm -f "$reason_file"
+  case "$rc" in
+    124|137)
+      REASON="the class did not finish within its bound of ${2} s and a margin of ${CLASS_TIMEOUT_MARGIN_S} s, so it was stopped: a call hung${REASON:+ (last reason: ${REASON})}" ;;
+  esac
+  return "$rc"
+}
+
+# run_diagnosis NAME: diagnose_failed_class NAME in a child under
+# DIAG_TIMEOUT_S. Its kubectl calls have no time limit of their own, and the
+# API that stopped a class can stop the diagnosis too (review of the branch
+# fix/rotation-bound-followups). The row of the class is written before it.
+run_diagnosis() {
+  local reason_file
+  reason_file="$(mktemp)"
+  ROTATION_ONE_CLASS=diagnose_failed_class ROTATION_ONE_ARG="$1" ROTATION_REASON_FILE="$reason_file" \
+    timeout --kill-after="$CLASS_KILL_AFTER_S" "$DIAG_TIMEOUT_S" \
+    bash "${BASH_SOURCE[0]}" "$CLASSES" "$RESULTS" \
+    || printf '    (the diagnostics of %s stopped after %s s)\n' "$1" "$DIAG_TIMEOUT_S"
+  rm -f "$reason_file"
+  return 0
 }
 
 # --- the classes of the list -------------------------------------------------
@@ -2347,6 +2405,10 @@ printf 'run %s of %s, a time budget of %s s, the bounds of this run %s s\n' \
 
 failed=()
 tested=0
+# The class that the time limit stopped, if one did. The classes after it
+# run on a cluster in an unknown state, so they do not start, and their rows
+# name that cause.
+stopped=""
 while IFS=$'\t' read -r -u 3 name status test run gap; do
   printf '▶ %s\n' "$name"
   REASON=""
@@ -2379,6 +2441,9 @@ while IFS=$'\t' read -r -u 3 name status test run gap; do
   elif [ -z "$run" ]; then
     REASON="not started: the class names no run of the rotation plan in ${CLASSES}"
     printf '    ✗ %s\n' "$REASON" >&2
+  elif [ -n "$stopped" ]; then
+    REASON="not started: the cluster state is unknown after ${stopped} was stopped"
+    printf '    ✗ %s\n' "$REASON" >&2
   elif [ "$bound" -gt "$left" ]; then
     REASON="not started: ${left} s of the time budget left, and the class needs up to ${bound} s"
     printf '    ✗ %s\n' "$REASON" >&2
@@ -2387,19 +2452,25 @@ while IFS=$'\t' read -r -u 3 name status test run gap; do
     # the run inside a class, the results still name that class as failed.
     printf '%s\tfail\t%s\n' "$name" "the test did not finish before the step limit" >> "$RESULTS"
     t0="$(date +%s)"
-    rc=0; "$fn" || rc=$?
+    rc=0; run_class "$fn" "$bound" || rc=$?
     took=$(( $(date +%s) - t0 ))
-    sed -i '$d' "$RESULTS"
-    [ "$rc" -eq 0 ] || diagnose_failed_class "$name"
+    case "$rc" in 124|137) stopped="$name" ;; esac
     if [ "$took" -gt "$bound" ]; then
       # A bound that is too small lets a later class start that cannot
       # finish. It fails the class, so the bound is raised.
       REASON="${REASON:+${REASON}. }the class took ${took} s, past its declared bound of ${bound} s: raise time_bound_of"
       printf '    ✗ %s\n' "$REASON" >&2
     elif [ "$rc" -eq 0 ]; then
+      sed -i '$d' "$RESULTS"
       printf '%s\tpass\t\n' "$name" >> "$RESULTS"
       continue
     fi
+    # The final row first, then the diagnosis, which can hang on the same API.
+    sed -i '$d' "$RESULTS"
+    printf '%s\tfail\t%s\n' "$name" "${REASON:-the test failed and gave no reason}" >> "$RESULTS"
+    failed+=("$name")
+    run_diagnosis "$name"
+    continue
   fi
   printf '%s\tfail\t%s\n' "$name" "${REASON:-the test failed and gave no reason}" >> "$RESULTS"
   failed+=("$name")
@@ -2418,17 +2489,32 @@ list="$(IFS=,; echo "${failed[*]}")"
 alert="$(jq -nc --arg c "$list" --arg r "${RUN_URL:-a local run}" \
   '[{labels:{alertname:"CredentialRotationFailed",severity:"warning",classes:$c},
      annotations:{summary:("Credential rotation failed for: " + $c + " (hosted#444)"),run:$r}}]')"
-am_pod="$(kubectl -n "$MON_NS" get pods -l app.kubernetes.io/name=alertmanager \
-  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)"
-if [ -n "$am_pod" ] && kubectl -n "$MON_NS" exec "$am_pod" -c alertmanager -- \
-     wget -qO- --header 'Content-Type: application/json' --post-data "$alert" \
-     http://localhost:9093/api/v2/alerts >/dev/null 2>&1; then
+# Each kubectl call of the alert runs under ALERT_TIMEOUT_S. A hung API would
+# otherwise hold the step after every class row is written, and the run
+# would end with no line for the alert (review of the branch
+# fix/rotation-bound-followups).
+ALERT_TIMEOUT_S=60
+rc=0
+am_pod="$(timeout --kill-after="$CLASS_KILL_AFTER_S" "$ALERT_TIMEOUT_S" \
+  kubectl -n "$MON_NS" get pods -l app.kubernetes.io/name=alertmanager \
+  -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)" || rc=$?
+if [ "$rc" -eq 0 ] && [ -n "$am_pod" ]; then
+  timeout --kill-after="$CLASS_KILL_AFTER_S" "$ALERT_TIMEOUT_S" \
+    kubectl -n "$MON_NS" exec "$am_pod" -c alertmanager -- \
+    wget -qO- --header 'Content-Type: application/json' --post-data "$alert" \
+    http://localhost:9093/api/v2/alerts >/dev/null 2>&1 || rc=$?
+fi
+if [ "$rc" -eq 0 ] && [ -n "$am_pod" ]; then
   printf 'sent the alert CredentialRotationFailed for: %s\n' "$list"
 else
   # The alert is half of the failure report. A run that could not send it
   # says so as a failure of its own, and drill.yml opens an issue for it.
-  printf '    ✗ could not send the alert CredentialRotationFailed: no Alertmanager answered in %s\n' "$MON_NS" >&2
-  printf 'alert CredentialRotationFailed\tfail\tno Alertmanager in the namespace %s took the alert for: %s\n' "$MON_NS" "$list" >> "$RESULTS"
+  case "$rc" in
+    124|137) why="the call to the Alertmanager in the namespace ${MON_NS} did not answer in ${ALERT_TIMEOUT_S} s, so it was stopped" ;;
+    *) why="no Alertmanager in the namespace ${MON_NS} took the alert" ;;
+  esac
+  printf '    ✗ could not send the alert CredentialRotationFailed: %s\n' "$why" >&2
+  printf 'alert CredentialRotationFailed\tfail\t%s for: %s\n' "$why" "$list" >> "$RESULTS"
 fi
 printf 'FAIL: %s of the credential classes failed: %s\n' "${#failed[@]}" "$list" >&2
 exit 1

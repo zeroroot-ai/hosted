@@ -143,8 +143,8 @@ permissions:
 #             for the alert and the results. Each tested class declares its
 #             worst-case time (time_bound_of in exit-test-rotation.sh, from
 #             the same constants as its waits). The bounds of the 15 classes
-#             add up to about 707 minutes, so the plan has 3 runs of at most
-#             250 minutes each: run 1 about 217, run 2 245, run 3 245. The
+#             add up to about 700 minutes, so the plan has 3 runs of at most
+#             250 minutes each: run 1 about 212, run 2 245, run 3 243. The
 #             plan is the field `run` of each class in credential-classes.yaml,
 #             and the script refuses to start when a run does not fit. A class
 #             whose bound does not fit in the time left is not started, and

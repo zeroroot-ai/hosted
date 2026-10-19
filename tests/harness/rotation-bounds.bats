@@ -64,13 +64,16 @@ NS=gibson RELEASE=gibson ROTATION_WAIT=1500 CHARTS_ROOT="$D/charts"
 '
 
 # took_within NAME: the class passed, and the fake time it took is not more
-# than the bound of NAME.
+# than the bound of NAME less BOUND_SLACK_S. The fake clock spends nothing on
+# reads, and the slack is for the reads of a real run, so the waits alone
+# must fit the bound without it (review of hosted#807).
 took_within() {
-  local took bound
+  local took bound slack
   took=$(( $(cat "$TMP/clock") - 100000 ))
   bound="$(bash -c '. "$1"; time_bound_of "$2"' _ "$TMP/src.sh" "$1")"
-  echo "took ${took} s, bound ${bound} s"
-  [ "$took" -le "$bound" ]
+  slack="$(bash -c '. "$1"; echo "$BOUND_SLACK_S"' _ "$TMP/src.sh")"
+  echo "took ${took} s, bound ${bound} s, slack ${slack} s"
+  [ "$slack" -gt 0 ] && [ "$took" -le $(( bound - slack )) ]
 }
 
 # --- openfga-preshared-key ---------------------------------------------------
@@ -128,6 +131,26 @@ EOPY
 @test "FAILING FIXTURE: an openfga bound of ROTATION_WAIT alone is shorter than the slowest path" {
   sed 's/^\(    openfga-preshared-key) *b=\).*$/\1$(( w )) ;;/' "$TEST" > "$TMP/cut.sh"
   run grep -c 'openfga-preshared-key) *b=$(( w )) ;;' "$TMP/cut.sh"
+  [ "$output" -eq 1 ]
+  fga_slow "$TMP/cut.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run took_within openfga-preshared-key
+  [ "$status" -ne 0 ]
+}
+
+@test "FAILING FIXTURE: an openfga bound with no restart of ext-authz is shorter than the slowest path" {
+  sed 's/^\(    openfga-preshared-key) *b=\).*$/\1$(( w + 2 * KUBELET_SYNC_WAIT )) ;;/' "$TEST" > "$TMP/cut.sh"
+  run grep -c 'openfga-preshared-key) *b=$(( w + 2 \* KUBELET_SYNC_WAIT )) ;;' "$TMP/cut.sh"
+  [ "$output" -eq 1 ]
+  fga_slow "$TMP/cut.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run took_within openfga-preshared-key
+  [ "$status" -ne 0 ]
+}
+
+@test "FAILING FIXTURE: an openfga bound with no kubelet wait is shorter than the slowest path" {
+  sed 's/^\(    openfga-preshared-key) *b=\).*$/\1$(( w + RESTART_WAIT_S )) ;;/' "$TEST" > "$TMP/cut.sh"
+  run grep -c 'openfga-preshared-key) *b=$(( w + RESTART_WAIT_S )) ;;' "$TMP/cut.sh"
   [ "$output" -eq 1 ]
   fga_slow "$TMP/cut.sh"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
@@ -254,8 +277,8 @@ gen_slow() {
 }
 
 @test "FAILING FIXTURE: a platform-generated-secrets bound with no settle is shorter than the slowest path" {
-  sed 's/^\(    platform-generated-secrets) *b=\).*$/\1$(( 2 * w - BOUND_SLACK_S )) ;;/' "$TEST" > "$TMP/cut.sh"
-  run grep -c 'platform-generated-secrets) *b=$(( 2 \* w - BOUND_SLACK_S )) ;;' "$TMP/cut.sh"
+  sed 's/^\(    platform-generated-secrets) *b=\).*$/\1$(( 2 * w )) ;;/' "$TEST" > "$TMP/cut.sh"
+  run grep -c 'platform-generated-secrets) *b=$(( 2 \* w )) ;;' "$TMP/cut.sh"
   [ "$output" -eq 1 ]
   gen_slow "$TMP/cut.sh"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
