@@ -6,7 +6,7 @@
 # UNDER ITS OWN NAME AND THE NAME OF THE PERSON WHO ENROLLED IT.
 #
 # The venue is the baseline install that charts exit-test-baseline-install.yml proves
-# daily: `make recreate ENV=kind` with the CI rung on a 2-vCPU runner, charts
+# `make recreate ENV=kind` with the CI rung on a 2-vCPU runner, charts
 # main, the seeded first admin. Each job below brings that install up the
 # same way (.github/actions/demo-enrollment-install, one recreate, no
 # overlay) and runs test/demo/exit-test-enrollment.sh, the demo script as a
@@ -58,7 +58,7 @@
 # proves nothing.
 #
 # ADR-0080: never on pull_request. It measures state on main and runs on push
-# to main and on its schedule. The merge gate is ci.yml, which runs the guards
+# to main and on dispatch. The merge gate is ci.yml, which runs the guards
 # through `make check`.
 name: exit-test-demo-enrollment
 
@@ -79,10 +79,6 @@ on:
       - 'Makefile'
       - '.github/workflows/exit-test-demo-enrollment.yml'
       - '.github/actions/demo-enrollment-install/**'
-  schedule:
-    # Daily, after the baseline install (04:00), the signup drill (04:30),
-    # chart signing (05:20) and the rate limit (05:40).
-    - cron: '0 6 * * *'
 
 concurrency:
   group: exit-test-demo-enrollment-${{ github.ref }}

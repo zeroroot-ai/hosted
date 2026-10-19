@@ -5,7 +5,7 @@
 # makes a correct citation here fail, and a retired ADR stays accepted here,
 # until the copy moves.
 #
-# It runs on main, daily and on dispatch, never on a pull request: a change in
+# It runs on main and on dispatch, never on a pull request: a change in
 # gibson must not make an unrelated hosted pull request red (ADR-0080). To fix
 # a red run, copy the file from gibson again in a pull request.
 name: adr-index-fresh
@@ -16,8 +16,6 @@ on:
     paths:
       - docs/adr-index.md
       - .github/workflows/adr-index-fresh.yml
-  schedule:
-    - cron: '30 5 * * *'
   workflow_dispatch:
 
 permissions:

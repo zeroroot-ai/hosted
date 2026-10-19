@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 #
-# drill-restore.bats: the scheduled drill does the restore half, and a
-# skipped restore cannot report green (hosted#443).
+# drill-restore.bats: a dispatched drill does the restore half that its input
+# selects, and a skipped restore cannot report green (hosted#443). A drill
+# runs only on dispatch (owner order, 2026-10-19).
 #
 # Offline. Each assertion uses `run` and `$status`.
 #
@@ -12,35 +13,27 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 PLAN="$REPO_ROOT/scripts/drill-plan.sh"
 WF="$REPO_ROOT/.github/workflows/drill.yml"
 
-@test "FAILING FIXTURE: a scheduled run on Sunday selects the restore half" {
-  run "$PLAN" schedule "" 7 "" "10 4 * * *"
+@test "FAILING FIXTURE: a dispatch with no restore input selects the restore half" {
+  run "$PLAN" workflow_dispatch "" ""
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "restore=true" ]
 }
 
-@test "a scheduled run on a weekday skips the restore half" {
-  for d in 1 2 3 4 5 6; do
-    run "$PLAN" schedule "" "$d" "" "10 4 * * *"
-    [ "$status" -eq 0 ]
-    [ "${lines[0]}" = "restore=false" ]
-  done
-}
-
-@test "a dispatch follows its input, and an empty input means the restore half" {
-  run "$PLAN" workflow_dispatch "" 3 "" ""
-  [ "$status" -eq 0 ]
-  [ "${lines[0]}" = "restore=true" ]
-  run "$PLAN" workflow_dispatch false 7 "" ""
+@test "a dispatch follows its restore input" {
+  run "$PLAN" workflow_dispatch false ""
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "restore=false" ]
+  run "$PLAN" workflow_dispatch true ""
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "restore=true" ]
 }
 
-@test "an unknown event or a bad weekday is refused, not read as a skip" {
-  run "$PLAN" push "" 7 "" ""
+@test "FAILING FIXTURE: a schedule, a push or a bad input is refused, not read as a skip" {
+  run "$PLAN" schedule "" ""
   [ "$status" -eq 2 ]
-  run "$PLAN" schedule "" 0 "" "10 4 * * *"
+  run "$PLAN" push "" ""
   [ "$status" -eq 2 ]
-  run "$PLAN" workflow_dispatch maybe 7 "" ""
+  run "$PLAN" workflow_dispatch maybe ""
   [ "$status" -eq 2 ]
 }
 
@@ -65,7 +58,7 @@ guard = {s.get("id"): s for s in jobs["teardown"]["steps"] if s.get("id")}["rest
 assert "always()" in guard["if"]
 assert "needs.up.outputs.restore_planned" in str(guard.get("env", {}))
 assert "needs.restore.outputs.restore" in str(guard.get("env", {}))
-# no step or job reads inputs.restore directly any more: a schedule has no inputs
+# no step or job reads inputs.restore directly: drill-plan.sh is the one reader
 for j in jobs.values():
     assert "inputs.restore" not in str(j.get("if", ""))
     for s in j.get("steps", []):

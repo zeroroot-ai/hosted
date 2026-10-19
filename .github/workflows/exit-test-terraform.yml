@@ -23,7 +23,7 @@
 #            worse than no guard, so the fixtures are the first thing that
 #            runs and the job fails if a bad plan is NOT rejected.
 #
-#   plan   — the exit test proper, on push to main / schedule / dispatch. It
+#   plan   — the exit test proper, on push to main / dispatch. It
 #            reads live state read-only and asserts the invariants against a
 #            genuine plan. It works with the estate torn down: an empty state
 #            plans as all-create, which is exactly the condition under which
@@ -57,7 +57,7 @@
 # (deploy#1746 replaced the stranded eks-acceptance role with it).
 # ----------------------------------------------------------------------------
 # ADR-0080: never on pull_request. This is an exit test — it measures state on
-# main for the launch scorecard and runs on push to main and on its schedule.
+# main for the launch scorecard and runs on push to main and on dispatch.
 # The merge gate is the ten-minute set in ci.yml.
 name: exit-test-terraform
 
@@ -79,10 +79,6 @@ on:
       # 1 keeps measuring one root at a time and never both by accident.
       - 'bootstrap/ec2/**'
       - '.github/workflows/exit-test-terraform.yml'
-  schedule:
-    # Daily, ahead of the 06:09Z launch scorecard run, so the board reads a
-    # fresh result rather than yesterday's.
-    - cron: '0 5 * * *'
 
 concurrency:
   group: exit-test-terraform-${{ github.event.inputs.env || 'staging' }}-${{ github.ref }}
@@ -183,8 +179,8 @@ jobs:
     # Not on pull_request. This job measures the state of the AWS workspace,
     # not the diff in the PR — so a PR would be marked red by live state it did
     # not cause, and a fork PR could never assume the role at all. The board
-    # reads "the named workflow's latest run on main", which is what push,
-    # schedule and dispatch give it. `guards` still runs on every PR.
+    # reads "the named workflow's latest run on main", which is what push and
+    # dispatch give it. `guards` still runs on every PR.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     timeout-minutes: 30

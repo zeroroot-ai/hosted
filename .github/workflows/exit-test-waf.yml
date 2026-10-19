@@ -12,7 +12,7 @@
 # The scorecard reads the latest run of THIS workflow by name
 # (zeroroot-ai/.github#301). It must stay `exit-test-waf.yml`.
 # ADR-0080: never on pull_request. This is an exit test — it measures state on
-# main for the launch scorecard and runs on push to main and on its schedule.
+# main for the launch scorecard and runs on push to main and on dispatch.
 # The merge gate is the ten-minute set in ci.yml.
 name: exit-test-waf
 
@@ -20,8 +20,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-  schedule:
-    - cron: '50 5 * * *'
 
 permissions:
   contents: read

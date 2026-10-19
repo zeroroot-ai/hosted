@@ -1266,11 +1266,12 @@ check-node-count: ## The drill environment accepts a node count of 1 or 2, and a
 	@bats tests/harness/node-count.bats
 check: check-node-count
 
-.PHONY: check-drill-freshness
-check-drill-freshness: ## The drill freshness check can fail: a stale run, no successful run, an empty list (hosted#427)
-	@printf "$(GREEN)▶$(NC) check-drill-freshness...\n"
-	@python3 scripts/check-drill-freshness.py --selftest
-check: check-drill-freshness
+.PHONY: check-no-schedule
+check-no-schedule: ## No workflow runs on a schedule (owner order, 2026-10-19)
+	@printf "$(GREEN)▶$(NC) check-no-schedule...\n"
+	@python3 scripts/check-no-schedule.py --selftest
+	@python3 scripts/check-no-schedule.py
+check: check-no-schedule
 
 .PHONY: check-no-test-fixtures
 check-no-test-fixtures: ## No environment turns on the exit-test runner identity or the daemon fixtures (gibson#1113)

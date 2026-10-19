@@ -1,7 +1,8 @@
 #!/usr/bin/env bats
 #
-# drill-rotation.bats: the monthly drill run does the rotation test and no
-# restore half, and a tested class that fails fails the run (hosted#444).
+# drill-rotation.bats: a dispatched drill does the rotation test that its
+# input selects, and a tested class that fails fails the run (hosted#444).
+# A drill runs only on dispatch (owner order, 2026-10-19).
 #
 # Offline. Each assertion uses `run` and `$status`. A stub kubectl stands in
 # for the cluster, so the test reaches no cluster.
@@ -13,8 +14,6 @@ REPO_ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 PLAN="$REPO_ROOT/scripts/drill-plan.sh"
 WF="$REPO_ROOT/.github/workflows/drill.yml"
 TEST="$REPO_ROOT/test/rotation/exit-test-rotation.sh"
-DAILY="10 4 * * *"
-MONTHLY="10 12 1 * *"
 
 setup() {
   TMP="$(mktemp -d)"
@@ -33,30 +32,18 @@ class() {
   [ -z "${4:-}" ] || printf '    gap: %s\n' "$4"
 }
 
-@test "FAILING FIXTURE: the monthly schedule selects the rotation test and no restore half" {
-  run "$PLAN" schedule "" 7 "" "$MONTHLY"
+@test "FAILING FIXTURE: a dispatch with no rotation input does no rotation test" {
+  run "$PLAN" workflow_dispatch "" ""
   [ "$status" -eq 0 ]
-  [ "${lines[0]}" = "restore=false" ]
-  [ "${lines[1]}" = "rotation=true" ]
-}
-
-@test "the daily schedule never selects the rotation test, on Sunday too" {
-  for d in 1 3 6 7; do
-    run "$PLAN" schedule "" "$d" "" "$DAILY"
-    [ "$status" -eq 0 ]
-    [ "${lines[1]}" = "rotation=false" ]
-  done
+  [ "${lines[1]}" = "rotation=false" ]
 }
 
 @test "a dispatch follows its rotation input, and a dispatch can run both halves" {
-  run "$PLAN" workflow_dispatch "" 3 "" ""
-  [ "$status" -eq 0 ]
-  [ "${lines[1]}" = "rotation=false" ]
-  run "$PLAN" workflow_dispatch "" 3 true ""
+  run "$PLAN" workflow_dispatch "" true
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "restore=true" ]
   [ "${lines[1]}" = "rotation=true" ]
-  run "$PLAN" workflow_dispatch false 3 true ""
+  run "$PLAN" workflow_dispatch false true
   [ "$status" -eq 0 ]
   [ "${lines[0]}" = "restore=false" ]
   [ "${lines[1]}" = "rotation=true" ]
@@ -76,26 +63,27 @@ PY
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
-@test "an unknown schedule or a bad rotation input is refused, not read as a skip" {
-  run "$PLAN" schedule "" 3 "" "0 0 * * *"
-  [ "$status" -eq 2 ]
-  run "$PLAN" schedule "" 3 "" ""
-  [ "$status" -eq 2 ]
-  run "$PLAN" workflow_dispatch "" 3 maybe ""
+@test "a bad rotation input is refused, not read as a skip" {
+  run "$PLAN" workflow_dispatch "" maybe
   [ "$status" -eq 2 ]
 }
 
-@test "drill.yml schedules exactly the two cron lines of drill-plan.sh" {
+@test "FAILING FIXTURE: drill.yml has no schedule, and its only trigger is a dispatch" {
   run python3 -c '
 import sys, yaml
 w = yaml.safe_load(open(sys.argv[1]))
 on = w.get("on", w.get(True))
-crons = sorted(s["cron"] for s in on["schedule"])
-assert crons == sorted(sys.argv[2:]), crons
-' "$WF" "$DAILY" "$MONTHLY"
-  [ "$status" -eq 0 ]
-  run grep -c -F -x -e "DAILY=\"$DAILY\"" -e "MONTHLY=\"$MONTHLY\"" "$PLAN"
-  [ "$output" = 2 ]
+assert sorted(on) == ["workflow_dispatch"], sorted(on)
+' "$WF"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  printf 'on:\n  workflow_dispatch:\n  schedule:\n    - cron: "10 4 * * *"\njobs: {}\n' > "$TMP/drill.yml"
+  run python3 -c '
+import sys, yaml
+w = yaml.safe_load(open(sys.argv[1]))
+on = w.get("on", w.get(True))
+assert sorted(on) == ["workflow_dispatch"], sorted(on)
+' "$TMP/drill.yml"
+  [ "$status" -ne 0 ]
 }
 
 @test "FAILING FIXTURE: a tested class whose test the script does not have fails the run" {
@@ -143,11 +131,11 @@ assert crons == sorted(sys.argv[2:]), crons
 import sys, yaml
 w = yaml.safe_load(open(sys.argv[1]))
 on = w.get("on", w.get(True))
-assert "pull_request" not in on and "schedule" in on, "the drill must run on a schedule and never on a pull request"
+assert "pull_request" not in on and "schedule" not in on, "the drill must run only on dispatch, never on a schedule or a pull request"
 jobs = w["jobs"]
 up = {s.get("id"): s for s in jobs["up"]["steps"] if s.get("id")}
 plan_env = str(up["plan"].get("env", {}))
-assert "ROTATION_INPUT" in plan_env and "github.event.schedule" in plan_env, "the plan step does not pass the rotation input and the schedule"
+assert "ROTATION_INPUT" in plan_env and "github.event.schedule" not in plan_env, "the plan step does not pass the rotation input, or still reads a schedule"
 rj = jobs["rotation"]
 assert "up" in rj["needs"], "the rotation job does not wait for the up job"
 assert "needs.up.outputs.rotation_planned == '"'"'true'"'"'" in rj["if"], rj["if"]

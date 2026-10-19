@@ -26,7 +26,7 @@
 # so), so the live check runs with no token: the same pull a customer makes.
 #
 # ADR-0080: never on pull_request. It measures state on main for the board and
-# runs on push to main and on its schedule. The merge gate is ci.yml, which
+# runs on push to main and on dispatch. The merge gate is ci.yml, which
 # runs the same guards through `make check` and `make check-promotion-pr`.
 name: exit-test-chart-signing
 
@@ -34,11 +34,6 @@ on:
   workflow_dispatch:
   push:
     branches: [main]
-  schedule:
-    # Daily, ahead of the launch scorecard run, staggered from the other
-    # hosted exit tests. This is also the trigger that catches a tag swap
-    # landing after a merge, which no push trigger can see.
-    - cron: '20 5 * * *'
 
 permissions:
   contents: read
