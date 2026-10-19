@@ -171,6 +171,43 @@ SH
   [ "$(grep -v '^\s*#' "$TEST" | grep -c 'scripts/baseline-set-secret.sh" "\$')" = 1 ]
 }
 
+# set_at_source --object writes all the properties of a key in one write, with
+# the JSON on stdin and the key as the one argument after --object (charts#738).
+@test "set_at_source --object gives the setter the object on stdin, in one call" {
+  python3 - "$TEST" "$TMP/set.sh" <<'EOPY'
+import re, sys
+m = re.search(r"^set_at_source\(\) \{.*?^\}\n", open(sys.argv[1]).read(), re.M | re.S)
+open(sys.argv[2], "w").write(m.group(0))
+EOPY
+  mkdir -p "$TMP/charts/scripts"
+  cat > "$TMP/charts/scripts/baseline-set-secret.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 2 ] && [ "$1" = --object ] || { echo "setter stub: $*" >&2; exit 2; }
+printf '%s ' "$2" >> "$REC"; cat >> "$REC"
+SH
+  chmod +x "$TMP/charts/scripts/baseline-set-secret.sh"
+  run env REC="$TMP/rec" D="$TMP" bash -c 'NS=gibson RELEASE=gibson CHARTS_ROOT="$D/charts"; . "$D/set.sh"; set_at_source --object gibson-cg-signing-key-previous "{\"kid\":\"\",\"key\":\"\"}"'
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$TMP/rec")" = 'gibson-cg-signing-key-previous {"kid":"","key":""}' ]
+}
+
+@test "FAILING FIXTURE: no slot of the CG signing key is written one property at a time" {
+  python3 - "$TEST" "$TMP/cg.sh" <<'EOPY'
+import re, sys
+m = re.search(r"^class_platform_signing_keys\(\) \{.*?^\}\n", open(sys.argv[1]).read(), re.M | re.S)
+open(sys.argv[2], "w").write(m.group(0))
+EOPY
+  one='set_at_source "\$\{CG_KEY_KEY\}-(next|previous)" (kid|key) '
+  run grep -cE "$one" "$TMP/cg.sh"
+  [ "$output" -eq 0 ] || { grep -nE "$one" "$TMP/cg.sh"; false; }
+  run grep -cF 'set_at_source --object "${CG_KEY_KEY}-' "$TMP/cg.sh"
+  [ "$output" -eq 2 ]
+  # The fixture: the form for charts 0.151.1 was two writes, and the check sees it.
+  printf '%s\n' '  set_at_source "${CG_KEY_KEY}-previous" kid "" && set_at_source "${CG_KEY_KEY}-previous" key ""' > "$TMP/old.sh"
+  run grep -cE "$one" "$TMP/old.sh"
+  [ "$output" -eq 1 ]
+}
+
 # --- consumer_on_role (hosted#591) -------------------------------------------
 # kubectl is a stub. STUB_PODS is the pod list, one "name start ip deleted|ready"
 # line each. pg_su models Postgres: STUB_SESSIONS sessions of v-new exist, all
