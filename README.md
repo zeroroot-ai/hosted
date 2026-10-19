@@ -41,7 +41,7 @@ hours.
 |---|---|---|
 | `up` | 345 min | recreate from nothing, the node ceiling, the smoke, the open access key rotation |
 | `restore` | 350 min | seed, preserve, restore, read each record back |
-| `rotation` | 250 min | rotate each credential class, and start the access key rotation (the monthly run) |
+| `rotation` | 250 min | rotate each credential class, and start the access key rotation (a rotation dispatch) |
 | `teardown` | 60 min | teardown, archive clear, report; always runs |
 
 The step limits in `up` are the fixed waits of the scripts plus 30 percent.

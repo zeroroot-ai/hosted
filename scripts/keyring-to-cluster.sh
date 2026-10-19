@@ -223,7 +223,7 @@ YAML
 STRIPE_SECRET_KEY_VALUE=""; STRIPE_PUBLISHABLE_KEY_VALUE=""; STRIPE_WEBHOOK_SECRET_VALUE=""
 
 # The time each vendor value was set (keyring.sh records KEYRING_SET_AT_<MEMBER>),
-# as one annotation per member on the keyring Secret. The monthly drill fails
+# as one annotation per member on the keyring Secret. The rotation drill fails
 # a value older than its lifetime (ADR-0171, row vendor-issued-inputs). A
 # member with no recorded time gets no annotation.
 set_at_annotations=()

@@ -7,7 +7,7 @@ the person who enrolled it.
 
 The script below is derived from the automated run, not from the design. The
 workflow `exit-test-demo-enrollment.yml` runs `test/demo/exit-test-enrollment.sh`
-on the baseline install on main and daily. Each step is a hard assertion. The
+on the baseline install on main and on dispatch. Each step is a hard assertion. The
 "Run record" section names the run this page was derived from and lists the
 steps that failed in it.
 
@@ -20,7 +20,7 @@ so, and the run never reads red for a key nobody has added (hosted#123).
 
 ## The venue
 
-The baseline install is what the charts `exit-test-baseline-install.yml` proves daily:
+The baseline install is what the charts `exit-test-baseline-install.yml` proves:
 `make recreate ENV=kind` with the CI rung, charts main, one seeded tenant, and
 a first admin created with no password (ADR-0093): the first-admin Job sends
 a one-time setup link, offline in this profile, to the Secret

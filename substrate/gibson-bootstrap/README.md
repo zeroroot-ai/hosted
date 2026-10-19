@@ -256,4 +256,4 @@ workstation runs the same version.
 - `scripts/preflight.sh`, `tests/harness/preflight.bats`: the verb and its
   failing fixtures.
 - `.github/workflows/exit-test-terraform.yml`: the `plan (staging)` job inits
-  against this bucket on `main` and daily.
+  against this bucket on `main` and on dispatch.

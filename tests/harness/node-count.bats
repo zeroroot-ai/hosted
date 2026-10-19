@@ -83,9 +83,9 @@ CHECK="$REPO_ROOT/scripts/check-node-count.sh"
   grep -q 'node_count:' "$REPO_ROOT/.github/workflows/drill.yml"
 }
 
-@test "the scheduled drill passes no count, so it keeps one node" {
-  # The input has a default of 1, and the schedule has no input, so the env
-  # value is empty and the verb uses the Terraform default.
+@test "a drill dispatch with no count keeps one node" {
+  # The input has a default of 1, so a dispatch that names no count keeps
+  # one node.
   grep -A6 '      node_count:' "$REPO_ROOT/.github/workflows/drill.yml" | grep -q 'default: "1"'
   grep -q 'NODE_COUNT: ${{ inputs.node_count }}' "$REPO_ROOT/.github/workflows/drill.yml"
 }

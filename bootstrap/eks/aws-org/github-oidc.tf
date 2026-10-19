@@ -311,7 +311,7 @@ resource "aws_iam_role_policy_attachment" "eks_bringup_admin" {
 # Those two are AdministratorAccess, where deploy#1198's "one merged PR reaches
 # admin" finding applies. A role that can only read does not need an approval
 # gate in front of it, and putting one there would mean the exit test cannot
-# run unattended — which defeats the point of measuring it on a schedule.
+# run unattended on main.
 #
 # job_workflow_ref still pins the single caller, so no other workflow in the
 # deploy repo can assume it.

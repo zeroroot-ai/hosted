@@ -1219,7 +1219,7 @@ check-acme-challenge: ## The EC2 teardown deletes the ACME challenge records a d
 check: check-acme-challenge
 
 .PHONY: check-drill-restore
-check-drill-restore: ## The scheduled drill selects the restore half, and a skipped restore cannot report green (hosted#443)
+check-drill-restore: ## A drill dispatch selects the restore half its input names, and a skipped restore cannot report green (hosted#443)
 	@printf "$(GREEN)▶$(NC) check-drill-restore...\n"
 	@bats tests/harness/drill-restore.bats
 check: check-drill-restore

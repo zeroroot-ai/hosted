@@ -2,7 +2,7 @@
 # template on the m8i nodes of staging (setec#239, setec#271).
 #
 # The CPU of a GitHub-hosted runner is never m8i, and Firecracker refuses the
-# m8i template on it, so the setec nightly run (exit-test-launcher) cannot run
+# m8i template on it, so the setec run (exit-test-launcher) cannot run
 # this scenario. The nodes of the rebuilt staging are m8i.
 #
 # The script is test/setec/exit-test-cpu-template.sh. It runs on the cluster
@@ -11,8 +11,8 @@
 # tag that the env runs and runs `make e2e-cpu-template` against the
 # installed setec. The suite installs nothing.
 #
-# WHEN IT RUNS (ADR-0080): on main each day against staging, and on dispatch
-# against a named env. Never on a pull request.
+# WHEN IT RUNS (ADR-0080): on dispatch, against the env it names. Never on a
+# pull request, and never on a schedule.
 name: exit-test-setec-cpu-template
 
 on:

@@ -20,7 +20,8 @@
 # This file pins what that tag is allowed to mean. If the registry resolves a
 # recorded version to a different digest, the tag moved, and
 # scripts/verify-chart-signature.sh fails. exit-test-chart-signing.yml runs it
-# on main and on a schedule, so a swap that lands after a merge is caught too.
+# on main and on dispatch. No workflow runs on a schedule, so a swap that lands
+# after a merge is caught by the next merge to main or by a dispatch.
 #
 # WHY NOT PIN THE DIGEST IN THE ARGO APPLICATION
 #
