@@ -99,7 +99,7 @@ arm_backup() {
   local archive="${3-platform-postgres-19700101000000}"
   local dir="$STATE/bucket/backups/velero/backups/$name"
   mkdir -p "$dir"
-  printf '{"kind":"Backup","metadata":{"name":"%s"}}' "$name" > "$dir/velero-backup.json"
+  printf '{"kind":"Backup","metadata":{"name":"%s"},"status":{"phase":"%s"}}' "$name" "${BACKUP_PHASE_IN_BUCKET:-Completed}" > "$dir/velero-backup.json"
   local build="$BATS_TEST_TMPDIR/build"
   rm -rf "$build"
   mkdir -p "$build/resources/backups.postgresql.cnpg.io/namespaces/gibson"
@@ -114,6 +114,10 @@ arm_backup() {
         > "$build/resources/backups.postgresql.cnpg.io/namespaces/gibson/$name.json"
     fi
   fi
+  # The backup canary pod, with its label (review of hosted#798).
+  mkdir -p "$build/resources/pods/namespaces/tenant-backup-canary"
+  printf '{"metadata":{"labels":{"gibson.zeroroot.ai/backup-canary":"true"}}}' \
+    > "$build/resources/pods/namespaces/tenant-backup-canary/backup-canary.json"
   tar -czf "$dir/$name.tar.gz" -C "$build" .
 }
 
@@ -303,6 +307,12 @@ for d in docs:
   *"get restore.velero.io/${BACKUP}-"*".status.phase"*) printf '%s' "${STUB_RESTORE_PHASE:-Completed}"; exit 0 ;;
   *"get restore.velero.io/${BACKUP}-"*) printf '{"phase":"%s"}' "${STUB_RESTORE_PHASE:-Completed}"; exit 0 ;;
   *"get restores.velero.io"*) printf '    restore x: Completed\n'; exit 0 ;;
+  # The tenant volume check of the pods Restore: the backup canary is the one
+  # tenant volume with data here, and the pods Restore moved it.
+  "-n velero get podvolumebackups.velero.io -l velero.io/backup-name=${BACKUP} -o jsonpath={range .items[*]}{.spec.pod.namespace}{\"\\t\"}{.spec.pod.name}{\"\\t\"}{.spec.volume}{\"\\t\"}{.status.phase}{\"\\t\"}{.status.progress.totalBytes}{\"\\n\"}{end}")
+    printf 'tenant-backup-canary\tbackup-canary\tdata\tCompleted\t65\n'; exit 0 ;;
+  "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=${BACKUP}-pods -o jsonpath={range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.phase}{\"\\n\"}{end}")
+    printf 'tenant-backup-canary/backup-canary/data Completed\n'; exit 0 ;;
   # The PodVolumeRestores that hold a Restore open: the ones with no phase at
   # all. The diagnosis has to name the POD behind each, which is the only
   # thing that explains why the node-agent never started it.
@@ -416,6 +426,14 @@ refute_cluster_touched() {
   run recreate RESTORE_FROM="$BACKUP" CLUSTER=restore-bats
   [ "$status" -ne 0 ]
   [[ "$output" == *"carries no CNPG Backup record"* ]]
+  refute_cluster_touched
+}
+
+@test "FAILING FIXTURE: a backup that Velero did not complete is refused before anything is touched (review of hosted#798)" {
+  BACKUP_PHASE_IN_BUCKET=PartiallyFailed arm_backup "$BACKUP" "20260101T000000"
+  run recreate RESTORE_FROM="$BACKUP" CLUSTER=restore-bats
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"backup '$BACKUP' is PartiallyFailed, not Completed"* ]] || { echo "$output"; false; }
   refute_cluster_touched
 }
 

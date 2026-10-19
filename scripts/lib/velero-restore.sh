@@ -149,6 +149,19 @@ resolve_named_backup() {
     prints the name it verified as its last line. Run without RESTORE_FROM to bootstrap
     every store empty."
   printf '  ✓ s3://%s/%s\n' "$BUCKET_NAME" "$BACKUP_KEY"
+  # Only a Completed backup is restored. A preserve teardown can die after
+  # Velero wrote a PartiallyFailed backup (a PodVolumeBackup failed), and that
+  # backup, its archive and its CNPG record stay in the bucket. A restore of
+  # it would bring the platform back with a tenant graph on an empty volume
+  # (review of hosted#798). Velero writes the final phase into this manifest
+  # when it finalizes the backup.
+  s3 s3 cp --no-progress "s3://${BUCKET_NAME}/${BACKUP_KEY}" "$WORK/velero-backup.json" >/dev/null \
+    || die "could not read the manifest s3://${BUCKET_NAME}/${BACKUP_KEY} of backup '${RESTORE_FROM}'"
+  BACKUP_PHASE="$(python3 -c 'import json,sys; print((json.load(open(sys.argv[1])).get("status") or {}).get("phase", ""))' "$WORK/velero-backup.json" 2>/dev/null)" \
+    || die "the manifest of backup '${RESTORE_FROM}' is not JSON"
+  [ "$BACKUP_PHASE" = Completed ] \
+    || die "backup '${RESTORE_FROM}' is ${BACKUP_PHASE:-<no phase>}, not Completed. Velero did not save all of it, so a restore of it could bring a store back empty. Restore a Completed backup"
+  printf '  ✓ backup %s is Completed\n' "$RESTORE_FROM"
 
   # The CNPG record, out of the archive Velero wrote next to that manifest.
   # The tarball carries object JSON only (volume data lives in the kopia
@@ -812,26 +825,90 @@ wait_tenant_namespace_labels() {
   done
 }
 
-# tenant_volumes_restored <restore> — each volume of a tenant namespace that
-# the backup holds bytes for has a Completed PodVolumeRestore in <restore>.
-# The pods of the gibson namespace are left out: Argo has made them before
-# the restore, so Velero finds them and moves no data, by design today. A
-# tenant pod that a StatefulSet made first is the case this catches: the
-# Restore then ends Completed, with the graph on an empty volume.
+# tenant_volumes_restored <restore> — each volume that the pods Restore must
+# bring back has a Completed PodVolumeRestore in <restore>. The volumes it
+# must bring back: each PodVolumeBackup with bytes of a pod in a tenant
+# namespace that the pods Restore selects. The pod labels come from the
+# backup archive that resolve_named_backup read ($WORK/backup.tar.gz), and the
+# selection is the one of the pods Restore: the label
+# statefulset.kubernetes.io/pod-name, or the label of the backup canary. A
+# name pattern is not the same set: a Job pod suffix can be all digits
+# (review of hosted#798). A tenant pod that a StatefulSet made first is the
+# case this catches: the Restore then ends Completed, with the graph on an
+# empty volume.
+#
+# A selected pod whose PodVolumeBackup is not Completed stops the restore:
+# the backup does not hold that volume, so nothing can restore it
+# (resolve_named_backup already refuses a backup that is not Completed).
+# Each tenant volume that the check leaves out is printed with its reason, so
+# the log shows what the restore does not bring back: a pod the pods Restore
+# does not select (a belief trainer Job pod that ran during the backup), or an
+# empty volume. The canary is always in the list, so a list with no volume at
+# all (no sync, a wrong label) is refused, not passed (hosted#793).
+#
+# The check reads only tenant-* namespaces, as the pods Restore excludes the
+# release namespace (hosted#796). A change that restores gibson volumes
+# (hosted#792) changes this prefix too.
 tenant_volumes_restored() {
-  local want got missing
-  want="$(kubectl -n "$VELERO_NS" get podvolumebackups.velero.io -l velero.io/backup-name="$RESTORE_FROM" \
-    -o jsonpath='{range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.progress.totalBytes}{"\n"}{end}')" \
+  local pvbs verdict want lost got missing
+  [ -s "$WORK/backup.tar.gz" ] \
+    || die "the archive of ${RESTORE_FROM} is not at ${WORK}/backup.tar.gz, so the pods of the backup and their labels are not known"
+  pvbs="$(kubectl -n "$VELERO_NS" get podvolumebackups.velero.io -l velero.io/backup-name="$RESTORE_FROM" \
+    -o jsonpath='{range .items[*]}{.spec.pod.namespace}{"\t"}{.spec.pod.name}{"\t"}{.spec.volume}{"\t"}{.status.phase}{"\t"}{.status.progress.totalBytes}{"\n"}{end}')" \
     || die "could not list the PodVolumeBackups of ${RESTORE_FROM}"
+  # One line per tenant volume: WANT <vol>, LOST <vol> <phase>, or
+  # SKIP <vol> <reason>.
+  verdict="$(printf '%s\n' "$pvbs" | python3 -c '
+import json, re, sys, tarfile
+keys = ("statefulset.kubernetes.io/pod-name", "gibson.zeroroot.ai/backup-canary")
+selected = set()
+with tarfile.open(sys.argv[1]) as t:
+    for m in t.getmembers():
+        g = re.search(r"(?:^|/)resources/pods/(?:[^/]+/)?namespaces/([^/]+)/([^/]+)\.json$", m.name)
+        if not g or not m.isfile():
+            continue
+        labels = (json.load(t.extractfile(m)).get("metadata") or {}).get("labels") or {}
+        if any(k in labels for k in keys):
+            selected.add((g.group(1), g.group(2)))
+for line in sys.stdin:
+    f = line.rstrip("\n").split("\t")
+    if len(f) != 5:
+        continue
+    ns, pod, vol, phase, size = f
+    if not ns.startswith("tenant-"):
+        continue
+    name = "%s/%s/%s" % (ns, pod, vol)
+    has_bytes = size.isdigit() and int(size) > 0
+    if (ns, pod) not in selected:
+        if has_bytes or phase != "Completed":
+            print("SKIP %s not-selected-by-the-pods-Restore(phase=%s,bytes=%s)" % (name, phase or "none", size or "none"))
+    elif phase != "Completed":
+        print("LOST %s %s" % (name, phase or "none"))
+    elif has_bytes:
+        print("WANT %s" % name)
+    else:
+        print("SKIP %s empty" % name)
+' "$WORK/backup.tar.gz")" \
+    || die "could not read the pods of ${RESTORE_FROM} from its archive"
+  printf '%s\n' "$verdict" | while read -r tag v why; do
+    [ "$tag" = SKIP ] || continue
+    printf '  - not checked: %s (%s)\n' "$v" "$why"
+  done
+  lost="$(printf '%s\n' "$verdict" | awk '$1 == "LOST" {printf "%s (%s) ", $2, $3}')"
+  [ -z "$lost" ] \
+    || die "backup ${RESTORE_FROM} did not save these volumes of pods that the restore brings back: ${lost}The backup does not hold them, so this backup cannot restore them"
+  want="$(printf '%s\n' "$verdict" | awk '$1 == "WANT" {print $2}')"
+  [ -n "$want" ] \
+    || die "the PodVolumeBackups of ${RESTORE_FROM} list no tenant volume with data that the pods Restore selects, not even the backup canary, so the data restore cannot be checked"
   got="$(kubectl -n "$VELERO_NS" get podvolumerestores.velero.io -l velero.io/restore-name="$1" \
     -o jsonpath='{range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.phase}{"\n"}{end}')" \
     || die "could not list the PodVolumeRestores of ${1}"
-  missing="$(printf '%s\n' "$want" | awk '$1 ~ /^tenant-/ && $2 + 0 > 0 { print $1 }' | while read -r v; do
+  missing="$(printf '%s\n' "$want" | while read -r v; do
     printf '%s\n' "$got" | grep -qxF "${v} Completed" || printf '%s ' "$v"
   done)"
   if [ -n "$missing" ]; then
     restore_diag "$1"
-    die "restore ${1} moved no data for: ${missing}The backup holds bytes for each one, and no PodVolumeRestore of this Restore completed for it. The pod was there before the Restore (a StatefulSet restored first makes it at once on an empty volume), or the selector left it out"
+    die "restore ${1} moved no data for: ${missing}The backup holds bytes for each one, and no PodVolumeRestore of this Restore completed for it. The pod was there before the Restore: a StatefulSet restored first makes it at once on an empty volume"
   fi
 }
 

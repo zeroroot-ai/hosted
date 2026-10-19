@@ -131,8 +131,24 @@ case "$args" in
   # The volumes the backup holds bytes for, and the PodVolumeRestores of the
   # pods Restore. STUB_TENANT_PVR_MISSING: the tenant graph volume has none
   # (its StatefulSet made the pod first, review of hosted#790).
-  "-n velero get podvolumebackups.velero.io -l velero.io/backup-name=$B -o jsonpath={range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.progress.totalBytes}{\"\\n\"}{end}")
-    printf 'tenant-acme/tenant-acme-neo4j-0/data 541016231\ntenant-acme/tenant-acme-neo4j-0/tmp \ngibson/gibson-redis-stack-0/data 169356\n'; exit 0 ;;
+  # The PodVolumeBackups, tab separated: namespace, pod, volume, phase, bytes.
+  # STUB_PVB_EMPTY: the list holds nothing (no sync, a wrong label). Also in
+  # the list: an empty volume, a trainer Job pod with bytes whose suffix is
+  # all digits (nothing restores it), and a Failed PodVolumeBackup of that
+  # Job pod (audit of the restore path, hosted#793, review of hosted#798).
+  # STUB_PVB_LOST: the PodVolumeBackup of a StatefulSet pod failed, so the
+  # backup does not hold a volume that the pods Restore brings back.
+  "-n velero get podvolumebackups.velero.io -l velero.io/backup-name=$B -o jsonpath={range .items[*]}{.spec.pod.namespace}{\"\\t\"}{.spec.pod.name}{\"\\t\"}{.spec.volume}{\"\\t\"}{.status.phase}{\"\\t\"}{.status.progress.totalBytes}{\"\\n\"}{end}")
+    [ -n "${STUB_PVB_EMPTY:-}" ] && exit 0
+    printf 'tenant-acme\ttenant-acme-neo4j-0\tdata\tCompleted\t541016231\n'
+    printf 'tenant-acme\ttenant-acme-neo4j-0\ttmp\tCompleted\t0\n'
+    printf 'tenant-acme\ttenant-acme-neo4j-0\tscratch\tCompleted\t\n'
+    printf 'gibson\tgibson-redis-stack-0\tdata\tCompleted\t169356\n'
+    printf 'tenant-acme\tbelief-trainer-29123-24577\twork\tCompleted\t4096\n'
+    printf 'tenant-acme\tbelief-trainer-29123-24577\tcache\tFailed\t1000\n'
+    [ -z "${STUB_PVB_LOST:-}" ] || printf 'tenant-acme\ttenant-acme-neo4j-1\tdata\tFailed\t1000\n'
+    printf 'tenant-backup-canary\tbackup-canary\tdata\tCompleted\t65\n'
+    exit 0 ;;
   "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=$B-pods -o jsonpath={range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.phase}{\"\\n\"}{end}")
     [ -n "${STUB_TENANT_PVR_MISSING:-}" ] || printf 'tenant-acme/tenant-acme-neo4j-0/data Completed\n'
     printf 'tenant-backup-canary/backup-canary/data Completed\n'; exit 0 ;;
@@ -192,6 +208,15 @@ unset GH_PAT
 HERE="$TREE/scripts"; REPO="$TREE"; WORK="$STATE/work"; mkdir -p "$WORK"
 SUBSTRATE_ENV="$STATE/substrate.env"; ENV_NAME="${DRIVE_ENV:-drill}"; NS=gibson; VELERO_NS=velero
 RESTORE_FROM="${1:-}"; RESTORE_TIMEOUT="${RESTORE_TIMEOUT:-30}"; GITOPS_PATH="gitops/envs/${ENV_NAME}"
+# The archive resolve_named_backup leaves in WORK: the pod objects and their
+# labels (review of hosted#798).
+pods="$WORK/archive/resources/pods/namespaces"
+mkdir -p "$pods/tenant-acme" "$pods/tenant-backup-canary"
+printf '{"metadata":{"labels":{"statefulset.kubernetes.io/pod-name":"tenant-acme-neo4j-0"}}}' > "$pods/tenant-acme/tenant-acme-neo4j-0.json"
+printf '{"metadata":{"labels":{"statefulset.kubernetes.io/pod-name":"tenant-acme-neo4j-1"}}}' > "$pods/tenant-acme/tenant-acme-neo4j-1.json"
+printf '{"metadata":{"labels":{"batch.kubernetes.io/job-name":"belief-trainer-29123"}}}' > "$pods/tenant-acme/belief-trainer-29123-24577.json"
+printf '{"metadata":{"labels":{"gibson.zeroroot.ai/backup-canary":"true"}}}' > "$pods/tenant-backup-canary/backup-canary.json"
+rm -f "$WORK/backup.tar.gz"; [ -n "${STUB_NO_ARCHIVE:-}" ] || tar -czf "$WORK/backup.tar.gz" -C "$WORK/archive" .
 TOOLHIVE_VERSION=0.12.1; KUBECONFIG_PATH="$STATE/kubeconfig"
 log() { printf 'LOG %s\n' "$*"; }
 die() { printf 'DIE %s\n' "$*" >&2; exit 1; }
@@ -386,8 +411,39 @@ PY
   [ "$status" -ne 0 ]
   assert_output_has "moved no data for: tenant-acme/tenant-acme-neo4j-0/data"
   # The gibson pods are made by Argo first, and an empty tmp volume needs none.
-  [[ "$output" != *"gibson/gibson-redis-stack-0/data"* ]]
-  [[ "$output" != *"tenant-acme-neo4j-0/tmp"* ]]
+  # The stop names only the volume with data. The empty one is listed as not
+  # checked, never as missing.
+  die_line="$(printf '%s\n' "$output" | grep 'moved no data for:')"
+  [[ "$die_line" != *"gibson/gibson-redis-stack-0/data"* ]]
+  [[ "$die_line" != *"tenant-acme-neo4j-0/tmp"* ]]
+  assert_output_has "not checked: tenant-acme/tenant-acme-neo4j-0/tmp (empty)"
+  [ -z "$(line_of "apply Restore $BACKUP-statefulsets")" ]
+}
+
+@test "FAILING FIXTURE: the tenant volume check selects by the labels in the backup archive, and names each volume it leaves out (hosted#793, review of hosted#798)" {
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  # Each tenant volume that the check leaves out is printed with its reason.
+  assert_output_has "not checked: tenant-acme/belief-trainer-29123-24577/work (not-selected-by-the-pods-Restore(phase=Completed,bytes=4096))"
+  assert_output_has "not checked: tenant-acme/belief-trainer-29123-24577/cache (not-selected-by-the-pods-Restore(phase=Failed,bytes=1000))"
+  assert_output_has "not checked: tenant-acme/tenant-acme-neo4j-0/tmp (empty)"
+  [[ "$output" != *"not checked: gibson/"* ]]
+  export STUB_PVB_EMPTY=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "list no tenant volume with data that the pods Restore selects, not even the backup canary"
+  unset STUB_PVB_EMPTY
+  export STUB_NO_ARCHIVE=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "so the pods of the backup and their labels are not known"
+}
+
+@test "FAILING FIXTURE: a failed PodVolumeBackup of a pod that the pods Restore brings back stops the restore (review of hosted#798)" {
+  export STUB_PVB_LOST=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "did not save these volumes of pods that the restore brings back: tenant-acme/tenant-acme-neo4j-1/data (Failed)"
   [ -z "$(line_of "apply Restore $BACKUP-statefulsets")" ]
 }
 
@@ -647,7 +703,7 @@ arm_backup() {
   prefix="$(python3 -c 'import sys,yaml; v=yaml.safe_load(open(sys.argv[1])) or {}; print(str((v.get("bucket") or {}).get("prefix") or "backups/velero").strip("/"))' "$TREE/gitops/envs/drill/gibson-velero-values.yaml")"
   dir="$STATE/bucket/$prefix/backups/$BACKUP"
   mkdir -p "$dir"
-  printf '{}' > "$dir/velero-backup.json"
+  printf '{"status":{"phase":"%s"}}' "${BACKUP_PHASE_IN_BUCKET:-Completed}" > "$dir/velero-backup.json"
   build="$BATS_TEST_TMPDIR/build/resources/backups.postgresql.cnpg.io/namespaces/gibson"
   mkdir -p "$build"
   printf '{"status":{"backupId":"%s","serverName":"%s"}}' "$BACKUP_ID" "$SOURCE_ARCHIVE" > "$build/$BACKUP.json"
@@ -663,6 +719,14 @@ arm_backup() {
   assert_output_has "the source archive s3://$GATE_BUCKET/backups/postgres/$SOURCE_ARCHIVE/ holds base backup $BACKUP_ID"
   assert_output_has "s3://$GATE_BUCKET/backups/postgres/$RESTORE_ARCHIVE/ is empty"
   assert_output_has "RESTORE_ARCHIVE_NAME=$RESTORE_ARCHIVE"
+}
+
+@test "FAILING FIXTURE: a restore of a backup that Velero did not complete is refused at the gate (review of hosted#798)" {
+  gate_setup; BACKUP_PHASE_IN_BUCKET=PartiallyFailed arm_backup
+  put "backups/postgres/$SOURCE_ARCHIVE/base/$BACKUP_ID/backup.info"
+  run "$BATS_TEST_TMPDIR/gate.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "backup '$BACKUP' is PartiallyFailed, not Completed"
 }
 
 @test "a fresh recreate still refuses the same full archive (row 3)" {
