@@ -20,7 +20,9 @@ name: drill
 #   teardown   MODE=wipe, then the account is asked what survived
 #
 # WHICH RUN DOES THE ROTATION TEST (hosted#444). scripts/drill-plan.sh decides
-# that too: a dispatch follows its `rotation` input. A rotation run is a
+# that too: a dispatch follows its `rotation` and `rotation_run` inputs. The
+# classes are split into runs by their time bounds (credential-classes.yaml),
+# and one dispatch does one run. A rotation run is a
 # bringup, the rotation test of each tested class of credential-classes.yaml,
 # and a teardown. With the restore half on too, the rotation job runs after
 # the restore job, on the restored cluster, never beside it. A tested
@@ -75,6 +77,12 @@ on:
         required: false
         type: boolean
         default: false
+      rotation_run:
+        description: "Which run of the rotation plan to do (the classes are split into runs by their time bounds, credential-classes.yaml). Run 1 also starts the access key rotation."
+        required: false
+        type: choice
+        options: ["1", "2", "3"]
+        default: "1"
       instance_type:
         description: "The instance type of the drill node. Empty uses the type of envs/drill.tfvars. A value must be on the list bootstrap/ec2/gibson/envs/drill.instance-types. An m8i type has nested virtualization, and the run then proves /dev/kvm on the node."
         required: false
@@ -122,21 +130,29 @@ permissions:
 #             waits are in the restore scripts, and the restore agent sets
 #             them from measured time (twice the measured time, at least 10
 #             minutes). The job limit is the ceiling of their sum.
-#   rotation  the rotation test, and the start of the access key rotation.
-#             345 minutes: 10 setup + 5 tools + the start of 60 (four users,
-#             each a Terraform apply, a restart of its readers and a wait of
-#             5 min for the new key in use, and for smtp up to 10 min for
-#             the derived Secret; a later drill run continues each rotation)
-#             + the step limit of 260 + 10.
-#             The step limit is the sum of the fixed waits of the 15 tested
-#             classes, read from exit-test-rotation.sh: the operator and
-#             sidecar passes, the grace before a revoke, the CronJob periods
-#             and each restart (about 240 min, with the two seed waits and the
-#             launcher boot of setec-disk-signing-seed), plus the typical time of
-#             keyring-generated-keys in the Velero queue (about 5 min for
-#             each of two backups). The worst case of that queue
-#             (VELERO_QUEUE_WAIT, 20 min, twice) passes the limit. A class
-#             that the limit stops keeps its "did not finish" line.
+#   rotation  the rotation test of one run of the plan, and, in run 1, the
+#             start of the access key rotation. 345 minutes: 10 setup + 5
+#             tools + the start of 60 (four users, each a Terraform apply, a
+#             restart of its readers and a wait of 5 min for the new key in
+#             use, and for smtp up to 10 min for the derived Secret; a later
+#             drill run continues each rotation) + the step limit of 260 + 10.
+#             THE TIME BUDGET (review of hosted#805). The step limit of 260
+#             minutes is the most GitHub gives, and a stop inside a class
+#             leaves the cluster half rotated. So the test has one budget,
+#             ROTATION_BUDGET_S = (260 - 10) x 60 = 15000 s, with 10 minutes
+#             for the alert and the results. Each tested class declares its
+#             worst-case time (time_bound_of in exit-test-rotation.sh, from
+#             the same constants as its waits). The bounds of the 15 classes
+#             add up to about 707 minutes, so the plan has 3 runs of at most
+#             250 minutes each: run 1 about 217, run 2 245, run 3 245. The
+#             plan is the field `run` of each class in credential-classes.yaml,
+#             and the script refuses to start when a run does not fit. A class
+#             whose bound does not fit in the time left is not started, and
+#             its line says so, so it still opens its issue. A person
+#             dispatches runs 1, 2 and 3 to rotate each class.
+#             tests/harness/rotation-budget.bats keeps the budget equal to
+#             the step limit, and the runs of the plan equal to ROTATION_RUNS
+#             of scripts/drill-plan.sh and the dispatch options below.
 #   teardown  60 minutes, `always()`. A teardown takes 1 to 3 minutes in the
 #             runs of 2026-10-11 and 2026-10-12.
 #
@@ -169,6 +185,7 @@ jobs:
       started: ${{ steps.start.outputs.started || steps.plan.outputs.started }}
       restore_planned: ${{ steps.plan.outputs.restore }}
       rotation_planned: ${{ steps.plan.outputs.rotation }}
+      rotation_run: ${{ steps.plan.outputs.rotation_run }}
       up: ${{ steps.up.outcome }}
       ceiling: ${{ steps.ceiling.outcome }}
       smoke: ${{ steps.smoke.outcome }}
@@ -194,9 +211,10 @@ jobs:
           EVENT: ${{ github.event_name }}
           RESTORE_INPUT: ${{ inputs.restore }}
           ROTATION_INPUT: ${{ inputs.rotation }}
+          RUN_INPUT: ${{ inputs.rotation_run }}
         run: |
           set -euo pipefail
-          scripts/drill-plan.sh "$EVENT" "$RESTORE_INPUT" "$ROTATION_INPUT" | tee -a "$GITHUB_OUTPUT"
+          scripts/drill-plan.sh "$EVENT" "$RESTORE_INPUT" "$ROTATION_INPUT" "$RUN_INPUT" | tee -a "$GITHUB_OUTPUT"
           echo "started=false" >> "$GITHUB_OUTPUT"
 
       # A type that is not on the list fails here, before a credential or
@@ -480,13 +498,14 @@ jobs:
       # (drill sweep row 42).
       - name: Start the access key rotation of the drill IAM users
         id: keys-start
-        if: ${{ steps.charts-tag.outcome == 'success' }}
+        # Run 1 starts it, and the later drill runs continue it.
+        if: ${{ steps.charts-tag.outcome == 'success' && needs.up.outputs.rotation_run == '1' }}
         timeout-minutes: 60
         env:
           WAIT_SECS: "300"
         run: scripts/drill-rotate-keys.sh start
 
-      - name: Rotate each credential class, and prove its path
+      - name: Rotate the classes of rotation run ${{ needs.up.outputs.rotation_run }}, and prove each path
         id: rotation
         # A failed key rotation does not skip the class test: they prove
         # different things.
@@ -501,6 +520,10 @@ jobs:
         env:
           CHARTS_ROOT: ${{ github.workspace }}/charts
           RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          # (timeout-minutes - 10) x 60: the time budget of the test (above).
+          # tests/harness/rotation-budget.bats keeps the two equal.
+          ROTATION_BUDGET_S: "15000"
+          ROTATION_RUN: ${{ needs.up.outputs.rotation_run }}
         # The keyring of this run's stage 0. The drill env lives for one run,
         # so the class keyring-generated-keys rotates its real seal key.
         run: |

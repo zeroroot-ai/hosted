@@ -137,3 +137,9 @@ PY
   run grep -c '^set ' "$TMP/events"
   [ "$output" -eq 0 ]
 }
+
+@test "FAILING FIXTURE: a Zitadel pod that started 10 s before the Secret change is not the restart, with the poll of 5 s (review of hosted#806)" {
+  mk_run "$TEST" "200" -10
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"no Zitadel pod is Ready that started after the new masterkey"* ]] || { echo "$output"; false; }
+}

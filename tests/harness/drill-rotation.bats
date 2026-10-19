@@ -17,6 +17,8 @@ TEST="$REPO_ROOT/test/rotation/exit-test-rotation.sh"
 
 setup() {
   TMP="$(mktemp -d)"
+  # The time budget and the run that drill.yml gives the test.
+  export ROTATION_BUDGET_S=15000 ROTATION_RUN=1
   mkdir -p "$TMP/bin"
   # Each kubectl call fails, as on a cluster that does not answer.
   printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/kubectl"
@@ -65,6 +67,23 @@ PY
 
 @test "a bad rotation input is refused, not read as a skip" {
   run "$PLAN" workflow_dispatch "" maybe
+  [ "$status" -eq 2 ]
+}
+
+@test "a rotation dispatch names its run, and an empty run input means run 1" {
+  run "$PLAN" workflow_dispatch false true ""
+  [ "$status" -eq 0 ]
+  [ "${lines[2]}" = "rotation_run=1" ]
+  run "$PLAN" workflow_dispatch false true 3
+  [ "${lines[2]}" = "rotation_run=3" ]
+  run "$PLAN" workflow_dispatch "" "" ""
+  [ "${lines[2]}" = "rotation_run=0" ]
+}
+
+@test "FAILING FIXTURE: a rotation run that is not 1 to ROTATION_RUNS is refused" {
+  run "$PLAN" workflow_dispatch false true 4
+  [ "$status" -eq 2 ]
+  run "$PLAN" workflow_dispatch false true x
   [ "$status" -eq 2 ]
 }
 

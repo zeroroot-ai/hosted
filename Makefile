@@ -1246,6 +1246,8 @@ check-rotation-classes: ## Each tested credential class has a rotation test, eac
 	@bats tests/harness/drill-rotation.bats
 	@bats tests/harness/rotation-helpers.bats
 	@bats tests/harness/rotation-waits.bats
+	@bats tests/harness/rotation-budget.bats
+	@bats tests/harness/rotation-bounds.bats
 check: check-rotation-classes
 
 .PHONY: check-spiffe-literal
