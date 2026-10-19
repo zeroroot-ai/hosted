@@ -18,10 +18,15 @@
 #      asserts; ext-authz is a live dependency the harness does not run, so
 #      that key is pinned by tests/ratelimit-service.bats and proven at
 #      bringup, not here.)
-#   4. FAIL-OPEN under the fuse: with the ratelimit container stopped, the
-#      over-quota client A gets 200 again, and Envoy's
-#      cluster.*.ratelimit.public_per_client.failure_mode_allowed counter is > 0 —
-#      the degradation is observable, not silent.
+#   4. D92, with the ratelimit container stopped. Both halves are asserted:
+#      - POST /signup FAILS CLOSED: 503 with no x-envoy-ratelimited. The
+#        stage 1 filter (stat_prefix public_signup, failure_mode_deny) judges
+#        it, and Envoy counts cluster.*.ratelimit.public_signup.error. The
+#        alert EdgeSignupQuotaFailingClosed reads that counter.
+#      - every other route FAILS OPEN: a GET /signup matches the catch-all
+#        route (app_catch_all, stage 0) and gets 200, and Envoy counts
+#        cluster.*.ratelimit.public_per_client.failure_mode_allowed.
+#      Each counter must be > 0, so neither half is silent.
 #
 # Usage: source <WORK>/env.sh && test/edge/exit-test-rate-limit.sh
 set -euo pipefail
@@ -80,24 +85,31 @@ done
 check "A register #$((REG+1)) is rate limited" "$(req $A POST /capabilitygrant/v1/register "$API_HOST")" "429 true"
 check "B register passes" "$(req $B POST /capabilitygrant/v1/register "$API_HOST")" "200 -"
 
-echo "4. fail-open under the fuse when the quota service is gone"
+echo "4. with the quota service gone, signup fails closed and other routes fail open (D92)"
 docker stop gibson-ratelimit >/dev/null
 sleep 2
-check "A POST passes with the service down (fail-open)" "$(req $A POST /signup)" "200 -"
+check "A POST /signup is refused with the service down (fail-closed)" "$(req $A POST /signup)" "503 -"
+check "A GET /signup passes with the service down (fail-open)" "$(req $A GET /signup)" "200 -"
 # Envoy files the filter's counters under the ROUTE'S upstream cluster:
-# cluster.<upstream>.ratelimit.<stat_prefix>.failure_mode_allowed. Sum them.
+# cluster.<upstream>.ratelimit.<stat_prefix>.<counter>. Sum them.
 # Read through /stats/prometheus: since charts#139 the admin interface binds
 # loopback and the pod-IP admin_probe listener forwards only /ready and
 # /stats/prometheus, so plain /stats answers nothing from here. The metric
 # carries the cluster and the stat prefix as labels when Envoy's tag
-# extraction applies, and as name segments when it does not; the match
+# extraction applies, and as name segments when it does not; each match
 # accepts both shapes and sums the last field.
-allowed="$(docker run --rm --network "$NET" "$CURL_IMAGE" -fs "http://$ADMIN/stats/prometheus" \
-  | awk '/^envoy_cluster.*failure_mode_allowed/ && /public_per_client/ {s+=$NF} END{print s+0}')"
+stats="$(docker run --rm --network "$NET" "$CURL_IMAGE" -fs "http://$ADMIN/stats/prometheus")"
+allowed="$(awk '/^envoy_cluster.*failure_mode_allowed/ && /public_per_client/ {s+=$NF} END{print s+0}' <<<"$stats")"
+refused="$(awk '/^envoy_cluster.*ratelimit.*_error/ && /public_signup/ {s+=$NF} END{print s+0}' <<<"$stats")"
 if [ "${allowed:-0}" -gt 0 ] 2>/dev/null; then
-  echo "  ✅ failure_mode_allowed=$allowed — the degradation is counted"
+  echo "  ✅ failure_mode_allowed=$allowed — the fail-open degradation is counted"
 else
   echo "  ❌ failure_mode_allowed='${allowed:-unset}' — fail-open left no trace"; fail=1
+fi
+if [ "${refused:-0}" -gt 0 ] 2>/dev/null; then
+  echo "  ✅ public_signup error=$refused — the fail-closed refusal is counted"
+else
+  echo "  ❌ public_signup error='${refused:-unset}' — the signup refusal left no trace"; fail=1
 fi
 docker start gibson-ratelimit >/dev/null
 
