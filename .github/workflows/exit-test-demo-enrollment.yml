@@ -92,6 +92,8 @@ concurrency:
 
 permissions:
   contents: read
+  # The GHCR pull token of the install is the job token (see Stage 0).
+  packages: read
 
 env:
   NS: gibson
@@ -139,7 +141,7 @@ jobs:
         uses: ./.github/actions/demo-enrollment-install
         with:
           charts_ref: ${{ inputs.charts_ref || 'main' }}
-          ghcr_pull_token: ${{ secrets.GHCR_RO_PAT }}
+          ghcr_pull_token: ${{ github.token }}
           github_token: ${{ github.token }}
           # dashboard#107 diagnostics only: a heap snapshot near the limit.
           overlay: demo
@@ -257,7 +259,7 @@ jobs:
         uses: ./.github/actions/demo-enrollment-install
         with:
           charts_ref: ${{ inputs.charts_ref || 'main' }}
-          ghcr_pull_token: ${{ secrets.GHCR_RO_PAT }}
+          ghcr_pull_token: ${{ github.token }}
           github_token: ${{ github.token }}
           adk_commit: ${{ env.ADK_COMMIT }}
 

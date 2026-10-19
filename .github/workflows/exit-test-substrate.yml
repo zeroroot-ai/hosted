@@ -156,12 +156,16 @@ jobs:
       # bucket the platform's Postgres archives to, plus relay, zone and
       # keyring, on the runner's kind Docker network. A cloud substrate brings
       # its own substrate.env (deploy#1742).
-      # The registry token becomes the keyring member GHCR_PULL_TOKEN
-      # (deploy#1732); the sidecar seeds ghcr-pull-secret from it.
+      # The registry token is the job's own GITHUB_TOKEN (packages: read).
+      # The public first-party images need none. The private billing images
+      # grant this repository read access in their package settings ("Manage
+      # Actions access"), so no long-lived PAT exists for them. The token
+      # becomes the keyring member GHCR_PULL_TOKEN; the sidecar seeds
+      # ghcr-pull-secret from it, and it ends with the job.
       - name: Stage 0 (make substrate ENV=kind, kind)
         if: env.SUBSTRATE == 'kind'
         env:
-          GHCR_PULL_TOKEN: ${{ secrets.GHCR_RO_PAT }}
+          GHCR_PULL_TOKEN: ${{ github.token }}
         run: SUBSTRATE_DIR="$RUNNER_TEMP/substrate" make substrate ENV=kind
 
       - name: Stand the platform up with the substrate overlay
