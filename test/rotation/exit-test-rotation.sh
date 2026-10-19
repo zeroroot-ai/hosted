@@ -1426,8 +1426,71 @@ zitadel_marker() {
     -c "SELECT marker FROM gibson_rotation.masterkey_marker WHERE id = 1" 2>/dev/null
 }
 
+# rotate_masterkey DEADLINE: the masterkey half of platform-generated-secrets.
+# Two reference points must come BEFORE the write of `next` (audit of the
+# drill path, 2026-10-19):
+#   - Zitadel accepts its admin PAT. The check ran after the write, and when
+#     it failed the class returned while the CronJob went on to rotate the
+#     masterkey and restart Zitadel under the next class. The check now waits
+#     for 200, so a Zitadel that is still restarting after the slot refresh
+#     is not read as a refusal.
+#   - The time the Secret still held the old masterkey. Reloader restarts
+#     Zitadel seconds after ESO writes the new masterkey. The class saw the
+#     new Secret up to 30 s later and then wanted a pod that started after
+#     that, which no pod did. The restart is now dated from the last read
+#     that still saw the old masterkey.
+rotate_masterkey() {
+  local deadline="$1" mk_old mk_new code t seen_old marker
+  until code="$(admin_pat_status)" && [ "$code" = 200 ]; do
+    [ "$(date +%s)" -lt "$deadline" ] \
+      || { miss "Zitadel answers ${code:-nothing} to its admin PAT before the masterkey rotation, not 200"; return 1; }
+    sleep 15
+  done
+  ok "Zitadel accepts its admin PAT before the masterkey rotation"
+  # No Zitadel rollout may still run at the write. The slot refresh above
+  # changes gibson-zitadel-system-key, and Reloader restarts Zitadel for it.
+  # The old pod answers 200 while the new one starts, and a slow new pod
+  # could start after the write and pass as the masterkey restart (review of
+  # hosted#806).
+  kubectl -n "$NS" rollout status deployment/"${RELEASE}-zitadel" \
+      --timeout="$(( deadline > $(date +%s) ? deadline - $(date +%s) : 1 ))s" >/dev/null \
+    || { miss "a rollout of ${RELEASE}-zitadel did not finish before the masterkey rotation"; return 1; }
+  mk_old="$(secret_value gibson-zitadel-masterkey masterkey)"; mask "$mk_old"
+  [ -n "$mk_old" ] || { miss "the Secret gibson-zitadel-masterkey holds no masterkey"; return 1; }
+  mk_new="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 43)"; mask "$mk_new"
+  seen_old="$(date +%s)"
+  set_at_source zitadel-masterkey next "$mk_new" || { miss "the write of the next masterkey failed"; return 1; }
+  ok "wrote the next masterkey at the source"
+  # t is taken before each read. When the read still sees the old masterkey,
+  # the change came after t, so each restart for it starts at t or later.
+  # The poll is short, so a pod that started just before the change is not
+  # inside the window.
+  while :; do
+    t="$(date +%s)"
+    [ "$(secret_value gibson-zitadel-masterkey masterkey)" != "${mk_new:0:32}" ] || break
+    seen_old="$t"
+    [ "$t" -lt "$deadline" ] || { miss "the CronJob did not move the next masterkey to value"; return 1; }
+    sleep 5
+  done
+  until zitadel_pods_after "$(( seen_old - 1 ))"; do
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "no Zitadel pod is Ready that started after the new masterkey"; return 1; }
+    sleep 15
+  done
+  until code="$(admin_pat_status)" && [ "$code" = 200 ]; do
+    [ "$(date +%s)" -lt "$deadline" ] \
+      || { miss "Zitadel on the new masterkey answers ${code:-nothing} to its admin PAT, not 200: it does not open its encryption keys"; return 1; }
+    sleep 15
+  done
+  marker="$(zitadel_marker)"
+  [ "$(mk_decrypt_text "$marker" "${mk_new:0:32}")" = gibson-zitadel-masterkey-marker-v1 ] \
+    || { miss "the masterkey marker does not open with the new masterkey"; return 1; }
+  [ "$(mk_decrypt_text "$marker" "${mk_old:0:32}")" != gibson-zitadel-masterkey-marker-v1 ] \
+    || { miss "the masterkey marker still opens with the old masterkey"; return 1; }
+  ok "Zitadel restarted on the new masterkey and opens its keys (admin PAT), and the marker no longer opens with the old one"
+}
+
 class_platform_generated_secrets() {
-  local work deadline old_user new_user other mk_old mk_new mk_at marker s_old s_new s_newer
+  local work deadline old_user new_user other s_old s_new s_newer
   [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
     || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao keys"; return 1; }
   work="$(mktemp -d)"; chmod 700 "$work"
@@ -1463,30 +1526,7 @@ class_platform_generated_secrets() {
   ok "Zitadel refuses the old System API key of ${old_user} after the refresh of its slot"
 
   # --- the masterkey ---
-  mk_old="$(secret_value gibson-zitadel-masterkey masterkey)"; mask "$mk_old"
-  mk_new="$(LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 43)"; mask "$mk_new"
-  set_at_source zitadel-masterkey next "$mk_new" || { miss "the write of the next masterkey failed"; rm -rf "$work"; return 1; }
-  ok "wrote the next masterkey at the source"
-  [ "$(admin_pat_status)" = 200 ] \
-    || { miss "Zitadel refuses its admin PAT before the masterkey rotation"; rm -rf "$work"; return 1; }
-  until [ "$(secret_value gibson-zitadel-masterkey masterkey)" = "${mk_new:0:32}" ]; do
-    [ "$(date +%s)" -lt "$deadline" ] || { miss "the CronJob did not move the next masterkey to value"; rm -rf "$work"; return 1; }
-    sleep 30
-  done
-  mk_at="$(date +%s)"
-  until zitadel_pods_after "$mk_at"; do
-    [ "$(date +%s)" -lt "$deadline" ] || { miss "no Zitadel pod is Ready that started after the new masterkey"; rm -rf "$work"; return 1; }
-    sleep 15
-  done
-  [ "$(admin_pat_status)" = 200 ] \
-    || { miss "Zitadel on the new masterkey refuses its admin PAT: it does not open its encryption keys"; rm -rf "$work"; return 1; }
-  marker="$(zitadel_marker)"
-  [ "$(mk_decrypt_text "$marker" "${mk_new:0:32}")" = gibson-zitadel-masterkey-marker-v1 ] \
-    || { miss "the masterkey marker does not open with the new masterkey"; rm -rf "$work"; return 1; }
-  [ "$(mk_decrypt_text "$marker" "${mk_old:0:32}")" != gibson-zitadel-masterkey-marker-v1 ] \
-    || { miss "the masterkey marker still opens with the old masterkey"; rm -rf "$work"; return 1; }
-  mk_old=""; mk_new=""
-  ok "Zitadel restarted on the new masterkey and opens its keys (admin PAT), and the marker no longer opens with the old one"
+  rotate_masterkey "$deadline" || { rm -rf "$work"; return 1; }
 
   # --- the session secret ---
   # A session made with a secret is accepted while the dashboard holds that

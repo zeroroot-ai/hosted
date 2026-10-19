@@ -1241,6 +1241,7 @@ check: check-velero-prefix
 check-rotation-classes: ## Each tested credential class has a rotation test, each test has a tested class, and the monthly drill run never does the restore half (hosted#444)
 	@printf "$(GREEN)▶$(NC) check-rotation-classes...\n"
 	@python3 scripts/check-rotation-classes.py --selftest
+	@bats tests/harness/rotation-masterkey.bats
 	@python3 scripts/check-rotation-classes.py
 	@bats tests/harness/drill-rotation.bats
 	@bats tests/harness/rotation-helpers.bats
