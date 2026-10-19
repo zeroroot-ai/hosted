@@ -419,3 +419,160 @@ EOPY
   run grep -c "$(printf '^neo4j-password\tfail\tnot started: the class names no run')" "$TMP/results.tsv"
   [ "$output" -eq 1 ] || { cat "$TMP/results.tsv"; false; }
 }
+
+# --- a hung call stops only its class (review of hosted#807) -----------------
+
+@test "FAILING FIXTURE: a class whose kubectl call hangs is stopped at its limit, gets a fail line, and the next class still starts" {
+  # The copy sits where the script sits, so it finds scripts/lib. Its
+  # neo4j-password bound is 5 s and its margin 1 s, so the test is short.
+  mkdir -p "$TMP/tree/test/rotation"
+  ln -s "$REPO_ROOT/scripts" "$TMP/tree/scripts"
+  sed -e 's/^\(    neo4j-password) *b=\).*$/\1-295 ;;/' -e 's/^CLASS_TIMEOUT_MARGIN_S=.*/CLASS_TIMEOUT_MARGIN_S=1/' \
+      -e 's/^CLASS_KILL_AFTER_S=.*/CLASS_KILL_AFTER_S=2/' "$TEST" > "$TMP/tree/test/rotation/hang.sh"
+  chmod +x "$TMP/tree/test/rotation/hang.sh"
+  run grep -c 'neo4j-password) *b=-295 ;;' "$TMP/tree/test/rotation/hang.sh"
+  [ "$output" -eq 1 ]
+  # The list of ExternalSecrets hangs. Every other call fails at once.
+  cat > "$TMP/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "get externalsecret -A -o json") echo "$$" > "$HANG_PID"; exec sleep 120 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$TMP/bin/kubectl"
+  mkdir -p "$TMP/charts/scripts" "$TMP/charts/helm/gibson-workloads/files"
+  printf '#!/bin/sh\n' > "$TMP/charts/scripts/baseline-set-secret.sh"; chmod +x "$TMP/charts/scripts/baseline-set-secret.sh"
+  : > "$TMP/charts/helm/gibson-workloads/files/openbao-seed-keys.txt"
+  list neo4j-password vendor-issued-inputs > "$TMP/classes.yaml"
+  cd "$REPO_ROOT"
+  t0=$SECONDS
+  PATH="$TMP/bin:$PATH" HANG_PID="$TMP/hang.pid" CHARTS_ROOT="$TMP/charts" ROTATION_BUDGET_S=15000 ROTATION_RUN=1 \
+    run "$TMP/tree/test/rotation/hang.sh" "$TMP/classes.yaml" "$TMP/results.tsv"
+  [ "$status" -eq 1 ]
+  [ $(( SECONDS - t0 )) -lt 60 ]
+  run grep -c "$(printf '^neo4j-password\tfail\tthe class did not finish within its bound of 5 s')" "$TMP/results.tsv"
+  [ "$output" -eq 1 ] || { cat "$TMP/results.tsv"; false; }
+  # The class after the stopped one does not start: the cluster state is
+  # unknown, and its row names that cause.
+  run grep -c "$(printf '^vendor-issued-inputs\tfail\tnot started: the cluster state is unknown after neo4j-password was stopped')" "$TMP/results.tsv"
+  [ "$output" -eq 1 ] || { cat "$TMP/results.tsv"; false; }
+  # The hung kubectl was stopped with its class (the same pid, exec'd).
+  [ -s "$TMP/hang.pid" ]
+  run kill -0 "$(cat "$TMP/hang.pid")"
+  [ "$status" -ne 0 ] || { echo "the hung kubectl still runs: $output"; false; }
+}
+
+
+@test "FAILING FIXTURE: a diagnosis whose get pods hangs is stopped, and the row of the class and of the next class are written" {
+  mkdir -p "$TMP/tree/test/rotation"
+  ln -s "$REPO_ROOT/scripts" "$TMP/tree/scripts"
+  sed -e 's/^DIAG_TIMEOUT_S=.*/DIAG_TIMEOUT_S=2/' -e 's/^CLASS_KILL_AFTER_S=.*/CLASS_KILL_AFTER_S=2/' "$TEST" > "$TMP/tree/test/rotation/diag.sh"
+  chmod +x "$TMP/tree/test/rotation/diag.sh"
+  run grep -c '^DIAG_TIMEOUT_S=2$' "$TMP/tree/test/rotation/diag.sh"
+  [ "$output" -eq 1 ]
+  # The pod list of the diagnosis hangs. Every other call fails at once.
+  cat > "$TMP/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-n gibson get pods --no-headers -o custom-columns="*) echo "$$" >> "$HANG_PID"; exec sleep 120 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$TMP/bin/kubectl"
+  # No CHARTS_ROOT: each class fails at once with a known reason.
+  list neo4j-password vendor-issued-inputs > "$TMP/classes.yaml"
+  cd "$REPO_ROOT"
+  t0=$SECONDS
+  PATH="$TMP/bin:$PATH" HANG_PID="$TMP/hang.pid" ROTATION_BUDGET_S=15000 ROTATION_RUN=1 \
+    run env -u CHARTS_ROOT "$TMP/tree/test/rotation/diag.sh" "$TMP/classes.yaml" "$TMP/results.tsv"
+  [ "$status" -eq 1 ]
+  [ $(( SECONDS - t0 )) -lt 60 ]
+  [[ "$output" == *"the diagnostics of neo4j-password stopped after 2 s"* ]] || { echo "$output"; false; }
+  run grep -c "$(printf '^neo4j-password\tfail\t')" "$TMP/results.tsv"
+  [ "$output" -eq 1 ] || { cat "$TMP/results.tsv"; false; }
+  run grep -c "$(printf '^vendor-issued-inputs\tfail\t')" "$TMP/results.tsv"
+  [ "$output" -eq 1 ] || { cat "$TMP/results.tsv"; false; }
+  for p in $(cat "$TMP/hang.pid"); do
+    run kill -0 "$p"
+    [ "$status" -ne 0 ]
+  done
+}
+
+@test "FAILING FIXTURE: the reason of a failed class travels from its child to its row" {
+  list neo4j-password > "$TMP/classes.yaml"
+  PATH="$TMP/bin:$PATH" ROTATION_BUDGET_S=15000 ROTATION_RUN=1 \
+    run env -u CHARTS_ROOT "$TEST" "$TMP/classes.yaml" "$TMP/results.tsv"
+  [ "$status" -eq 1 ]
+  run grep -c "$(printf '^neo4j-password\tfail\tCHARTS_ROOT holds no charts checkout, so the test cannot read the seed table$')" "$TMP/results.tsv"
+  [ "$output" -eq 1 ] || { cat "$TMP/results.tsv"; false; }
+}
+
+@test "FAILING FIXTURE: an alert call that hangs is stopped, and the alert gets its fail row" {
+  mkdir -p "$TMP/tree/test/rotation"
+  ln -s "$REPO_ROOT/scripts" "$TMP/tree/scripts"
+  sed -e 's/^ALERT_TIMEOUT_S=.*/ALERT_TIMEOUT_S=2/' -e 's/^CLASS_KILL_AFTER_S=.*/CLASS_KILL_AFTER_S=2/' \
+      -e 's/^DIAG_TIMEOUT_S=.*/DIAG_TIMEOUT_S=2/' "$TEST" > "$TMP/tree/test/rotation/alert.sh"
+  chmod +x "$TMP/tree/test/rotation/alert.sh"
+  run grep -c '^ALERT_TIMEOUT_S=2$' "$TMP/tree/test/rotation/alert.sh"
+  [ "$output" -eq 1 ]
+  # The pod list of the Alertmanager hangs. Every other call fails at once.
+  cat > "$TMP/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-n monitoring get pods -l app.kubernetes.io/name=alertmanager -o jsonpath={.items[0].metadata.name}")
+    echo "$$" > "$HANG_PID"; exec sleep 120 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$TMP/bin/kubectl"
+  list neo4j-password > "$TMP/classes.yaml"
+  cd "$REPO_ROOT"
+  t0=$SECONDS
+  PATH="$TMP/bin:$PATH" HANG_PID="$TMP/hang.pid" ROTATION_BUDGET_S=15000 ROTATION_RUN=1 \
+    run env -u CHARTS_ROOT "$TMP/tree/test/rotation/alert.sh" "$TMP/classes.yaml" "$TMP/results.tsv"
+  [ "$status" -eq 1 ]
+  [ $(( SECONDS - t0 )) -lt 60 ]
+  run grep -c "$(printf '^alert CredentialRotationFailed\tfail\tthe call to the Alertmanager in the namespace monitoring did not answer in 2 s')" "$TMP/results.tsv"
+  [ "$output" -eq 1 ] || { cat "$TMP/results.tsv"; false; }
+  [ -s "$TMP/hang.pid" ]
+  run kill -0 "$(cat "$TMP/hang.pid")"
+  [ "$status" -ne 0 ]
+}
+
+@test "FAILING FIXTURE: an alert exec that hangs after the pod list answers is stopped, and the alert gets its fail row" {
+  mkdir -p "$TMP/tree/test/rotation"
+  ln -s "$REPO_ROOT/scripts" "$TMP/tree/scripts"
+  sed -e 's/^ALERT_TIMEOUT_S=.*/ALERT_TIMEOUT_S=2/' -e 's/^CLASS_KILL_AFTER_S=.*/CLASS_KILL_AFTER_S=2/' \
+      -e 's/^DIAG_TIMEOUT_S=.*/DIAG_TIMEOUT_S=2/' "${ALERT_SCRIPT:-$TEST}" > "$TMP/tree/test/rotation/alert.sh"
+  # ALERT_SCRIPT: a copy of the script to test in place of it, for a
+  # mutation run (the exec with no timeout fails this test).
+  chmod +x "$TMP/tree/test/rotation/alert.sh"
+  run grep -c '^ALERT_TIMEOUT_S=2$' "$TMP/tree/test/rotation/alert.sh"
+  [ "$output" -eq 1 ]
+  # The pod list answers. The exec of wget in the Alertmanager hangs. Every
+  # other call fails at once.
+  cat > "$TMP/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-n monitoring get pods -l app.kubernetes.io/name=alertmanager -o jsonpath={.items[0].metadata.name}")
+    printf 'alertmanager-0' ;;
+  "-n monitoring exec alertmanager-0 -c alertmanager -- wget "*)
+    echo "$$" > "$HANG_PID"; exec sleep 120 ;;
+  *) exit 1 ;;
+esac
+SH
+  chmod +x "$TMP/bin/kubectl"
+  list neo4j-password > "$TMP/classes.yaml"
+  cd "$REPO_ROOT"
+  t0=$SECONDS
+  PATH="$TMP/bin:$PATH" HANG_PID="$TMP/hang.pid" ROTATION_BUDGET_S=15000 ROTATION_RUN=1 \
+    run timeout 60 env -u CHARTS_ROOT "$TMP/tree/test/rotation/alert.sh" "$TMP/classes.yaml" "$TMP/results.tsv"
+  [ "$status" -eq 1 ] || { echo "status $status after $(( SECONDS - t0 )) s"; false; }
+  [ $(( SECONDS - t0 )) -lt 60 ]
+  [ -s "$TMP/hang.pid" ]
+  run grep -c "$(printf '^alert CredentialRotationFailed\tfail\tthe call to the Alertmanager in the namespace monitoring did not answer in 2 s')" "$TMP/results.tsv"
+  [ "$output" -eq 1 ] || { cat "$TMP/results.tsv"; false; }
+  run kill -0 "$(cat "$TMP/hang.pid")"
+  [ "$status" -ne 0 ]
+}

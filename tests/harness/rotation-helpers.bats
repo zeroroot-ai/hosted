@@ -674,6 +674,10 @@ SH
   [ "${lines[-1]}" = after ]
 }
 
-@test "FAILING FIXTURE: a failed class runs diagnose_failed_class" {
-  grep -A3 'sed -i .\$d. "\$RESULTS"$' "$TEST" | grep -q 'diagnose_failed_class "\$name"'
+@test "FAILING FIXTURE: a failed class runs diagnose_failed_class, after its row, under a time limit" {
+  # The row of the failed class comes right before the diagnosis.
+  grep -B3 '^    run_diagnosis "\$name"$' "$TEST" | grep -q "printf '%s\\\\tfail\\\\t%s\\\\n' \"\$name\""
+  # The diagnosis runs in a child under timeout.
+  grep -A3 '^run_diagnosis() {' "$TEST" | grep -q 'ROTATION_ONE_CLASS=diagnose_failed_class'
+  grep -A6 '^run_diagnosis() {' "$TEST" | grep -q 'timeout --kill-after="\$CLASS_KILL_AFTER_S" "\$DIAG_TIMEOUT_S"'
 }
