@@ -4,7 +4,7 @@
 #
 # Run it on a running env through the SSM forward:
 #   make with-cluster ENV=drill CMD='test/rotation/exit-test-rotation.sh credential-classes.yaml <results.tsv>'
-# drill.yml does that on its monthly rotation run.
+# drill.yml does that on a rotation dispatch (inputs rotation and rotation_run).
 #
 # The list is credential-classes.yaml. For each class on it:
 #   status: tested   the script calls class_<test> (dashes become
@@ -51,11 +51,28 @@ DAEMON_STS="${DAEMON_STS:-$(kubectl -n "$NS" get statefulset -l app.kubernetes.i
   -o jsonpath='{.items[0].metadata.name}' 2>/dev/null || true)}"
 DAEMON_STS="${DAEMON_STS:-${RELEASE}-gibson-workloads}"
 ROTATION_WAIT="${ROTATION_WAIT:-1500}"
+# The named waits of the classes. Each class declares its time bound from the
+# same names (time_bound_of), so a wait and the bound cannot drift apart.
+CHECK_ROLLOUT_S=60        # a rollout status that only checks a ready workload
+ROLLOUT_WAIT_S=300        # a rollout status that waits for a restart
+RESTART_WAIT_S=300        # restart_pods of ext-authz after a TLS or key change
+EXT_AUTHZ_RESTART_WAIT_S=420  # restart_pods of ext-authz that waits for its registry fetch
+RECONCILE_PASS_S=360      # one full reconcile of the platform-operator (every 5 minutes)
+SETTLE_S=120              # the callers settle after the last restart
+PG_ROLLOUT_S=600          # the most one consumer may take to roll onto a new login role
 
 CLASSES="${1:-}"
 RESULTS="${2:-}"
 [ -n "$CLASSES" ] && [ -n "$RESULTS" ] || { echo "usage: exit-test-rotation.sh <credential-classes.yaml> <results.tsv>" >&2; exit 2; }
 [ -s "$CLASSES" ] || { echo "could not run: no class list at ${CLASSES}" >&2; exit 2; }
+# The time budget of this step, and which run of the plan this is (see "the
+# time budget" below). drill.yml sets both. No default: a run with no budget
+# could be stopped inside a class.
+[[ "${ROTATION_BUDGET_S:-}" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "could not run: ROTATION_BUDGET_S is '${ROTATION_BUDGET_S:-}', not a number of seconds" >&2; exit 2; }
+[[ "${ROTATION_RUN:-}" =~ ^[1-9][0-9]*$ ]] \
+  || { echo "could not run: ROTATION_RUN is '${ROTATION_RUN:-}', not a run number" >&2; exit 2; }
+START="$(date +%s)"
 : > "$RESULTS"
 
 # A class function prints its steps and returns non-zero with the reason in
@@ -99,22 +116,40 @@ redis_cli() {
 # <release>-redis-rotation, which restarts the redis clients by a pod delete
 # and then removes the old password from the ACL.
 
-# redis_rotation_wait: the seconds the class waits for the CronJob to finish
-# one rotation. The CronJob ticks each minute, and its Job may run for
-# activeDeadlineSeconds. A fixed wait of 1500 s was shorter than that limit of
-# 1800 s, so a slow but correct rotation failed the class, and the CronJob
-# then went on restarting pods under the next class (audit of 2026-10-19).
-# The wait is the limit of the Job, one tick, and 120 s for ESO to write the
-# Secret. No limit on the CronJob is an error, never a default.
+# duration_s DURATION: the seconds of a Go duration such as 60s, 1m or 1h0m0s,
+# or nothing for a value that is not one.
+duration_s() {
+  python3 -c '
+import re, sys
+v = sys.argv[1]
+parts = re.findall(r"(\d+)(h|m|s)", v)
+if not parts or "".join(n + u for n, u in parts) != v:
+    sys.exit(1)
+print(sum(int(n) * {"h": 3600, "m": 60, "s": 1}[u] for n, u in parts))' "$1" 2>/dev/null
+}
+
+# redis_rotation_wait EXTERNALSECRET: the seconds the class waits for the
+# CronJob to finish one rotation. The CronJob ticks each minute, and its Job
+# may run for activeDeadlineSeconds. A fixed wait of 1500 s was shorter than
+# that limit of 1800 s, so a slow but correct rotation failed the class, and
+# the CronJob then went on restarting pods under the next class (audit of
+# 2026-10-19). The wait is the limit of the Job, one tick, and two refresh
+# intervals of the ExternalSecret that writes the password (review of
+# hosted#805). No limit and no interval are errors, never a default.
 REDIS_TICK_S=60
-REDIS_ESO_S=120
 redis_rotation_wait() {
-  local limit
+  local limit every
   limit="$(kubectl -n "$NS" get cronjob "${RELEASE}-redis-rotation" \
     -o jsonpath='{.spec.jobTemplate.spec.activeDeadlineSeconds}' 2>/dev/null)" || limit=""
   [[ "$limit" =~ ^[0-9]+$ ]] && [ "$limit" -gt 0 ] || return 1
-  printf '%s' $(( limit + REDIS_TICK_S + REDIS_ESO_S ))
+  every="$(kubectl -n "$NS" get externalsecret "$1" -o jsonpath='{.spec.refreshInterval}' 2>/dev/null)" || every=""
+  every="$(duration_s "$every")" && [ "${every:-0}" -gt 0 ] || return 1
+  printf '%s' $(( limit + REDIS_TICK_S + 2 * every ))
 }
+# The longest wait that the time bound of the class allows: the Job limit and
+# the refresh interval of charts 0.151.1. A chart that raises either one
+# changes this line, and the class refuses a longer wait before it starts.
+REDIS_WAIT_MAX_S=$(( 1800 + REDIS_TICK_S + 2 * 60 ))
 
 class_redis_password() {
   local es secret key state pod old new rv0 rv last start ips clients ip
@@ -130,8 +165,10 @@ class_redis_password() {
   kubectl -n "$NS" get secret "$state" >/dev/null 2>&1 \
     || { miss "the rotation CronJob has not recorded its first state (${state}), so it would not see a rotation"; return 1; }
   local wait_s
-  wait_s="$(redis_rotation_wait)" \
-    || { miss "the CronJob ${RELEASE}-redis-rotation has no Job time limit (activeDeadlineSeconds), so the class cannot know how long a rotation may take"; return 1; }
+  wait_s="$(redis_rotation_wait "$es")" \
+    || { miss "the CronJob ${RELEASE}-redis-rotation has no Job time limit (activeDeadlineSeconds), or the ExternalSecret ${es} has no refresh interval, so the class cannot know how long a rotation may take"; return 1; }
+  [ "$wait_s" -le "$REDIS_WAIT_MAX_S" ] \
+    || { miss "a rotation may take ${wait_s}s, past the ${REDIS_WAIT_MAX_S}s of the time bound of the class: the chart raised the Job limit or the refresh interval, so raise REDIS_WAIT_MAX_S"; return 1; }
 
   key="$(kubectl -n "$NS" get externalsecret "$es" -o json | jq -r '(.spec.target.template.data // {}) | keys[0] // empty')"
   [ -n "$key" ] || { miss "the ExternalSecret ${es} names no key of the Secret ${secret}"; return 1; }
@@ -177,7 +214,7 @@ class_redis_password() {
 
   # 4. The caller: each daemon pod started after the rotation, is Ready, and
   #    holds an authenticated connection to redis-stack.
-  kubectl -n "$NS" rollout status statefulset/"$DAEMON_STS" --timeout=60s >/dev/null \
+  kubectl -n "$NS" rollout status statefulset/"$DAEMON_STS" --timeout="${CHECK_ROLLOUT_S}s" >/dev/null \
     || { miss "the daemon StatefulSet ${DAEMON_STS} is not ready after the rotation"; return 1; }
   local sel
   sel="$(kubectl -n "$NS" get statefulset "$DAEMON_STS" -o json | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
@@ -195,7 +232,7 @@ class_redis_password() {
   #    (charts#528): the tenant-operator, ext-authz and ratelimit.
   local d new_pods
   for d in gibson-tenant-operator gibson-ext-authz gibson-ratelimit; do
-    kubectl -n "$NS" rollout status deployment/"$d" --timeout=60s >/dev/null \
+    kubectl -n "$NS" rollout status deployment/"$d" --timeout="${CHECK_ROLLOUT_S}s" >/dev/null \
       || { miss "${d} is not ready after the rotation"; return 1; }
     sel="$(kubectl -n "$NS" get deployment "$d" -o json | jq -r '.spec.selector.matchLabels | to_entries | map("\(.key)=\(.value)") | join(",")')"
     new_pods="$(kubectl -n "$NS" get pods -l "$sel" -o json | jq -r --arg t "$start" \
@@ -375,7 +412,7 @@ class_component_tls() {
     #    working TLS client today: the Prometheus scrape of both is broken
     #    (charts#543), so the listener half above is their proof.
     if [ "$port" = 8080 ]; then
-      restart_pods "$NS" deployment/"${RELEASE}-ext-authz" 300 \
+      restart_pods "$NS" deployment/"${RELEASE}-ext-authz" "$RESTART_WAIT_S" \
         || { miss "ext-authz is not ready after a restart, so its TLS call to OpenFGA fails with the new certificate"; rm -f "$cafile"; return 1; }
       ok "a new ext-authz pod is ready, so its TLS call to OpenFGA works with the new certificate"
     fi
@@ -429,7 +466,7 @@ bundle_skis() {
 # new ext-authz pod fetches its registry from the daemon over SPIFFE mTLS at
 # start, and exits when the fetch fails.
 ext_authz_restarts_ready() {
-  restart_pods "$NS" deployment/"${RELEASE}-ext-authz" 420
+  restart_pods "$NS" deployment/"${RELEASE}-ext-authz" "$EXT_AUTHZ_RESTART_WAIT_S"
 }
 
 # spire_bundle FILE: the X.509 roots of the trust bundle, as PEM.
@@ -620,7 +657,7 @@ class_openbao_service_tokens() {
     [ "$st" = ok ] || { miss "OpenBao does not accept the new token of ${s} (${st})"; return 1; }
     ok "${s} holds a new token that OpenBao accepts"
   done
-  kubectl -n "$NS" rollout status deployment/gibson-tenant-operator --timeout=300s >/dev/null \
+  kubectl -n "$NS" rollout status deployment/gibson-tenant-operator --timeout="${ROLLOUT_WAIT_S}s" >/dev/null \
     || { miss "the tenant-operator is not ready after its token changed"; return 1; }
 
   # 3. The old tokens are refused after the grace. Only a 403 counts as a
@@ -638,9 +675,9 @@ class_openbao_service_tokens() {
 
   # 4. The callers. After the revoke, the platform-operator passes a full
   #    reconcile (every 5 minutes) with OpenBao, and the tenant-operator runs.
-  sleep 360
+  sleep "$RECONCILE_PASS_S"
   bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the old tokens were revoked"; return 1; }
-  kubectl -n "$NS" rollout status deployment/gibson-tenant-operator --timeout=60s >/dev/null \
+  kubectl -n "$NS" rollout status deployment/gibson-tenant-operator --timeout="${CHECK_ROLLOUT_S}s" >/dev/null \
     || { miss "the tenant-operator is not ready after the old tokens were revoked"; return 1; }
   ok "the platform-operator and the tenant-operator work with the new tokens (since ${start})"
 }
@@ -743,9 +780,9 @@ class_zitadel_bringup_tokens() {
 
   # 4. The callers: the login UI restarted onto the new token, and the
   #    platform-operator passes a full reconcile with the new admin token.
-  kubectl -n "$NS" rollout status deployment/gibson-zitadel-login --timeout=300s >/dev/null \
+  kubectl -n "$NS" rollout status deployment/gibson-zitadel-login --timeout="${ROLLOUT_WAIT_S}s" >/dev/null \
     || { miss "zitadel-login is not ready after its token changed"; return 1; }
-  sleep 360
+  sleep "$RECONCILE_PASS_S"
   bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the old admin token was removed"; return 1; }
   ok "zitadel-login and the platform-operator work with the new tokens"
 }
@@ -787,10 +824,12 @@ bao_seal_state() {
 }
 
 # bao_restart WANT: delete the OpenBao pod and wait until it reports WANT.
+BAO_DELETE_WAIT_S=180
+BAO_STATE_WAIT_S=300
 bao_restart() {
   local deadline
-  kubectl -n "$NS" delete pod "$OPENBAO_POD" --wait=true --timeout=180s >/dev/null || return 1
-  deadline=$(( $(date +%s) + 300 ))
+  kubectl -n "$NS" delete pod "$OPENBAO_POD" --wait=true --timeout="${BAO_DELETE_WAIT_S}s" >/dev/null || return 1
+  deadline=$(( $(date +%s) + BAO_STATE_WAIT_S ))
   until [ "$(bao_seal_state)" = "$1" ]; do
     [ "$(date +%s)" -lt "$deadline" ] || return 1
     sleep 5
@@ -900,7 +939,7 @@ password_refused() {
 
 velero_restart() {
   kubectl -n velero rollout restart deployment/velero >/dev/null \
-    && kubectl -n velero rollout status deployment/velero --timeout=300s >/dev/null
+    && kubectl -n velero rollout status deployment/velero --timeout="${ROLLOUT_WAIT_S}s" >/dev/null
 }
 
 class_keyring_generated_keys() {
@@ -950,7 +989,7 @@ class_keyring_generated_keys() {
     || { miss "OpenBao did not return unsealed on the new seal key after the refusal test"; rm -rf "$work"; return 1; }
   [ "$refused" -eq 0 ] || { miss "OpenBao did not stay sealed under the old seal key alone"; rm -rf "$work"; return 1; }
   ok "OpenBao stays sealed under the old seal key, and opens again on the new one"
-  kubectl -n "$NS" rollout status statefulset/"${RELEASE}-openbao" --timeout=300s >/dev/null \
+  kubectl -n "$NS" rollout status statefulset/"${RELEASE}-openbao" --timeout="${ROLLOUT_WAIT_S}s" >/dev/null \
     || { miss "OpenBao is not ready after the seal key rotation"; rm -rf "$work"; return 1; }
 
   # 4. Velero: the keyring password opens the repository, another does not.
@@ -981,7 +1020,7 @@ class_keyring_generated_keys() {
   ok "OpenBao is back on the stage 0 seal key, and the keyring file is the one stage 0 wrote"
 
   # The callers of OpenBao work after the restarts.
-  sleep 120
+  sleep "$SETTLE_S"
   bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the seal key rotation"; rm -rf "$work"; return 1; }
   ok "the PlatformBootstrap is Ready after the rotation"
   rm -rf "$work"
@@ -1273,7 +1312,12 @@ class_postgres_role_passwords() {
       || { miss "could not read the members of ${owner} from Postgres"; return 1; }
     [ "$member" = 1 ] || { miss "the new login role of ${secret} is not a member of ${owner}"; return 1; }
     if [ "$workload" != - ]; then
-      kubectl -n "$NS" rollout status "$workload" --timeout=600s >/dev/null \
+      # The rollout counts against the class deadline, so the deadline bounds
+      # the class (the time budget, review of hosted#805).
+      left=$(( deadline - $(date +%s) ))
+      [ "$left" -gt 0 ] || { miss "${workload}: the class deadline passed before its rollout"; return 1; }
+      [ "$left" -le "$PG_ROLLOUT_S" ] || left="$PG_ROLLOUT_S"
+      kubectl -n "$NS" rollout status "$workload" --timeout="${left}s" >/dev/null \
         || { miss "${workload} is not ready on the new login role"; return 1; }
       until sessions="$(pg_su "SELECT count(*) FILTER (WHERE usename = '${new}') || ' ' || count(*) FILTER (WHERE usename = '${old}') FROM pg_stat_activity")" \
             && [ "${sessions%% *}" -gt 0 ] && [ "${sessions##* }" = 0 ]; do
@@ -1314,7 +1358,7 @@ class_postgres_role_passwords() {
     consumer_on_role "$workload" "$new" "$forced_at" "$deadline" || return 1
   done
 
-  sleep 120
+  sleep "$SETTLE_S"
   bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the new login roles"; return 1; }
 }
 
@@ -1612,7 +1656,7 @@ class_platform_generated_secrets() {
     || { miss "after a second rotation the dashboard refuses a session made with the previous secret"; rm -rf "$work"; return 1; }
   s_old=""; s_new=""; s_newer=""
   ok "after a second rotation the dashboard refuses a session made with the first secret"
-  sleep 120
+  sleep "$SETTLE_S"
   bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the rotations"; rm -rf "$work"; return 1; }
   rm -rf "$work"
 }
@@ -1709,12 +1753,88 @@ daemon_restarts() {
 # Secret into the volume of a running pod (its sync period of 60 s, and the
 # Secret cache), with a margin.
 KUBELET_SYNC_WAIT=120
+FGA_KEY_SECRET=gibson-openfga-preshared-key
+
+# fga_key_mounts POD: one line for each container of POD that sets
+# GIBSON_FGA_KEY_DIR: "ok <container> <dir>" when the directory is a volume of
+# the Secret FGA_KEY_SECRET with no subPath, else "bad <container> <why>". A
+# key read by subPath or by env never changes in a running pod, so for such a
+# client a rotation is a mount defect, not a race (review of hosted#805).
+# Nothing at all means no container of POD names the key directory.
+fga_key_mounts() {
+  kubectl -n "$NS" get pod "$1" -o json | python3 -c '
+import json, sys
+secret = sys.argv[1]
+pod = json.load(sys.stdin)
+spec = pod.get("spec") or {}
+vols = {v.get("name"): v for v in spec.get("volumes") or []}
+for c in spec.get("containers") or []:
+    d = next((e.get("value") for e in c.get("env") or [] if e.get("name") == "GIBSON_FGA_KEY_DIR"), None)
+    if d is None:
+        continue
+    m = next((m for m in c.get("volumeMounts") or [] if m.get("mountPath") == d), None)
+    if m is None:
+        print("bad %s no volume is mounted at %s" % (c["name"], d)); continue
+    if m.get("subPath") or m.get("subPathExpr"):
+        print("bad %s %s is mounted by subPath, which the kubelet never updates" % (c["name"], d)); continue
+    src = ((vols.get(m.get("name")) or {}).get("secret") or {}).get("secretName")
+    if src != secret:
+        print("bad %s %s is not a volume of the Secret %s" % (c["name"], d, secret)); continue
+    print("ok %s %s" % (c["name"], d))
+' "$FGA_KEY_SECRET"
+}
+
+# fga_key_held POD CONTAINER DIR: the SHA-256 of the key file that CONTAINER of
+# POD reads, read in the pod. The key itself never leaves the pod. Only an
+# image with a shell can answer (the daemon); a distroless one cannot.
+fga_key_held() {
+  kubectl -n "$NS" exec "$1" -c "$2" -- sh -c 'tr -d "\r\n" < "$1/key" | sha256sum' _ "$3" 2>/dev/null | cut -c1-64
+}
+
+# wait_fga_clients KEY WRITTEN DEADLINE: each OpenFGA client holds KEY, which
+# was written at the epoch WRITTEN. It replaces a fixed sleep of the kubelet
+# bound (review of hosted#805):
+#   - every client pod reads the key from a Secret volume with no subPath,
+#     or the class fails at once;
+#   - each daemon pod reads KEY back from its key file, polled until
+#     DEADLINE;
+#   - the other clients run distroless images, which cannot show their key.
+#     Their volume is the same Secret, which the kubelet writes within its
+#     sync period, so for them the class waits the rest of KUBELET_SYNC_WAIT
+#     after WRITTEN.
+wait_fga_clients() {
+  local want sel pod line bad rest
+  want="$(printf '%s' "$1" | sha256sum | cut -c1-64)"
+  for sel in $FGA_CLIENTS; do
+    for pod in $(pods_of "$sel"); do
+      line="$(fga_key_mounts "$pod")" || { miss "cannot read the pod ${pod}"; return 1; }
+      [ -n "$line" ] || { miss "no container of ${pod} names GIBSON_FGA_KEY_DIR, so it cannot read a rotated key"; return 1; }
+      bad="$(printf '%s\n' "$line" | sed -n 's/^bad //p' | head -n1)"
+      [ -z "$bad" ] || { miss "${pod}: ${bad}"; return 1; }
+    done
+  done
+  while :; do
+    bad=""
+    for pod in $(pods_of app.kubernetes.io/component=daemon); do
+      while read -r _ c d; do
+        [ "$(fga_key_held "$pod" "$c" "$d")" = "$want" ] || { bad="${pod}/${c}"; break; }
+      done <<< "$(fga_key_mounts "$pod")"
+      [ -z "$bad" ] || break
+    done
+    [ -z "$bad" ] && break
+    [ "$(date +%s)" -lt "$3" ] || { miss "${bad} does not hold the new OpenFGA key in its key file"; return 1; }
+    sleep 10
+  done
+  rest=$(( $2 + KUBELET_SYNC_WAIT - $(date +%s) ))
+  [ "$rest" -le 0 ] || sleep "$rest"
+  ok "each daemon pod reads the new OpenFGA key back from its key file, and each client mounts the Secret as a volume"
+}
 
 # new_fga_key: 43 URL-safe base64 characters, the shape of the seed kind rand.
 new_fga_key() { head -c 32 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '='; }
 
 class_openfga_preshared_key() {
-  local k0 k1 k2 deadline since pod refused restarts unready=0
+  local k0 k1 k2 deadline since pod refused restarts written unready=0
   [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
     || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao key"; return 1; }
   k0="$(secret_value gibson-openfga-preshared-key key)"; mask "$k0"
@@ -1731,6 +1851,7 @@ class_openfga_preshared_key() {
   set_at_source gibson-openfga-preshared-key key_previous "$k0" \
     && set_at_source gibson-openfga-preshared-key key "$k1" \
     || { miss "the write of the OpenFGA key failed"; return 1; }
+  written="$(date +%s)"
   until [ "$(fga_status "$k1")" = 200 ] && [ "$(fga_status "$k0")" = 200 ]; do
     daemons_ready || unready=$((unready + 1))
     [ "$(date +%s)" -lt "$deadline" ] || { miss "OpenFGA does not accept the new and the old key after the rotation"; return 1; }
@@ -1740,14 +1861,14 @@ class_openfga_preshared_key() {
   # The clients read k1 from their key files only after the kubelet writes the
   # new Secret into each pod. The second rotation drops k0 from OpenFGA, so it
   # must wait for that write, or a client that still holds k0 is refused and
-  # the class reads a race as a failed rotation (audit of 2026-10-19). An
-  # operator who rotates twice waits the same sync period.
-  sleep "$KUBELET_SYNC_WAIT"
+  # the class reads a race as a failed rotation (audit of 2026-10-19).
+  wait_fga_clients "$k1" "$written" "$deadline" || return 1
 
   k2="$(new_fga_key)"; mask "$k2"
   set_at_source gibson-openfga-preshared-key key_previous "$k1" \
     && set_at_source gibson-openfga-preshared-key key "$k2" \
     || { miss "the second write of the OpenFGA key failed"; return 1; }
+  written="$(date +%s)"
   until [ "$(fga_status "$k2")" = 200 ] && [ "$(fga_status "$k0")" = 401 ]; do
     daemons_ready || unready=$((unready + 1))
     [ "$(date +%s)" -lt "$deadline" ] || { miss "after a second rotation OpenFGA does not refuse the first key"; return 1; }
@@ -1756,9 +1877,8 @@ class_openfga_preshared_key() {
   [ "$(fga_status "$k1")" = 200 ] || { miss "after a second rotation OpenFGA refuses the previous key"; return 1; }
   ok "after a second rotation OpenFGA refuses the first key and accepts the previous and the new one"
 
-  # Each client reads its key files again within ten seconds; give the
-  # kubelet a sync period to write them, then prove each client.
-  sleep "$KUBELET_SYNC_WAIT"
+  # Each client holds k2, then each client is proven.
+  wait_fga_clients "$k2" "$written" "$deadline" || return 1
   [ "$unready" -eq 0 ] || { miss "a daemon pod went unready ${unready} times during the rotations: its OpenFGA Check was refused"; return 1; }
   [ "$(daemon_restarts)" = "$restarts" ] \
     || { miss "a daemon pod or container restarted during the rotations, so the poll cannot prove it kept service"; return 1; }
@@ -1769,7 +1889,7 @@ class_openfga_preshared_key() {
   refused="$(refused_fga_calls "$since")"
   [ "$refused" = 0 ] || { miss "the OpenFGA clients logged ${refused} refused OpenFGA calls during the rotations"; return 1; }
   ok "no OpenFGA client logged a refused call during the rotations"
-  restart_pods "$NS" deployment/"${RELEASE}-ext-authz" 300 \
+  restart_pods "$NS" deployment/"${RELEASE}-ext-authz" "$RESTART_WAIT_S" \
     || { miss "ext-authz does not start on the current key: its start self-check is refused"; return 1; }
   bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the rotations"; return 1; }
   k0=""; k1=""; k2=""
@@ -2022,16 +2142,20 @@ class_setec_disk_signing_seed() {
 # --- substrate-cloud-credentials ---------------------------------------------
 # Source: the access keys of the substrate IAM users (stage 0,
 # substrate/gibson-bootstrap). Path: scripts/substrate-rotate.sh at stage 0,
-# on the operator workstation (ADR-0083, ADR-0171). The drill does not rotate
-# them: the drill stage 0 outlives the run. The check asks IAM for the keys of
-# each user and proves the result of the path:
+# on the operator workstation (ADR-0083, ADR-0171), and in the drill, where
+# rotation run 1 starts a rotation of each user and the later drill runs continue
+# it (scripts/drill-rotate-keys.sh). The check asks IAM for the keys of each
+# user and proves the result of the path:
 #   - exactly one active key, so no old key is still accepted;
 #   - its id is the id the cluster holds, so the cluster uses the live key;
 #   - it is younger than its lifetime, so the rotation runs on time.
 # A key that IAM no longer lists is refused by AWS.
 #
-# AN OPEN ROTATION. The monthly rotation job starts a rotation of each user
-# (scripts/drill-rotate-keys.sh start) before this class runs, and a rotation
+# AN OPEN ROTATION. Rotation run 1 starts a rotation of each user
+# (scripts/drill-rotate-keys.sh start) before this class runs, in the same job.
+# The class is in run 1 of credential-classes.yaml for that reason, and
+# tests/harness/rotation-budget.bats keeps it there (review of hosted#807).
+# A rotation
 # deletes the old key only after it stays unused for QUIET_SECS (4 hours,
 # scripts/substrate-rotate.sh). So in that run each user has two active keys.
 # When the stage 0 file key-slots.tfvars.json shows two slots for a user, the
@@ -2039,7 +2163,7 @@ class_setec_disk_signing_seed() {
 #   - the cluster holds the newer key;
 #   - AWS reports no use of the older key after the switch time that
 #     key-rotation.json records, so no consumer still holds it.
-# A later daily run deletes the older key (drill-rotate-keys.sh continue).
+# A later drill run deletes the older key (drill-rotate-keys.sh continue).
 SUBSTRATE_KEY_LIFETIME_DAYS="${SUBSTRATE_KEY_LIFETIME_DAYS:-90}"
 
 # key_last_used ID: the epoch of the last use of the access key ID, or 0.
@@ -2139,21 +2263,91 @@ diagnose_failed_class() (
   return 0
 )
 
+# --- the time budget ---------------------------------------------------------
+# The step of drill.yml that runs this script has a time limit. GitHub stops
+# the step at that limit, also inside a class. A class stopped in the middle
+# leaves the cluster half rotated, and each class after it gets no line in the
+# results, so no issue opens for it (review of hosted#805). So the script has
+# one time budget, ROTATION_BUDGET_S, which drill.yml sets from the step limit
+# (tests/harness/rotation-budget.bats keeps the two equal), and each tested
+# class declares the most time it can take (time_bound_of). A class whose
+# bound does not fit in the time left is not started, and its line says so.
+#
+# The bounds are worst cases: each deadline of the class, and each wait that
+# runs after a deadline, plus BOUND_SLACK_S for the last poll after a deadline
+# and the reads between the waits. The bounds of all the classes do not fit
+# one step, so the classes are split into runs. The plan is the field `run`
+# of each tested class in credential-classes.yaml, so a change of the plan is
+# a reviewed diff (review of hosted#807). The script checks at start that the
+# bounds of each run fit the budget, and refuses to start when they do not.
+# A drill dispatch with rotation_run <n> does run <n>, so a person dispatches
+# each run to rotate each class. A class that runs longer than its bound fails with that reason,
+# so a bound that is wrong does not stay wrong.
+BOUND_SLACK_S=300
+
+# time_bound_of TEST: the most seconds the class of TEST can take. A test with
+# no line here has no bound, and the run refuses to start it.
+time_bound_of() {
+  local w="$ROTATION_WAIT" b
+  case "$1" in
+    redis-password)            b=$(( REDIS_WAIT_MAX_S + 4 * CHECK_ROLLOUT_S )) ;;
+    edge-tls)                  b=$(( w )) ;;
+    component-tls)             b=$(( 2 * w + RESTART_WAIT_S )) ;;
+    spire-svid)                b=$(( w + 2 * EXT_AUTHZ_RESTART_WAIT_S )) ;;
+    openbao-service-tokens)    b=$(( 2 * w + ROLLOUT_WAIT_S + RECONCILE_PASS_S + CHECK_ROLLOUT_S )) ;;
+    postgres-role-passwords)   b=$(( 2 * w + SETTLE_S )) ;;
+    neo4j-password)            b=0 ;;
+    platform-signing-keys)     b=$(( w + CG_SVID_SLACK_S )) ;;
+    platform-generated-secrets) b=$(( 2 * w + SETTLE_S )) ;;
+    openfga-preshared-key)     b=$(( w + 2 * KUBELET_SYNC_WAIT + RESTART_WAIT_S )) ;;
+    zitadel-bringup-tokens)    b=$(( 2 * w + ROLLOUT_WAIT_S + RECONCILE_PASS_S )) ;;
+    keyring-generated-keys)    b=$(( 6 * (BAO_DELETE_WAIT_S + BAO_STATE_WAIT_S) + 3 * ROLLOUT_WAIT_S
+                                     + 2 * (VELERO_QUEUE_WAIT + VELERO_RUN_WAIT) + ROLLOUT_WAIT_S + SETTLE_S )) ;;
+    setec-disk-signing-seed)   b=$(( 2 * SEED_WAIT + SANDBOX_WAIT )) ;;
+    substrate-cloud-credentials) b=0 ;;
+    vendor-issued-inputs)      b=0 ;;
+    *) return 1 ;;
+  esac
+  printf '%s' $(( b + BOUND_SLACK_S ))
+}
+
 # --- the classes of the list -------------------------------------------------
-# One line per class: <name> TAB <status> TAB <test> TAB <gap>.
+# One line per class: <name> TAB <status> TAB <test> TAB <run> TAB <gap>.
 rows="$(python3 - "$CLASSES" <<'PY'
 import sys, yaml
 doc = yaml.safe_load(open(sys.argv[1]))
 for c in doc["classes"]:
     gap = " ".join(str(c.get("gap", "")).split())
-    print(f"{c['name']}\t{c['status']}\t{c['test']}\t{gap}")
+    print(f"{c['name']}\t{c['status']}\t{c['test']}\t{c.get('run') or '-'}\t{gap}")
 PY
 )" || { echo "could not run: the class list does not parse" >&2; exit 2; }
 [ -n "$rows" ] || { echo "could not run: the class list is empty" >&2; exit 2; }
 
+# The plan of the list: the run of each tested class. Each run must fit the
+# budget, or no run of the plan can finish, and the script refuses to start.
+# A tested class with no bound or no run has no place in the plan, and run 1
+# reports it.
+declare -A run_sum=()
+runs=1
+while IFS=$'\t' read -r name status test run gap; do
+  [ "$status" = tested ] || continue
+  b="$(time_bound_of "$test")" || continue
+  [[ "$run" =~ ^[1-9][0-9]*$ ]] || continue
+  run_sum[$run]=$(( ${run_sum[$run]:-0} + b ))
+  [ "$run" -le "$runs" ] || runs="$run"
+done <<< "$rows"
+for r in "${!run_sum[@]}"; do
+  [ "${run_sum[$r]}" -le "$ROTATION_BUDGET_S" ] \
+    || { echo "could not run: the classes of run ${r} in ${CLASSES} need up to ${run_sum[$r]} s, more than the budget of ${ROTATION_BUDGET_S} s. Move a class to another run" >&2; exit 2; }
+done
+[ "$ROTATION_RUN" -le "$runs" ] \
+  || { echo "could not run: ROTATION_RUN is ${ROTATION_RUN}, and the plan has ${runs} runs" >&2; exit 2; }
+printf 'run %s of %s, a time budget of %s s, the bounds of this run %s s\n' \
+  "$ROTATION_RUN" "$runs" "$ROTATION_BUDGET_S" "${run_sum[$ROTATION_RUN]:-0}"
+
 failed=()
 tested=0
-while IFS=$'\t' read -r -u 3 name status test gap; do
+while IFS=$'\t' read -r -u 3 name status test run gap; do
   printf '▶ %s\n' "$name"
   REASON=""
   if [ "$status" != tested ]; then
@@ -2161,22 +2355,51 @@ while IFS=$'\t' read -r -u 3 name status test gap; do
     printf '%s\tuntested\t%s: %s\n' "$name" "$status" "$gap" >> "$RESULTS"
     continue
   fi
-  tested=$((tested + 1))
   fn="class_${test//-/_}"
+  bound="$(time_bound_of "$test")" || bound=""
+  [[ "$run" =~ ^[1-9][0-9]*$ ]] || run=""
+  if [ -n "$bound" ] && [ -n "$run" ] && [ "$run" != "$ROTATION_RUN" ]; then
+    printf '    - run %s of %s tests this class\n' "$run" "$runs"
+    printf '%s\tother-run\trun %s of %s tests it\n' "$name" "$run" "$runs" >> "$RESULTS"
+    continue
+  fi
+  # A class with no bound or no run has no place in the plan. Run 1
+  # reports it, once.
+  if { [ -z "$bound" ] || [ -z "$run" ]; } && [ "$ROTATION_RUN" != 1 ]; then
+    continue
+  fi
+  tested=$((tested + 1))
+  left=$(( START + ROTATION_BUDGET_S - $(date +%s) ))
   if ! declare -F "$fn" >/dev/null; then
     REASON="the class is marked tested, and this script has no ${fn}"
+    printf '    ✗ %s\n' "$REASON" >&2
+  elif [ -z "$bound" ]; then
+    REASON="not started: the class declares no time bound (time_bound_of), so it may not fit the step"
+    printf '    ✗ %s\n' "$REASON" >&2
+  elif [ -z "$run" ]; then
+    REASON="not started: the class names no run of the rotation plan in ${CLASSES}"
+    printf '    ✗ %s\n' "$REASON" >&2
+  elif [ "$bound" -gt "$left" ]; then
+    REASON="not started: ${left} s of the time budget left, and the class needs up to ${bound} s"
     printf '    ✗ %s\n' "$REASON" >&2
   else
     # A line that stands until the class ends. When the step limit stops
     # the run inside a class, the results still name that class as failed.
     printf '%s\tfail\t%s\n' "$name" "the test did not finish before the step limit" >> "$RESULTS"
-    if "$fn"; then
-      sed -i '$d' "$RESULTS"
+    t0="$(date +%s)"
+    rc=0; "$fn" || rc=$?
+    took=$(( $(date +%s) - t0 ))
+    sed -i '$d' "$RESULTS"
+    [ "$rc" -eq 0 ] || diagnose_failed_class "$name"
+    if [ "$took" -gt "$bound" ]; then
+      # A bound that is too small lets a later class start that cannot
+      # finish. It fails the class, so the bound is raised.
+      REASON="${REASON:+${REASON}. }the class took ${took} s, past its declared bound of ${bound} s: raise time_bound_of"
+      printf '    ✗ %s\n' "$REASON" >&2
+    elif [ "$rc" -eq 0 ]; then
       printf '%s\tpass\t\n' "$name" >> "$RESULTS"
       continue
     fi
-    sed -i '$d' "$RESULTS"
-    diagnose_failed_class "$name"
   fi
   printf '%s\tfail\t%s\n' "$name" "${REASON:-the test failed and gave no reason}" >> "$RESULTS"
   failed+=("$name")

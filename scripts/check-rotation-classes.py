@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Guard: each tested credential class has a rotation test, and each test has a class (hosted#444).
 
-credential-classes.yaml is the one list of credential classes. The monthly
+credential-classes.yaml is the one list of credential classes. The
 rotation test, test/rotation/exit-test-rotation.sh, calls the function
 class_<test> for each class with `status: tested`. It records the other
 classes as untested.
@@ -17,6 +17,9 @@ WHAT IT CHECKS
     4. Each class_* function of the script belongs to a tested class. A
        function that no tested class names never runs, and it reads as
        coverage.
+    5. A tested class names its run of the rotation plan (`run`, a number
+       from 1). The plan is in the list, so a change to it is a reviewed
+       diff (review of hosted#807).
 
 Usage:
     scripts/check-rotation-classes.py             # the guard
@@ -74,6 +77,10 @@ def findings(classes_file: pathlib.Path, script: pathlib.Path) -> tuple[list[str
             if not test or test == "none":
                 bad.append(f"{name}: the class is marked tested and names no test")
             else:
+                run = c.get("run")
+                if not isinstance(run, int) or isinstance(run, bool) or run < 1:
+                    bad.append(f"{name}: the class is marked tested and names no run of the rotation plan "
+                               f"(run: {run!r}, not a number from 1)")
                 fn = str(test).replace("-", "_")
                 used.add(fn)
                 if fn not in funcs:
@@ -92,7 +99,7 @@ def selftest() -> int:
     cases = sorted(p for p in FIXTURES.iterdir() if p.is_dir())
     bads = [p for p in cases if p.name.startswith("bad-")]
     good = FIXTURES / "good"
-    if len(bads) < 7 or not good.is_dir():
+    if len(bads) < 8 or not good.is_dir():
         print("check-rotation-classes: selftest: the fixtures are missing", file=sys.stderr)
         return 2
     for case in bads:

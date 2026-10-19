@@ -54,31 +54,48 @@ mask() { :; }
 
 # --- redis-password ----------------------------------------------------------
 
-# redis_wait SCRIPT LIMIT: redis_rotation_wait of SCRIPT, with a CronJob whose
-# Job limit is LIMIT (empty: the field is not set).
+# redis_wait SCRIPT LIMIT EVERY: redis_rotation_wait of SCRIPT, with a CronJob
+# whose Job limit is LIMIT and an ExternalSecret that refreshes EVERY (empty:
+# the field is not set).
 redis_wait() {
-  extract "$1" "$TMP/redis.sh" REDIS_TICK_S REDIS_ESO_S redis_rotation_wait
-  run env LIMIT="$2" bash -c '
+  extract "$1" "$TMP/redis.sh" REDIS_TICK_S duration_s redis_rotation_wait
+  run env LIMIT="$2" EVERY="$3" bash -c '
     NS=gibson RELEASE=gibson
     kubectl() {
       case "$*" in
         "-n gibson get cronjob gibson-redis-rotation -o jsonpath={.spec.jobTemplate.spec.activeDeadlineSeconds}") printf "%s" "$LIMIT" ;;
+        "-n gibson get externalsecret gibson-redis-stack -o jsonpath={.spec.refreshInterval}") printf "%s" "$EVERY" ;;
         *) echo "kubectl stub: undeclared call: $*" >&2; return 1 ;;
       esac
     }
-    . "$1"; redis_rotation_wait' _ "$TMP/redis.sh"
+    . "$1"; redis_rotation_wait gibson-redis-stack' _ "$TMP/redis.sh"
 }
 
-@test "the redis wait is the Job limit of the CronJob, one tick and the ESO write" {
-  redis_wait "$TEST" 1800
+@test "the redis wait is the Job limit of the CronJob, one tick and two refresh intervals of the ExternalSecret" {
+  redis_wait "$TEST" 1800 60s
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$output" -eq 1980 ]
+  redis_wait "$TEST" 1800 1m30s
+  [ "$output" -eq 2040 ]
 }
 
 @test "FAILING FIXTURE: a CronJob with no Job limit gives no wait, never a default" {
-  redis_wait "$TEST" ""
+  redis_wait "$TEST" "" 60s
   [ "$status" -ne 0 ]
   [ -z "$output" ]
+}
+
+@test "FAILING FIXTURE: an ExternalSecret with no refresh interval, or one that is not a duration, gives no wait" {
+  redis_wait "$TEST" 1800 ""
+  [ "$status" -ne 0 ]
+  redis_wait "$TEST" 1800 "soon"
+  [ "$status" -ne 0 ]
+}
+
+@test "the longest redis wait of charts 0.151.1 is the most the time bound allows" {
+  extract "$TEST" "$TMP/max.sh" REDIS_TICK_S REDIS_WAIT_MAX_S
+  run bash -c '. "$1"; echo "$REDIS_WAIT_MAX_S"' _ "$TMP/max.sh"
+  [ "$output" -eq 1980 ]
 }
 
 @test "the redis class waits redis_rotation_wait, not the fixed ROTATION_WAIT" {
@@ -123,10 +140,21 @@ print(int(m.group(1)) * {"s": 1, "m": 60, "h": 3600}[m.group(2)])
 PY
 }
 
-@test "the reader SVID outlives the deadline of the class" {
+@test "the reader SVID outlives the deadline of the class and the last checks after it" {
   ttl="$(svid_ttl "$TEST")"
-  echo "ttl=${ttl}"
-  [ "$ttl" -gt 1500 ]
+  extract "$TEST" "$TMP/slack.sh" CG_SVID_SLACK_S
+  slack="$(bash -c '. "$1"; echo "$CG_SVID_SLACK_S"' _ "$TMP/slack.sh")"
+  echo "ttl=${ttl} slack=${slack}"
+  [ "$slack" -ge 300 ]
+  [ "$ttl" -ge $(( 1500 + slack )) ]
+}
+
+@test "FAILING FIXTURE: a reader SVID of ROTATION_WAIT plus one second ends during the checks after the deadline" {
+  sed 's/-ttl "\$(( ROTATION_WAIT + CG_SVID_SLACK_S ))s"/-ttl "$(( ROTATION_WAIT + 1 ))s"/' "$TEST" > "$TMP/short.sh"
+  ttl="$(svid_ttl "$TMP/short.sh")"
+  [ "$ttl" -eq 1501 ]
+  run test "$ttl" -ge 1800
+  [ "$status" -ne 0 ]
 }
 
 @test "FAILING FIXTURE: a reader SVID of 10 minutes ends inside the class" {
@@ -146,7 +174,7 @@ PY
 # ROTATION_WAIT 150, so the class deadline is 300 s: one retire grace of 180 s
 # fits, two in a row do not.
 zitadel_run() {
-  extract "$TEST" "$TMP/zt.sh" ZITADEL_TOKENS class_zitadel_bringup_tokens
+  extract "$TEST" "$TMP/zt.sh" ZITADEL_TOKENS ROLLOUT_WAIT_S RECONCILE_PASS_S class_zitadel_bringup_tokens
   echo 1000 > "$TMP/clock"
   mkdir -p "$TMP/charts/scripts"
   printf '#!/bin/sh\n' > "$TMP/charts/scripts/baseline-set-secret.sh"
@@ -232,6 +260,9 @@ fga_run() {
       else echo 401; fi
     }
     daemons_ready() { [ "$(fga_status "$(client_key)")" = 200 ]; }
+    # The proof of the script reads the key back from the daemon key file.
+    # Here the file holds what the kubelet model gives.
+    wait_fga_clients() { while [ "$(client_key)" != "$1" ]; do sleep 10; done; }
     daemon_restarts() { echo "gibson-gibson-workloads-0/daemon 0"; }
     pods_of() { echo gibson-gibson-workloads-0; }
     daemon_readyz() { if daemons_ready; then echo 200; else echo 503; fi; }
@@ -252,13 +283,75 @@ fga_run() {
   python3 - "$TEST" "$TMP/old.sh" <<'PY2'
 import sys
 text = open(sys.argv[1]).read()
-line = '  sleep "$KUBELET_SYNC_WAIT"\n\n  k2="$(new_fga_key)"'
+line = '  wait_fga_clients "$k1" "$written" "$deadline" || return 1\n'
 if line not in text:
     sys.exit("the wait before the second rotation is not in the script")
-open(sys.argv[2], "w").write(text.replace(line, '  k2="$(new_fga_key)"', 1))
+open(sys.argv[2], "w").write(text.replace(line, "", 1))
 PY2
   fga_run "$TMP/old.sh" 90
   [ "$status" -ne 0 ]
   [ -s "$TMP/refused" ]
   [[ "$output" == *"refused OpenFGA calls during the rotations"* ]] || { echo "$output"; false; }
+}
+
+# --- the OpenFGA key read-back (review of hosted#805) --------------------------
+
+# pod_json SUBPATH SECRET: a daemon pod that reads its key from SECRET, by
+# SUBPATH when it is not empty.
+pod_json() {
+  python3 - "$1" "$2" <<'PY2'
+import json, sys
+sub, secret = sys.argv[1], sys.argv[2]
+m = {"name": "openfga-key", "mountPath": "/etc/gibson/openfga-key"}
+if sub:
+    m["subPath"] = sub
+print(json.dumps({"spec": {
+  "volumes": [{"name": "openfga-key", "secret": {"secretName": secret}}],
+  "containers": [{"name": "gibson", "env": [{"name": "GIBSON_FGA_KEY_DIR", "value": "/etc/gibson/openfga-key"}],
+                  "volumeMounts": [m]}]}}))
+PY2
+}
+
+# fga_wait_run SUBPATH SECRET HELD: wait_fga_clients for the key k1, with one
+# daemon pod whose key file holds HELD.
+fga_wait_run() {
+  extract "$TEST" "$TMP/w.sh" KUBELET_SYNC_WAIT FGA_KEY_SECRET fga_key_mounts fga_key_held wait_fga_clients
+  echo 1000 > "$TMP/clock"
+  pod_json "$1" "$2" > "$TMP/pod.json"
+  run env D="$TMP" HELD="$3" bash -c "$CLOCK"'
+    NS=gibson FGA_CLIENTS="app.kubernetes.io/component=daemon"
+    pods_of() { echo gibson-gibson-workloads-0; }
+    kubectl() {
+      case "$*" in
+        "-n gibson get pod gibson-gibson-workloads-0 -o json") cat "$D/pod.json" ;;
+        "-n gibson exec gibson-gibson-workloads-0 -c gibson -- sh -c "*) printf "%s" "$HELD" | sha256sum ;;
+        *) echo "kubectl stub: undeclared call: $*" >&2; return 1 ;;
+      esac
+    }
+    . "$1"; wait_fga_clients k1 1000 1300' _ "$TMP/w.sh"
+}
+
+@test "a daemon that reads the new key back from its Secret volume passes, after the kubelet bound for the other clients" {
+  fga_wait_run "" gibson-openfga-preshared-key k1
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$TMP/clock")" -ge 1120 ]
+}
+
+@test "FAILING FIXTURE: a daemon that still holds the old key fails at the deadline, and names the pod" {
+  fga_wait_run "" gibson-openfga-preshared-key k0
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"gibson-gibson-workloads-0/gibson does not hold the new OpenFGA key"* ]] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: a key mounted by subPath is a mount defect, refused at once" {
+  fga_wait_run key gibson-openfga-preshared-key k1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mounted by subPath"* ]] || { echo "$output"; false; }
+  [ "$(cat "$TMP/clock")" -eq 1000 ]
+}
+
+@test "FAILING FIXTURE: a key directory that is not the preshared key Secret is refused" {
+  fga_wait_run "" some-other-secret k1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"is not a volume of the Secret gibson-openfga-preshared-key"* ]] || { echo "$output"; false; }
 }
