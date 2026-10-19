@@ -95,9 +95,27 @@ redis_cli() {
 }
 
 # --- redis-password ----------------------------------------------------------
-# Source: the OpenBao key gibson-redis-password. Path: ESO, Reloader, and the
-# CronJob <release>-redis-rotation, which restarts the daemon and the
-# tenant-operator and then removes the old password from the ACL.
+# Source: the OpenBao key gibson-redis-password. Path: ESO, and the CronJob
+# <release>-redis-rotation, which restarts the redis clients by a pod delete
+# and then removes the old password from the ACL.
+
+# redis_rotation_wait: the seconds the class waits for the CronJob to finish
+# one rotation. The CronJob ticks each minute, and its Job may run for
+# activeDeadlineSeconds. A fixed wait of 1500 s was shorter than that limit of
+# 1800 s, so a slow but correct rotation failed the class, and the CronJob
+# then went on restarting pods under the next class (audit of 2026-10-19).
+# The wait is the limit of the Job, one tick, and 120 s for ESO to write the
+# Secret. No limit on the CronJob is an error, never a default.
+REDIS_TICK_S=60
+REDIS_ESO_S=120
+redis_rotation_wait() {
+  local limit
+  limit="$(kubectl -n "$NS" get cronjob "${RELEASE}-redis-rotation" \
+    -o jsonpath='{.spec.jobTemplate.spec.activeDeadlineSeconds}' 2>/dev/null)" || limit=""
+  [[ "$limit" =~ ^[0-9]+$ ]] && [ "$limit" -gt 0 ] || return 1
+  printf '%s' $(( limit + REDIS_TICK_S + REDIS_ESO_S ))
+}
+
 class_redis_password() {
   local es secret key state pod old new rv0 rv last start ips clients ip
   [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
@@ -111,6 +129,9 @@ class_redis_password() {
   pod="${RELEASE}-redis-stack-0"
   kubectl -n "$NS" get secret "$state" >/dev/null 2>&1 \
     || { miss "the rotation CronJob has not recorded its first state (${state}), so it would not see a rotation"; return 1; }
+  local wait_s
+  wait_s="$(redis_rotation_wait)" \
+    || { miss "the CronJob ${RELEASE}-redis-rotation has no Job time limit (activeDeadlineSeconds), so the class cannot know how long a rotation may take"; return 1; }
 
   key="$(kubectl -n "$NS" get externalsecret "$es" -o json | jq -r '(.spec.target.template.data // {}) | keys[0] // empty')"
   [ -n "$key" ] || { miss "the ExternalSecret ${es} names no key of the Secret ${secret}"; return 1; }
@@ -130,13 +151,13 @@ class_redis_password() {
 
   # 2. The path runs: ESO writes the Secret, and the CronJob records the new
   #    version when the restarts are done and the old password is removed.
-  local deadline=$(( $(date +%s) + ROTATION_WAIT ))
+  local deadline=$(( $(date +%s) + wait_s ))
   while :; do
     rv="$(kubectl -n "$NS" get secret "$secret" -o jsonpath='{.metadata.resourceVersion}')"
     last="$(kubectl -n "$NS" get secret "$state" -o jsonpath='{.data.lastProcessedVersion}' | base64 -d 2>/dev/null || true)"
     if [ "$rv" != "$rv0" ] && [ "$last" = "$rv" ]; then break; fi
     [ "$(date +%s)" -lt "$deadline" ] \
-      || { miss "the rotation did not finish in ${ROTATION_WAIT}s (Secret version ${rv0} -> ${rv}, CronJob state ${last:-empty})"; return 1; }
+      || { miss "the rotation did not finish in ${wait_s}s (Secret version ${rv0} -> ${rv}, CronJob state ${last:-empty})"; return 1; }
     sleep 15
   done
   ok "ESO wrote the new value, and the CronJob ${RELEASE}-redis-rotation finished its rotation"
@@ -660,42 +681,65 @@ zitadel_user_status() {
 }
 
 class_zitadel_bringup_tokens() {
-  local key secret old new deadline code
+  local key secret old new deadline code pending
+  declare -A olds=() news=()
   [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
     || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao key"; return 1; }
   deadline=$(( $(date +%s) + 2 * ROTATION_WAIT ))
+  # Each token takes about 23 minutes: the operator mints the new one, and it
+  # removes the old one 10 minutes after the consumer holds the new one, twice
+  # (tokenRetireGrace). One after the other, the two tokens used all of the
+  # 50 minutes, and the second missed the deadline (drill run 39125128505).
+  # So both tokens are made due first, and both are watched in one loop.
   while read -r key secret; do
     [ -n "$key" ] || continue
     old="$(secret_value "$secret" pat)"
     [ -n "$old" ] || { miss "the Secret ${secret} holds no token"; return 1; }
     mask "$old"
     [ "$(zitadel_user_status "$old")" = 200 ] || { miss "Zitadel refuses the token of ${secret} before the rotation"; return 1; }
+    olds[$secret]="$old"
+  done <<< "$ZITADEL_TOKENS"
 
-    # 1. Rotate at the source: the token is due.
+  # 1. Rotate at the source: each token is due.
+  while read -r key secret; do
+    [ -n "$key" ] || continue
     set_at_source "$key" mintedAt 2000-01-01T00:00:00Z \
       || { miss "the write of an old mint time to ${key} failed"; return 1; }
     ok "made the token of ${key} due for rotation"
-
-    # 2. The path runs: the consumer Secret holds a new token that works.
-    while :; do
-      new="$(secret_value "$secret" pat)"
-      [ -n "$new" ] && [ "$new" != "$old" ] && break
-      [ "$(date +%s)" -lt "$deadline" ] || { miss "the Secret ${secret} still holds the old token"; return 1; }
-      sleep 15
-    done
-    mask "$new"
-    [ "$(zitadel_user_status "$new")" = 200 ] || { miss "Zitadel refuses the new token of ${secret}"; return 1; }
-    ok "${secret} holds a new token that Zitadel accepts"
-
-    # 3. The old token is removed after the consumer holds the new one.
-    while :; do
-      code="$(zitadel_user_status "$old")"
-      [ "$code" = 401 ] && break
-      [ "$(date +%s)" -lt "$deadline" ] || { miss "Zitadel still answers ${code:-nothing} to the old token of ${secret}, not 401"; return 1; }
-      sleep 30
-    done
-    ok "Zitadel refuses the old token of ${secret}"
   done <<< "$ZITADEL_TOKENS"
+
+  # 2. The path runs: each consumer Secret holds a new token that works.
+  # 3. The old token is removed after the consumer holds the new one.
+  while :; do
+    pending=""
+    while read -r key secret; do
+      [ -n "$key" ] || continue
+      old="${olds[$secret]}"
+      if [ -z "${news[$secret]:-}" ]; then
+        new="$(secret_value "$secret" pat)"
+        if [ -n "$new" ] && [ "$new" != "$old" ]; then
+          mask "$new"
+          [ "$(zitadel_user_status "$new")" = 200 ] || { miss "Zitadel refuses the new token of ${secret}"; return 1; }
+          ok "${secret} holds a new token that Zitadel accepts"
+          news[$secret]="$new"
+        else
+          pending="${pending} ${secret}: still the old token;"
+          continue
+        fi
+      fi
+      [ "${news[$secret]}" != "retired" ] || continue
+      code="$(zitadel_user_status "$old")"
+      if [ "$code" = 401 ]; then
+        ok "Zitadel refuses the old token of ${secret}"
+        news[$secret]="retired"
+      else
+        pending="${pending} ${secret}: Zitadel answers ${code:-nothing} to the old token, not 401;"
+      fi
+    done <<< "$ZITADEL_TOKENS"
+    [ -n "$pending" ] || break
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "the token rotation did not finish:${pending}"; return 1; }
+    sleep 30
+  done
 
   # 4. The callers: the login UI restarted onto the new token, and the
   #    platform-operator passes a full reconcile with the new admin token.
@@ -1032,6 +1076,11 @@ cg_all_pods() {
   done
 }
 
+# CG_SVID_SLACK_S: the time between the mint of the reader SVID and the start
+# of CG_DEADLINE (the bundle read and the first port-forward), plus the length
+# of the last check after the deadline.
+CG_SVID_SLACK_S=300
+
 class_platform_signing_keys() {
   local work td reader secret old new seed
   [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
@@ -1041,8 +1090,12 @@ class_platform_signing_keys() {
   old="$(secret_value "$secret" current.kid)"
   [ -n "$old" ] || { miss "the Secret ${secret} holds no current kid"; rm -rf "$work"; return 1; }
 
-  # A client SVID of the reader that the daemon admits on :8086, 10 minutes
-  # long. The key stays in the temporary directory and is removed at the end.
+  # A client SVID of the reader that the daemon admits on :8086. The key stays
+  # in the temporary directory and is removed at the end. The SVID must live
+  # to the end of the class: every check below runs until CG_DEADLINE, and the
+  # sidecar promotes the next kid no sooner than 600 s after its write. A
+  # lifetime of 10 minutes ended before the check after the promotion, so the
+  # handshake failed and each pod "answered nothing" (audit of 2026-10-19).
   td="$(kubectl -n "$NS" get configmap "${RELEASE}-server" -o jsonpath='{.data.server\.conf}' \
         | jq -r '.server.trust_domain // empty')"
   reader="$(kubectl -n "$NS" get statefulset "$DAEMON_STS" -o json \
@@ -1051,7 +1104,7 @@ class_platform_signing_keys() {
   [ -n "$td" ] && [ -n "$reader" ] || { miss "no trust domain or no reader SVID of the daemon key route"; rm -rf "$work"; return 1; }
   # x509 mint prints the SVID, then its private key, then the roots. The
   # first certificate is the SVID.
-  ( umask 077; spire x509 mint -spiffeID "$reader" -ttl 10m > "$work/mint.txt" ) \
+  ( umask 077; spire x509 mint -spiffeID "$reader" -ttl "$(( ROTATION_WAIT + CG_SVID_SLACK_S ))s" > "$work/mint.txt" ) \
     || { miss "spire-server x509 mint of the reader SVID failed"; rm -rf "$work"; return 1; }
   openssl x509 < "$work/mint.txt" > "$work/svid.pem" 2>/dev/null
   ( umask 077; awk '/BEGIN .*PRIVATE KEY/{k=1} k{print} /END .*PRIVATE KEY/{exit}' "$work/mint.txt" > "$work/key.pem" )
@@ -1612,6 +1665,11 @@ daemon_restarts() {
     | jq -r '.items[] | .metadata.name as $p | .status.containerStatuses[]? | "\($p)/\(.name) \(.restartCount)"' | sort
 }
 
+# KUBELET_SYNC_WAIT: the seconds the kubelet may take to write a changed
+# Secret into the volume of a running pod (its sync period of 60 s, and the
+# Secret cache), with a margin.
+KUBELET_SYNC_WAIT=120
+
 # new_fga_key: 43 URL-safe base64 characters, the shape of the seed kind rand.
 new_fga_key() { head -c 32 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '='; }
 
@@ -1639,6 +1697,12 @@ class_openfga_preshared_key() {
     sleep 15
   done
   ok "after one rotation OpenFGA accepts the new key and the old one"
+  # The clients read k1 from their key files only after the kubelet writes the
+  # new Secret into each pod. The second rotation drops k0 from OpenFGA, so it
+  # must wait for that write, or a client that still holds k0 is refused and
+  # the class reads a race as a failed rotation (audit of 2026-10-19). An
+  # operator who rotates twice waits the same sync period.
+  sleep "$KUBELET_SYNC_WAIT"
 
   k2="$(new_fga_key)"; mask "$k2"
   set_at_source gibson-openfga-preshared-key key_previous "$k1" \
@@ -1654,7 +1718,7 @@ class_openfga_preshared_key() {
 
   # Each client reads its key files again within ten seconds; give the
   # kubelet a sync period to write them, then prove each client.
-  sleep 120
+  sleep "$KUBELET_SYNC_WAIT"
   [ "$unready" -eq 0 ] || { miss "a daemon pod went unready ${unready} times during the rotations: its OpenFGA Check was refused"; return 1; }
   [ "$(daemon_restarts)" = "$restarts" ] \
     || { miss "a daemon pod or container restarted during the rotations, so the poll cannot prove it kept service"; return 1; }
