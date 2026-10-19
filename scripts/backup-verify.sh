@@ -7,7 +7,7 @@
 # proves an upload happened and nothing about readability, which is how 34
 # secrets "survived" a teardown unreadable on 2026-09-01 (CONTEXT.md
 # § Backup-verify). This is a canary decrypt, not a manifest check and not a
-# full restore. The full restore rehearsal is the daily exit test for
+# full restore. The full restore rehearsal is the backup-restore exit test for
 # blocker 3 (test/dr/), never a per-teardown step.
 #
 # TWO SUBCOMMANDS, because half the work has to happen BEFORE the backup.

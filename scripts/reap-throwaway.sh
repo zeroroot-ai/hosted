@@ -13,7 +13,8 @@
 #      so it survives a dead runner, a cancelled job and a lost state file.
 #   2. the workflow tears the environment down, and ec2-post-destroy-verify.sh
 #      asks the account what survived.
-#   3. this, on a schedule.
+#   3. this, run by hand (no workflow runs on a schedule, owner order of
+#      2026-10-19).
 #
 # WHAT IS LEFT FOR 3. Two things 1 cannot do.
 #

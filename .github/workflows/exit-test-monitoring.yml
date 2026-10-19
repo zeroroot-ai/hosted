@@ -5,8 +5,8 @@
 # cluster through the SSM forward of `make with-cluster`, in one step,
 # because the forward lives as long as the command that owns it.
 #
-# WHEN IT RUNS (ADR-0080): on main each day against staging, and on dispatch
-# against a named env. Never on a pull request.
+# WHEN IT RUNS (ADR-0080): on dispatch, against the env it names. Never on a
+# pull request, and never on a schedule.
 #
 # The mailbox is Google Workspace, which no CI credential reads. The run
 # proves that the relay accepted the message. The owner confirms the message
