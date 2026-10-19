@@ -26,7 +26,7 @@
 #            NotFound). Runs test/identity/exit-test-identity.sh --offline.
 #
 # WHERE THE ENFORCED-POLICY RUN HAPPENS (owner decision of 2026-10-05,
-# hosted#428): here, on kind, each day. The kind cluster runs Cilium since
+# hosted#428): here, on kind. The kind cluster runs Cilium since
 # hosted#436, and Cilium enforces each NetworkPolicy and CiliumNetworkPolicy
 # of the chart. So both legs run the identity model under enforced policy.
 # The offline leg then runs test/identity/deny-probe.sh: a deliberate deny

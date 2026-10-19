@@ -99,7 +99,7 @@ The drill environment accepts an instance type from the list `envs/drill.instanc
 make recreate ENV=drill INSTANCE_TYPE=m8i.2xlarge
 ```
 
-The `drill` workflow has the same value as the dispatch input `instance_type`. The scheduled run passes no value, so it uses the type of `envs/drill.tfvars`.
+The `drill` workflow has the same value as the dispatch input `instance_type`. A dispatch with no value uses the type of `envs/drill.tfvars`.
 
 For a type of the `c8i`, `m8i` or `r8i` family, Terraform turns nested virtualization on. The recreate verb then fails if the node has no `/dev/kvm`.
 
@@ -115,4 +115,4 @@ With 2, Terraform builds a second instance of the same type. Its cloud-init (`te
 
 Neither node installs a sandbox runtime. The sandbox runtime of setec is the launcher pod, and a node needs `/dev/kvm` only (ADR-0083, hosted#447). So a sandbox can land on either node.
 
-The `drill` workflow has the same value as the dispatch input `node_count`. The scheduled run passes no value, so it keeps one node.
+The `drill` workflow has the same value as the dispatch input `node_count`. A dispatch with no value keeps one node.

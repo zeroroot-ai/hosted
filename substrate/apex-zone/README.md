@@ -169,7 +169,7 @@ terraform -chdir=eks/gibson state rm \
   `eks/gibson-bootstrap` anywhere; the zone here carries `prevent_destroy`.
   Its `--selftest` rejects seven fixtures first.
 - `exit-test-terraform.yml`, job `apex-zone plan is empty` (on `main` and
-  daily, never on a PR): `terraform plan -detailed-exitcode` on this workspace
+  on dispatch, never on a PR): `terraform plan -detailed-exitcode` on this workspace
   exits 0.
 
 ## CI access

@@ -978,7 +978,7 @@ global:
   # tenantId is a SLUG and must avoid the reserved-names denylist (the
   # gibson-reserved-names ConfigMap: default, admin, system, root, gibson,
   # kube-*, system-*, gibson-*). "primary" is the plain non-reserved slug the
-  # baseline profile proves daily.
+  # baseline profile proves.
   firstTenant:
     enabled: true
     tenantId: "primary"

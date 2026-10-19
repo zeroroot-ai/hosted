@@ -180,7 +180,7 @@
 # that disk-public-keys prints, so neither a retired key nor a missing
 # previous key reaches a cluster.
 # Drill keeps SETEC_DISK_SIGNING_SEED_PREVIOUS for good: it is the second seed
-# that the monthly rotation test switches to (hosted#444, option a). Never run
+# that the rotation test switches to (hosted#444, option a). Never run
 # step 5 on drill.
 #
 # Exit codes: 0 ok, 1 the keyring fails a check, 2 the command could not run.
@@ -222,7 +222,7 @@ MEMBERS=(
 # it set: KEYRING_SET_FP_<MEMBER>=<16 hex>. Neither is a member or in any
 # fingerprint of substrate.env. `set` refuses the value already set, so a
 # new set time always means a new value. keyring-to-cluster.sh copies the dates onto the keyring
-# Secret, and the monthly drill fails a value older than its lifetime
+# Secret, and the rotation drill fails a value older than its lifetime
 # (ADR-0171, row vendor-issued-inputs).
 VENDOR_MEMBERS="GHCR_PULL_TOKEN GITHUB_APP_PRIVATE_KEY STRIPE_SECRET_KEY STRIPE_PUBLISHABLE_KEY STRIPE_WEBHOOK_SECRET"
 is_vendor() { case " $VENDOR_MEMBERS " in *" $1 "*) return 0 ;; esac; return 1; }

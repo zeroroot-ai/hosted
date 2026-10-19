@@ -3,8 +3,8 @@
 # drill-rotate-keys.sh — the access key rotation of the drill IAM users, in
 # the drill (ADR-0083 amendment of 2026-10-13, drill sweep row 24).
 #
-#   drill-rotate-keys.sh start      start a rotation of each user (the
-#                                   monthly rotation run)
+#   drill-rotate-keys.sh start      start a rotation of each user (a
+#                                   rotation dispatch of drill)
 #   drill-rotate-keys.sh continue   continue each open rotation (each run)
 #
 # Each user is one `make substrate-rotate ENV=drill CREDENTIAL=<user>`
