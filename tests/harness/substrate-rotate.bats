@@ -291,17 +291,17 @@ slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfva
 @test "FAILING FIXTURE: a later run of an open rotation keeps the first switch time" {
   date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
   QUIET_SECS=3600 rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   first="$(jq -r .platform "$STATE/key-rotation.json")"
   sleep 1
   QUIET_SECS=3600 rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   [ "$(jq -r .platform "$STATE/key-rotation.json")" = "$first" ]
 }
 
 @test "a new key not yet in use stops the run, and a later run finishes the rotation" {
   rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   [[ "$output" == *"no use of the new key"* ]]
   [ "$(slots)" = '{"active":"b","keep":["a","b"]}' ]
   date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
@@ -312,7 +312,7 @@ slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfva
 
 @test "FAILING FIXTURE: an open rotation on a runner with no initialized backend inits first and goes on (drill rotation run 1)" {
   rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   # A fresh runner: nothing is initialized, and the next call is not an apply.
   rm -f "$D/tf.inited"
   date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
@@ -321,9 +321,9 @@ slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfva
   [ "$(slots)" = '{"active":"b","keep":["b"]}' ]
 }
 
-@test "FAILING FIXTURE: a terraform error ends with exit 2 and never with the exit 1 of a wait (drill rotation run 1)" {
+@test "FAILING FIXTURE: a terraform error ends with exit 2 and never with the exit 10 of a wait (drill rotation run 1)" {
   rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   STUB_TF_OUTPUT_FAIL=1 rotate
   [ "$status" -eq 2 ] || { echo "status ${status}: $output"; false; }
   # The rotation stays open: the old key is not deleted.
@@ -341,7 +341,7 @@ slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfva
 @test "inside the quiet time the old key stays, and the run asks to come back" {
   date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
   QUIET_SECS=3600 rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   [[ "$output" == *"must stay unused"* ]]
   [ "$(slots)" = '{"active":"b","keep":["a","b"]}' ]
 }
@@ -349,7 +349,7 @@ slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfva
 @test "FAILING FIXTURE: a reader that does not run again after the restart stops the rotation, and both keys stay" {
   date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
   NOT_READY=deployment/velero rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   [[ "$output" == *"does not run again"* ]]
   [ "$(jq -c 'keys' "$D/keys.json")" = '["a","b"]' ]
 }
@@ -364,7 +364,7 @@ smtp_relay_new() {
 @test "an smtp rotation moves the derived Secret, restarts its readers, updates Zitadel, and proves the relay takes the new key" {
   export U=smtp
   ESO_STALE=1 rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   [[ "$output" == *"does not hold the new SMTP credential yet"* ]]
   smtp_relay_new
   rotate
@@ -392,7 +392,7 @@ smtp_relay_new() {
   ESO_STALE=1 rotate
   smtp_relay_new
   COPY=1 COPY_STALE=1 rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   [[ "$output" == *"the copy monitoring/alertmanager-config of gibson/gibson-email-smtp has not refreshed yet"* ]] || { echo "$output"; false; }
   [ "$(jq -r '.smtp // "none"' "$STATE/key-rotation.json")" = none ]
 }
@@ -417,7 +417,7 @@ smtp_relay_new() {
   ESO_STALE=1 rotate
   smtp_relay_new
   COPY=1 COPY_NOT_READY=1 rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   [[ "$output" == *"has not refreshed yet"* ]] || { echo "$output"; false; }
 }
 
@@ -457,7 +457,7 @@ smtp_relay_new() {
   ESO_STALE=1 rotate
   smtp_relay_new
   OPERATOR_STALE=1 rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   [[ "$output" == *"the Zitadel SMTP provider does not hold the new password yet"* ]]
   [ "$(jq -c 'keys' "$D/keys.json")" = '["a","b"]' ]
 }
@@ -497,7 +497,7 @@ smtp_relay_new() {
   rm -f "$STATE/key-slots.tfvars.json" "$STATE/keyring.env" "$STATE/substrate.env"
   # A new key not yet in use: the run stops after the switch.
   E=drill rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   [[ "$output" == *"no use of the new key"* ]]
   [ "$(jq -c '.key_slots.platform' "$D/s3/key-slots.tfvars.json")" = '{"active":"b","keep":["a","b"]}' ]
   printf '%s' "$(jq -r .keyring "$D/sm.json")" > "$D/kr"
@@ -523,7 +523,7 @@ smtp_relay_new() {
   jq -n --rawfile k "$STATE/keyring.env" --rawfile s "$STATE/substrate.env" '{keyring: $k, substrate_env: $s}' > "$D/sm.json"
   rm -f "$STATE/key-slots.tfvars.json" "$STATE/keyring.env" "$STATE/substrate.env"
   E=drill rotate
-  [ "$status" -eq 1 ]
+  [ "$status" -eq 10 ]
   # The seal key class of the rotation test rotates the seal key in this
   # runner's keyring only. The next substrate-rotate.sh must not pull over it.
   sed -i "s|^OPENBAO_SEAL_KEY=.*|OPENBAO_SEAL_KEY=$(head -c 32 /dev/urandom | base64 -w0)|" "$STATE/keyring.env"

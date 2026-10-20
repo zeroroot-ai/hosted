@@ -12,7 +12,7 @@
 # to it, each reader restarts, and the old key is deleted only after AWS
 # reports it unused since the switch. One rotation takes longer than one run:
 # the new key must be seen in use (WAIT_SECS), and the old key must then stay
-# unused for QUIET_SECS. So substrate-rotate.sh stops with exit 1 when it must
+# unused for QUIET_SECS. So substrate-rotate.sh stops with exit 100 when it must
 # wait, and a later run continues. The stage 0 files of drill live in AWS
 # (scripts/stage0-store.sh), so each run sees the state the last one left.
 #
@@ -21,8 +21,9 @@
 # Env: SUBSTRATE_DIR (the runner's stage 0 directory, from drill-setup),
 #      WAIT_SECS (default 900 here: a run does not wait hours for a key to be
 #      used, the next run looks again), QUIET_SECS (the script's default).
-# Exit: 0 every user rotated, waits, or has nothing open · 1 a rotation failed
-#       or halted (substrate-rotate.sh exit 3: a person must act)
+# Exit: 0 every user rotated, waits (exit 10 only), or has nothing open · 1 a
+#       rotation failed, halted (substrate-rotate.sh exit 3: a person must
+#       act), or did not run (with-cluster.sh exit 1)
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -67,11 +68,14 @@ for user in $USERS; do
   fi
   printf '▶ %s: %s the rotation\n' "$user" "$MODE"
   # The same call as `make substrate-rotate`, without make, which turns
-  # every exit code into 2: substrate-rotate.sh exits 1 when it must wait.
+  # every exit code into 2: substrate-rotate.sh exits 10 when it must wait.
   "$WITH_CLUSTER" "$ENV" "$HERE/substrate-rotate.sh" "$STATE" "$ENV" "$user"
+  # Only exit 10 of substrate-rotate.sh is a wait. Exit 1 is also the exit of
+  # with-cluster.sh when nothing ran (no instance, two instances, no session
+  # plugin, an API that does not answer), so it is a failure here.
   case $? in
     0) printf '  ✓ %s: rotated, the old key is deleted\n' "$user" ;;
-    1) printf '  %s: the rotation waits; a later drill run continues it\n' "$user" ;;
+    10) printf '  %s: the rotation waits; a later drill run continues it\n' "$user" ;;
     *) failed="${failed} ${user}" ;;
   esac
   # Each run of substrate-rotate.sh reads the stage 0 files from AWS and
