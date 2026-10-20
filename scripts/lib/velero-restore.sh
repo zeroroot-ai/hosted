@@ -667,7 +667,8 @@ wait_redis_on_real_secret() {
       if [ -z "$uid0" ]; then
         printf '  the restored Redis pod has no priorityClassName and the StatefulSet did not replace it: deleting it once\n'
         uid0="$uid"; how="deleted once, then made again by the StatefulSet"
-        left=$(( deadline - $(date +%s) )); [ "$left" -gt 0 ] || left=1
+        left=$(( deadline - $(date +%s) ))
+        [ "$left" -gt 0 ] || die "the Redis restore passed its ${bound}s deadline before the delete of ${NS}/${pod}, which runs without its priorityClassName"
         kubectl -n "$NS" delete "pod/${pod}" --ignore-not-found --wait=true --timeout="${left}s" >/dev/null \
           || die "could not delete the restored Redis pod ${NS}/${pod} within ${left}s, which runs without its priorityClassName"
         continue

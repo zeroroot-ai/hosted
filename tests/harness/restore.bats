@@ -328,7 +328,7 @@ for d in docs:
     if [ -n "${STUB_REDIS_PC_NEVER:-}" ]; then pc=
     elif [ -n "${STUB_REDIS_PC_EMPTY:-}" ] && [ ! -e "$STATE/redis-pod-deleted" ]; then pc=; fi
     printf '%s|StatefulSet|True|%s|%s' "${STUB_REDIS_POD_REV:-rev1}" "$uid" "$pc"; exit 0 ;;
-  "-n gibson delete pod/gibson-redis-stack-0 --ignore-not-found --wait=true --timeout="*"s") : > "$STATE/redis-pod-deleted"; exit 0 ;;
+  "-n gibson delete pod/gibson-redis-stack-0 --ignore-not-found --wait=true --timeout="[1-9]*s) : > "$STATE/redis-pod-deleted"; exit 0 ;;
   "-n gibson get secret gibson-redis-stack -o json")
     printf '{"data":{"redis-password":"%s"}}' "$(printf '%s' hunter2 | base64)"; exit 0 ;;
   "-n gibson exec -i gibson-redis-stack-0 -c redis-stack -- sh -c "*) cat > /dev/null; echo PONG; exit 0 ;;
