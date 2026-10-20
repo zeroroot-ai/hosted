@@ -623,8 +623,11 @@ if [ -z "$DEVICE_ID" ]; then
   die "Zitadel did not resolve device code ${USER_CODE} to a request. The device grant is not usable on this install"
 fi
 
-SESSION="$(zitadel_api -X POST "${ZURL}/v2/sessions" \
-  -d "$(jq -n --arg u "$ADMIN_USER" --arg p "$ADMIN_PASS" '{checks:{user:{loginName:$u},password:{password:$p}}}')" || true)"
+# The password goes to jq in its environment and to curl on stdin (-d @-), never
+# as an argument that a process list shows.
+SESSION="$(ADMIN_USER="$ADMIN_USER" ADMIN_PASS="$ADMIN_PASS" \
+  jq -n '{checks:{user:{loginName:env.ADMIN_USER},password:{password:env.ADMIN_PASS}}}' \
+  | zitadel_api -X POST "${ZURL}/v2/sessions" -d @- || true)"
 SESSION_ID="$(jq -r '.sessionId // empty' <<<"$SESSION" 2>/dev/null || true)"
 SESSION_TOKEN="$(jq -r '.sessionToken // empty' <<<"$SESSION" 2>/dev/null || true)"
 if [ -z "$SESSION_ID" ] || [ -z "$SESSION_TOKEN" ]; then

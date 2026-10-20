@@ -116,7 +116,7 @@ IMDS_TOKEN="$(curl -fsS --retry 5 --retry-all-errors -X PUT \
   http://169.254.169.254/latest/api/token \
   -H 'X-aws-ec2-metadata-token-ttl-seconds: 300')"
 PRIVATE_IP="$(curl -fsS --retry 5 --retry-all-errors \
-  -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" \
+  -H @<(printf 'X-aws-ec2-metadata-token: %s\n' "$IMDS_TOKEN") \
   http://169.254.169.254/latest/meta-data/local-ipv4)"
 install -d -m 0700 /var/lib/rancher/k3s/server
 sed "s#https://127.0.0.1:6443#https://$PRIVATE_IP:6443#" \

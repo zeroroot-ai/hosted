@@ -157,8 +157,11 @@ cypher() {
   pod="$(kubectl -n "$TENANT_NS" get pods -l app.kubernetes.io/component=tenant-neo4j \
     -o jsonpath='{.items[0].metadata.name}' 2>/dev/null)"
   [ -n "$pod" ] || die "no tenant Neo4j pod in namespace ${TENANT_NS} (label app.kubernetes.io/component=tenant-neo4j)"
+  # The user and the password go to cypher-shell in its environment, not in
+  # its arguments, which a process list of the pod shows. The statement is the
+  # first argument of the shell, so a quote in it cannot run a command.
   kubectl -n "$TENANT_NS" exec "$pod" -c neo4j -- sh -c \
-    'A="${NEO4J_AUTH:-$(cat "$NEO4J_AUTH_PATH")}"; exec cypher-shell --format plain -a bolt://127.0.0.1:7687 -u "${A%%/*}" -p "${A#*/}" "'"$1"'"'
+    'A="${NEO4J_AUTH:-$(cat "$NEO4J_AUTH_PATH")}"; NEO4J_USERNAME="${A%%/*}" NEO4J_PASSWORD="${A#*/}" exec cypher-shell --format plain -a bolt://127.0.0.1:7687 "$1"' sh "$1"
 }
 
 wait_for() {

@@ -527,8 +527,11 @@ zitadel_login() {
   device_id="$(jq -r '.deviceAuthorizationRequest.id // empty' <<<"$device_req" 2>/dev/null || true)"
   [ -n "$device_id" ] || { echo "$device_req" >&2; die "Zitadel did not resolve the device code for ${email}"; }
 
-  session="$(zitadel_api -X POST "${ZURL}/v2/sessions" \
-    -d "$(jq -n --arg u "$email" --arg p "$pass" '{checks:{user:{loginName:$u},password:{password:$p}}}')" || true)"
+  # The password and the session token go to jq in its environment and to curl
+  # on stdin (-d @-), never as an argument that a process list shows.
+  session="$(LOGIN_NAME="$email" LOGIN_PASS="$pass" \
+    jq -n '{checks:{user:{loginName:env.LOGIN_NAME},password:{password:env.LOGIN_PASS}}}' \
+    | zitadel_api -X POST "${ZURL}/v2/sessions" -d @- || true)"
   session_id="$(jq -r '.sessionId // empty' <<<"$session" 2>/dev/null || true)"
   session_token="$(jq -r '.sessionToken // empty' <<<"$session" 2>/dev/null || true)"
   if [ -z "$session_id" ] || [ -z "$session_token" ]; then
@@ -536,9 +539,10 @@ zitadel_login() {
     die "Zitadel refused a password session for ${email} — the credential does not sign in"
   fi
 
-  approve_code="$(zitadel_api -o "${WORK}/approve.out" -w '%{http_code}' -X POST \
-    "${ZURL}/v2/oidc/device_authorization/${device_id}" \
-    -d "$(jq -n --arg id "$session_id" --arg tok "$session_token" '{session:{sessionId:$id,sessionToken:$tok}}')" || true)"
+  approve_code="$(SESSION_ID="$session_id" SESSION_TOKEN="$session_token" \
+    jq -n '{session:{sessionId:env.SESSION_ID,sessionToken:env.SESSION_TOKEN}}' \
+    | zitadel_api -o "${WORK}/approve.out" -w '%{http_code}' -X POST \
+        "${ZURL}/v2/oidc/device_authorization/${device_id}" -d @- || true)"
   [ "$approve_code" = "200" ] || { cat "${WORK}/approve.out" >&2; die "Zitadel refused the device approval for ${email} (HTTP ${approve_code:-<none>})"; }
 
   login_rc=0
