@@ -139,7 +139,7 @@ PY
 }
 
 @test "saas overlay: FAILING FIXTURE: a pod that mounts the SPIFFE CSI volume and does not exclude it fails the check" {
-  run python3 "$CHART_DIR/../check-csi-excludes.py" "$CHART_DIR/../testdata/csi-no-exclude.yaml"
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$CHART_DIR/../testdata/csi-no-exclude.yaml" --expect 1
   [ "$status" -eq 1 ]
   [[ "$output" == *"volume spire-agent-socket is not in backup.velero.io/backup-volumes-excludes"* ]]
 }
@@ -153,14 +153,29 @@ PY
 
 @test "saas overlay: FAILING FIXTURE: a Job, a CronJob and a Pod with the SPIFFE CSI volume and no exclude each fail the check" {
   for kind in job cronjob pod; do
-    run python3 "$CHART_DIR/../check-csi-excludes.py" "$CHART_DIR/../testdata/csi-${kind}-no-exclude.yaml"
+    run python3 "$CHART_DIR/../check-csi-excludes.py" "$CHART_DIR/../testdata/csi-${kind}-no-exclude.yaml" --expect 1
     [ "$status" -eq 1 ] || { echo "$kind: status ${status}: $output"; false; }
     [[ "$output" == *"volume spire-agent-socket is not in backup.velero.io/backup-volumes-excludes"* ]]
   done
 }
 
 @test "saas overlay: FAILING FIXTURE: a missing input is exit 2 with a named error, never a finding" {
-  run python3 "$CHART_DIR/../check-csi-excludes.py" "$TMP/does-not-exist.yaml"
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$TMP/does-not-exist.yaml" --expect 1
   [ "$status" -eq 2 ]
   [[ "$output" == *"check-csi-excludes: cannot read"* ]]
+}
+
+@test "saas overlay: FAILING FIXTURE: a bad call or bad input is exit 2 with a named error, never a traceback" {
+  F="$CHART_DIR/../testdata"
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/csi-pod-no-exclude.yaml"
+  [ "$status" -eq 2 ]; [[ "$output" == *"--expect N is required"* ]]
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/csi-pod-no-exclude.yaml" --expect
+  [ "$status" -eq 2 ]; [[ "$output" == *"--expect needs a number"* ]]
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/csi-pod-no-exclude.yaml" --expect x
+  [ "$status" -eq 2 ]; [[ "$output" == *"--expect needs a number, got 'x'"* ]]
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/csi-pod-no-name.yaml" --expect 1
+  [ "$status" -eq 2 ]; [[ "$output" == *"has no metadata.name"* ]]
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/not-yaml.yaml" --expect 1
+  [ "$status" -eq 2 ]; [[ "$output" == *"check-csi-excludes: cannot read"* ]]
+  [[ "$output" != *"Traceback"* ]]
 }
