@@ -19,7 +19,7 @@ audit_wired() {
   local line
   line="$(grep -v '^\s*#' "$1" \
     | grep -E 'gitops/scripts/prune-orphans\.sh" audit "\$ENV_NAME" "/tmp/\$\{APP\}-app\.json"')" || return 1
-  ! grep -qE '\|\| *(true|:)' <<<"$line"
+  ! grep -qE '\|\| *(true|:)' <<<"$line" || { echo "a line that must not be there matched"; false; }
 }
 
 @test "prove-promotion.sh runs the prune allowlist audit" {

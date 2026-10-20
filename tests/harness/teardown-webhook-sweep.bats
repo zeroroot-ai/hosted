@@ -108,7 +108,7 @@ SH
   write_live_shape_stub
   run bash "$SCRIPT"
   [ "$status" -eq 0 ]
-  ! grep -q "offsite-validator" "$STATE/trace"
+  ! grep -q "offsite-validator" "$STATE/trace" || { echo "a line that must not be there matched"; false; }
   [[ "$output" == *"offsite-validator is url-backed"* ]]
 }
 
@@ -130,7 +130,7 @@ esac
 SH
   run bash "$SCRIPT"
   [ "$status" -eq 0 ]
-  ! grep -qi "validatingadmissionpolicy" "$STATE/allcalls"
+  ! grep -qi "validatingadmissionpolicy" "$STATE/allcalls" || { echo "a line that must not be there matched"; false; }
   [ ! -f "$STATE/trace" ] || ! grep -qi "validatingadmissionpolicy" "$STATE/trace"
 }
 

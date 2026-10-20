@@ -246,7 +246,7 @@ SH
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
   assert_output_has "nothing to destroy"
   grep -q -x "post-destroy-verify drill" "$STATE/steps.log"
-  ! grep -q ' destroy ' "$STATE/terraform.log"
+  ! grep -q ' destroy ' "$STATE/terraform.log" || { echo "a line that must not be there matched"; false; }
 }
 
 @test "FAILING FIXTURE (row 20): an empty state with a tagged survivor in the account is a failure, not a clean account" {
@@ -304,7 +304,7 @@ PY
   export STUB_LOCK_WHO="someone-else@their-laptop"
   run env MODE=wipe "$TREE/scripts/teardown-ec2.sh" "$SUBSTRATE" drill
   [ "$status" -ne 0 ]
-  ! grep -q 'force-unlock' "$STATE/terraform.log"
+  ! grep -q 'force-unlock' "$STATE/terraform.log" || { echo "a line that must not be there matched"; false; }
   assert_output_has "held by someone else"
 }
 
@@ -314,7 +314,7 @@ PY
   export STUB_LOCK_CREATED="2001-01-01T00:00:00Z"
   run env MODE=wipe "$TREE/scripts/teardown-ec2.sh" "$SUBSTRATE" drill
   [ "$status" -ne 0 ]
-  ! grep -q 'force-unlock' "$STATE/terraform.log"
+  ! grep -q 'force-unlock' "$STATE/terraform.log" || { echo "a line that must not be there matched"; false; }
   assert_output_has "predates this teardown"
 }
 

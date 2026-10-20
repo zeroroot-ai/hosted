@@ -795,8 +795,7 @@ PLUGINNS
   run recreate RESTORE_FROM="$BACKUP" CLUSTER=restore-bats
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"plugin namespaces left to the tenant-operator: none"* ]]
-  run grep -q 'plugins$' "$STATE/applied-raw.yaml"
-  [ "$status" -ne 0 ]
+  ! grep -q 'plugins$' "$STATE/applied-raw.yaml" || { echo "a line that must not be there matched"; false; }
 }
 
 @test "FAILING FIXTURE: a Restore carrying a Backup-only scoped filter is caught" {
