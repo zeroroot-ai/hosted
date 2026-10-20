@@ -503,12 +503,12 @@ velero_helpers() {
 import re, sys
 text = open(sys.argv[1]).read()
 out = []
-for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "velero_backup"):
+for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "velero_delete_backup", "velero_backup"):
     m = re.search(r"^%s\(\) \{.*?^\}\n" % name, text, re.M | re.S)
     if not m:
         sys.exit("no function %s in the script" % name)
     out.append(m.group(0))
-for const in ("VELERO_IN_FLIGHT_PHASES", "VELERO_READY_WAIT", "VELERO_PICKUP_WAIT"):
+for const in ("VELERO_IN_FLIGHT_PHASES", "VELERO_READY_WAIT", "VELERO_PICKUP_WAIT", "VELERO_DELETE_WAIT", "VELERO_RESTARTED_AT"):
     m = re.search(r'^%s=.*\n' % const, text, re.M)
     if not m:
         sys.exit("no %s in the script" % const)
@@ -526,7 +526,8 @@ case "$*" in
     printf '{"items":[{"metadata":{"name":"platform-hourly-1"},"status":{"phase":"%s"}}]}' "$p" ;;
   "apply -f -") cat > "$STUB_DIR/applied"; echo x >> "$STUB_DIR/applies" ;;
   # The storage locations. STUB_BSL: the phase (default Available).
-  "-n velero get backupstoragelocations -o jsonpath="*) printf '%s\n' "${STUB_BSL:-Available}" ;;
+  # STUB_BSL_VALIDATED: the lastValidationTime (default: far in the future).
+  "-n velero get backupstoragelocations -o jsonpath="*) printf '%s %s\n' "${STUB_BSL:-Available}" "${STUB_BSL_VALIDATED-2099-01-01T00:00:00Z}" ;;
   # STUB_PHASE_FIRST_EMPTY: the first backup of the check has no phase, as a
   # server that does not reconcile it. STUB_PHASE_EMPTY: every backup has none.
   # A bound, so a loop that never ends fails the test instead of hanging it.
@@ -536,7 +537,18 @@ case "$*" in
     elif [ -n "${STUB_PHASE_EMPTY:-}" ]; then :
     elif [ -n "${STUB_PHASE_FIRST_EMPTY:-}" ] && [[ "$5" == *-1 ]]; then :
     else printf '%s' "$STUB_PHASE"; fi ;;
-  "-n velero delete backup rotation-drill-"*" --ignore-not-found --wait=false") echo "$5" >> "$STUB_DIR/deleted" ;;
+  # STUB_DELETE_FAILS: the delete fails. STUB_STAYS: the delete works and the
+  # backup is still there.
+  "-n velero delete backup rotation-drill-"*" --ignore-not-found --wait=false")
+    [ -z "${STUB_DELETE_FAILS:-}" ] || exit 1
+    echo "$5" >> "$STUB_DIR/deleted" ;;
+  "-n velero get backup rotation-drill-"?*)
+    # The check that a deleted backup is gone: no other flag than the name.
+    if [ "$#" -eq 5 ]; then
+      [ -n "${STUB_STAYS:-}" ] || ! grep -qx "$5" "$STUB_DIR/deleted" 2>/dev/null || exit 1
+      exit 0
+    fi
+    echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
   # What the diagnostics read.
   "-n velero get pods -o wide"|"-n velero get backupstoragelocations"|"-n velero logs deployment/velero --tail=60") echo "stub diagnostics" ;;
   "-n velero get backup rotation-drill-"*" -o yaml") printf 'status:\n  phase: ""\n' ;;
@@ -548,7 +560,7 @@ SH
 
 run_velero() {
   PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c '
-    NS=gibson VELERO_QUEUE_WAIT="$2" VELERO_RUN_WAIT="${3:-900}" VELERO_PICKUP_WAIT=0 VELERO_READY_WAIT=0
+    NS=gibson VELERO_QUEUE_WAIT="$2" VELERO_RUN_WAIT="${3:-900}" VELERO_PICKUP_WAIT=0 VELERO_READY_WAIT=0 VELERO_DELETE_WAIT=0 VELERO_RESTARTED_AT="${STUB_RESTARTED_AT:-}"
     sleep() { :; }
     . "$1"
     velero_backup' _ "$TMP/velero.sh" "$1" "${2:-900}"
@@ -630,6 +642,41 @@ run_velero() {
   [ ! -e "$TMP/applied" ]
 }
 
+@test "FAILING FIXTURE: an unpicked backup whose delete fails is a stale backup, and no second backup is made (hosted#68 review)" {
+  velero_helpers
+  export STUB_BUSY=0 STUB_PHASE_EMPTY=1 STUB_DELETE_FAILS=1
+  run_velero 3600
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s' "$output" | tail -n1)" = "timeout:stale-backup" ] || { echo "$output"; false; }
+  [ "$(wc -l < "$TMP/applies")" -eq 1 ]
+}
+
+@test "FAILING FIXTURE: an unpicked backup that is still there after its delete is a stale backup (hosted#68 review)" {
+  velero_helpers
+  export STUB_BUSY=0 STUB_PHASE_EMPTY=1 STUB_STAYS=1
+  run_velero 3600
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s' "$output" | tail -n1)" = "timeout:stale-backup" ] || { echo "$output"; false; }
+  [ "$(wc -l < "$TMP/applies")" -eq 1 ]
+}
+
+@test "FAILING FIXTURE: a storage location validated before the restart is not ready, and no backup is made (hosted#68 review)" {
+  velero_helpers
+  export STUB_BUSY=0 STUB_PHASE=Completed STUB_RESTARTED_AT=2026-10-20T13:00:00Z STUB_BSL_VALIDATED=2026-10-20T12:59:00Z
+  run_velero 3600
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s' "$output" | tail -n1)" = "timeout:storage-location" ] || { echo "$output"; false; }
+  [ ! -e "$TMP/applied" ]
+}
+
+@test "a storage location validated after the restart is ready (hosted#68 review)" {
+  velero_helpers
+  export STUB_BUSY=0 STUB_PHASE=Completed STUB_RESTARTED_AT=2026-10-20T13:00:00Z STUB_BSL_VALIDATED=2026-10-20T13:00:30Z
+  run_velero 3600
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s' "$output" | tail -n1)" = Completed ]
+}
+
 # password_refused runs from the script text, with miss as the script has it.
 run_refused() {
   python3 - "$TEST" "$TMP/refused.sh" <<'PY'
@@ -649,7 +696,7 @@ PY
 }
 
 @test "FAILING FIXTURE: a timeout, a queue, a validation failure or a Completed backup is no refusal" {
-  for p in "timeout:InProgress" "timeout:queue (x)" "timeout:Queued" "timeout:unreconciled" "timeout:storage-location" FailedValidation Completed ""; do
+  for p in "timeout:InProgress" "timeout:queue (x)" "timeout:Queued" "timeout:unreconciled" "timeout:storage-location" "timeout:stale-backup" FailedValidation Completed ""; do
     run_refused "$p"
     [ "$status" -ne 0 ] || { echo "phase '$p' read as a refusal: $output"; false; }
     [[ "$output" == miss:* ]] || { echo "$output"; false; }

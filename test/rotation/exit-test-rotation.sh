@@ -885,12 +885,28 @@ velero_in_flight() {
 # ago takes backups only after its controllers ran (drill rotation run 1,
 # hosted#59 thread: a backup stayed with no phase for 20 minutes).
 VELERO_READY_WAIT="${VELERO_READY_WAIT:-180}"
+# VELERO_RESTARTED_AT: the time (UTC, YYYY-MM-DDTHH:MM:SSZ) taken before the
+# restart of the Velero server. The phase of a BackupStorageLocation survives a
+# restart, so Available alone can be the phase of the old server. The new
+# server validates the location again, and its lastValidationTime is later
+# than this time. Unset, the time is not checked.
+VELERO_RESTARTED_AT="${VELERO_RESTARTED_AT:-}"
 velero_storage_ready() {
-  local deadline ph
+  local deadline rows
   deadline=$(( $(date +%s) + VELERO_READY_WAIT ))
   while :; do
-    ph="$(kubectl -n velero get backupstoragelocations -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null || true)"
-    [ -n "$ph" ] && ! printf '%s\n' "$ph" | grep -qvx Available && return 0
+    rows="$(kubectl -n velero get backupstoragelocations \
+      -o jsonpath='{range .items[*]}{.status.phase} {.status.lastValidationTime}{"\n"}{end}' 2>/dev/null || true)"
+    # Each location is Available and, when a restart time is known, validated
+    # after it. An ISO time in UTC compares as text.
+    if [ -n "$rows" ] && printf '%s\n' "$rows" | awk -v since="$VELERO_RESTARTED_AT" '
+         NF == 0 { next }
+         { n++ }
+         $1 != "Available" { bad = 1 }
+         since != "" && ($2 == "" || $2 < since) { bad = 1 }
+         END { exit (n > 0 && !bad) ? 0 : 1 }'; then
+      return 0
+    fi
     [ "$(date +%s)" -lt "$deadline" ] || return 1
     sleep 10
   done
@@ -914,6 +930,21 @@ velero_diagnose() {
 # the server on the right password does not run it, and the backup is made
 # once more. A second miss is a timeout with the diagnostics.
 VELERO_PICKUP_WAIT="${VELERO_PICKUP_WAIT:-240}"
+VELERO_DELETE_WAIT="${VELERO_DELETE_WAIT:-60}"
+
+# velero_delete_backup NAME: delete an unpicked backup and see that it is gone,
+# within VELERO_DELETE_WAIT. A backup that stays would run when the server
+# restarts on the keyring password, and it would end Completed.
+velero_delete_backup() {
+  local deadline
+  kubectl -n velero delete backup "$1" --ignore-not-found --wait=false >/dev/null 2>&1 || return 1
+  deadline=$(( $(date +%s) + VELERO_DELETE_WAIT ))
+  while kubectl -n velero get backup "$1" >/dev/null 2>&1; do
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 5
+  done
+  return 0
+}
 
 velero_backup() {
   local name phase="" deadline queue_deadline busy pickup_deadline attempt=0
@@ -953,7 +984,7 @@ YAML
           # No phase: the controller has not touched the backup.
           if [ "$(date +%s)" -ge "$pickup_deadline" ]; then
             velero_diagnose "$name"
-            kubectl -n velero delete backup "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+            velero_delete_backup "$name" || { echo "stale backup ${name} could not be deleted" >&2; printf 'timeout:stale-backup'; return; }
             [ "$attempt" -lt 2 ] && continue 2
             printf 'timeout:unreconciled'; return
           fi ;;
@@ -979,6 +1010,7 @@ password_refused() {
     Completed) miss "a backup with a password that is not the keyring password completed" ;;
     FailedValidation) miss "the backup with another repository password failed validation, so it never read the repository" ;;
     timeout:unreconciled) miss "the Velero server did not pick up the backup with another repository password in two tries (no phase), so it proves no refusal. The diagnostics of the Velero server are above" ;;
+    timeout:stale-backup) miss "a backup that Velero never picked up could not be deleted, so the restart on the keyring password would run it, and it would end Completed. Delete the Backup rotation-drill-* in the velero namespace and run again" ;;
     timeout:storage-location) miss "no BackupStorageLocation was Available after the restart of the Velero server, so no backup could start and the refusal is not proved. The diagnostics are above" ;;
     *) miss "the backup with another repository password did not end (${1:-no phase}), so it proves no refusal" ;;
   esac
@@ -1042,8 +1074,10 @@ class_keyring_generated_keys() {
   # 4. Velero: the keyring password opens the repository, another does not.
   ( umask 077; grep -v '^VELERO_REPO_PASSWORD=' "$KEYRING_FILE" > "$work/velero.env"
     printf 'VELERO_REPO_PASSWORD=%s\n' "$(head -c 32 /dev/urandom | base64 -w0)" >> "$work/velero.env" )
+  VELERO_RESTARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   k2c "$work/velero.env" && velero_restart || { miss "Velero did not restart with another password"; k2c; velero_restart; rm -rf "$work"; return 1; }
   phase="$(velero_backup)"
+  VELERO_RESTARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   k2c && velero_restart || { miss "Velero did not restart with the keyring password"; rm -rf "$work"; return 1; }
   password_refused "$phase" || { rm -rf "$work"; return 1; }
   ok "a backup with another repository password does not complete (${phase})"
@@ -2361,7 +2395,7 @@ time_bound_of() {
     # backups and the settle (review of hosted#807).
     keyring-generated-keys)    b=$(( 6 * (BAO_DELETE_WAIT_S + BAO_STATE_WAIT_S) + 2 * ROLLOUT_WAIT_S
                                      + 2 * (VELERO_QUEUE_WAIT + VELERO_RUN_WAIT) + ROLLOUT_WAIT_S + SETTLE_S
-                                     + 2 * (VELERO_READY_WAIT + 2 * VELERO_PICKUP_WAIT) )) ;;
+                                     + 2 * (VELERO_READY_WAIT + 2 * (VELERO_PICKUP_WAIT + VELERO_DELETE_WAIT)) )) ;;
     setec-disk-signing-seed)   b=$(( 2 * SEED_WAIT + SANDBOX_WAIT )) ;;
     substrate-cloud-credentials) b=0 ;;
     vendor-issued-inputs)      b=0 ;;
