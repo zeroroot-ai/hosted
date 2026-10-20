@@ -141,6 +141,15 @@ jobs:
             exit 1
           fi
 
+          echo "--- a node replace forced by user data alone must pass ---"
+          python3 scripts/check-plan-invariants.py scripts/testdata/plan-userdata-replace.json
+
+          echo "--- a node replace forced by anything else must fail ---"
+          if python3 scripts/check-plan-invariants.py scripts/testdata/plan-instance-type-replace.json; then
+            echo "GUARD BROKEN: a node replace for another cause was accepted" >&2
+            exit 1
+          fi
+
           echo "OK — the assertion script fails in all four directions."
 
       # ADR-0073, hosted#418: exactly two SCPs attach to the workload account,

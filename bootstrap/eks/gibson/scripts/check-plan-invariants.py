@@ -66,6 +66,17 @@ PROTECTED_TYPES = {
     "aws_kms_key": "decrypts every object written under it",
 }
 
+# A replace that the configuration asks for on purpose. The staging node sets
+# `user_data_replace_on_change`, so a change of the node-init script replaces
+# the instance and the Elastic IP association that points at it. The address
+# survives and the node holds no data. Any other cause of a replace on these
+# two types is not on purpose and still fails. The rule reads the attribute
+# that forces the replace (`replace_paths`), never a line number.
+INTENDED_REPLACE_PATHS = {
+    "aws_instance": [["user_data_base64"]],
+    "aws_eip_association": [["instance_id"]],
+}
+
 CYCLE_RE = re.compile(r"^\s*Error: Cycle:", re.M)
 
 
@@ -112,11 +123,31 @@ def check_cycle(log_path: pathlib.Path | None) -> None:
         )
 
 
+def is_intended_replace(change: dict, plan: dict) -> bool:
+    """True for a replace that only a node-init change forces.
+
+    The association follows the instance, so it counts only when an instance
+    in the same plan is replaced for the same reason.
+    """
+    want = INTENDED_REPLACE_PATHS.get(change["type"])
+    if want is None or change["change"].get("replace_paths") != want:
+        return False
+    if change["type"] == "aws_instance":
+        return True
+    return any(
+        c["type"] == "aws_instance"
+        and set(c["change"].get("actions", [])) in REPLACE_ACTIONS
+        and c["change"].get("replace_paths") == INTENDED_REPLACE_PATHS["aws_instance"]
+        for c in plan["resource_changes"]
+    )
+
+
 def check_replacements(plan: dict) -> None:
     replaced = [
         change
         for change in plan["resource_changes"]
         if set(change.get("change", {}).get("actions", [])) in REPLACE_ACTIONS
+        and not is_intended_replace(change, plan)
     ]
     if not replaced:
         return
