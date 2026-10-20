@@ -163,7 +163,7 @@ EOPY
 # Each OpenBao restart, Velero restart, rollout and backup takes its whole
 # limit and then succeeds. keyring.sh is a stub of the same file format.
 keyring_slow() {
-  src "$1" time_bound_of seal_id_of password_refused class_keyring_generated_keys
+  src "$1" time_bound_of seal_id_of password_refused velero_refusal_step class_keyring_generated_keys
   sed -i 's#scripts/keyring.sh #keyring_sh #g' "$TMP/src.sh"
   printf 'OPENBAO_SEAL_KEY=k0\nOPENBAO_SEAL_KEY_PREVIOUS=\nVELERO_REPO_PASSWORD=p0\n' > "$TMP/keyring.env"
   echo "X=1" > "$TMP/substrate.env"
@@ -189,6 +189,7 @@ keyring_slow() {
     }
     bao_restart() { sleep $(( BAO_DELETE_WAIT_S + BAO_STATE_WAIT_S )); }
     velero_restart() { sleep "$ROLLOUT_WAIT_S"; }
+    velero_pod_start() { printf 2031-01-01T00:00:00Z; }
     velero_backup() {
       sleep $(( VELERO_QUEUE_WAIT + VELERO_RUN_WAIT ))
       if [ -e "$D/backup1" ]; then printf Completed; else touch "$D/backup1"; printf PartiallyFailed; fi

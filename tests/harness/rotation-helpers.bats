@@ -503,7 +503,7 @@ velero_helpers() {
 import re, sys
 text = open(sys.argv[1]).read()
 out = []
-for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "velero_delete_backup", "velero_pod_start", "velero_backup"):
+for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "velero_delete_backup", "velero_pod_start", "velero_refusal_step", "password_refused", "velero_backup"):
     m = re.search(r"^%s\(\) \{.*?^\}\n" % name, text, re.M | re.S)
     if not m:
         sys.exit("no function %s in the script" % name)
@@ -553,7 +553,8 @@ case "$*" in
     echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
   # What the diagnostics read.
   # The Velero server pods: two start times, the newest counts.
-  "-n velero get pods -l name=velero -o jsonpath="*) printf '2026-10-20T12:00:00Z\n%s\n' "${STUB_POD_START:-2026-10-20T13:00:05Z}" ;;
+  "-n velero get pods -l name=velero -o jsonpath="*)
+    [ -n "${STUB_POD_NONE:-}" ] || printf '2026-10-20T12:00:00Z\n%s\n' "${STUB_POD_START:-2026-10-20T13:00:05Z}" ;;
   "-n velero get pods -o wide"|"-n velero get backupstoragelocations"|"-n velero logs deployment/velero --tail=60") echo "stub diagnostics" ;;
   "-n velero get backup rotation-drill-"*" -o yaml") printf 'status:\n  phase: ""\n' ;;
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
@@ -564,7 +565,7 @@ SH
 
 run_velero() {
   PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c '
-    NS=gibson VELERO_QUEUE_WAIT="$2" VELERO_RUN_WAIT="${3:-900}" VELERO_PICKUP_WAIT=0 VELERO_READY_WAIT=0 VELERO_DELETE_WAIT=0 VELERO_RESTARTED_AT="${STUB_RESTARTED_AT:-}"
+    NS=gibson VELERO_QUEUE_WAIT="$2" VELERO_RUN_WAIT="${3:-900}" VELERO_PICKUP_WAIT=0 VELERO_READY_WAIT=0 VELERO_DELETE_WAIT=0 VELERO_RESTARTED_AT="${STUB_RESTARTED_AT-2026-10-20T13:00:00Z}"
     sleep() { :; }
     . "$1"
     velero_backup' _ "$TMP/velero.sh" "$1" "${2:-900}"
@@ -669,6 +670,50 @@ run_velero() {
   STUB_POD_START=2026-10-20T13:07:09Z PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c '. "$1"; velero_pod_start' _ "$TMP/velero.sh"
   [ "$status" -eq 0 ]
   [ "$output" = "2026-10-20T13:07:09Z" ] || { echo "$output"; false; }
+}
+
+# velero_refusal_step runs with k2c, velero_restart and the backup stubbed. The
+# backup prints the reference time it sees, and the stub pods give the times.
+refusal_step() {
+  velero_helpers
+  PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c '
+    NS=gibson VELERO_READY_WAIT=0
+    sleep() { :; }
+    miss() { echo "miss: $*"; return 1; }
+    ok() { echo "ok: $*"; }
+    k2c() { return 0; }
+    velero_restart() { return 0; }
+    . "$1"
+    # The backup sees the reference time that the step set.
+    velero_backup() { echo "reference=$VELERO_RESTARTED_AT" >&2; printf PartiallyFailed; }
+    velero_refusal_step /nonexistent; rc=$?
+    echo "final=$VELERO_RESTARTED_AT"
+    exit $rc' _ "$TMP/velero.sh"
+}
+
+@test "FAILING FIXTURE: the reference time of the backup is the start time of the Velero pod, never the runner clock (hosted#68 review)" {
+  export STUB_POD_START=2031-01-02T03:04:05Z
+  refusal_step
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"reference=2031-01-02T03:04:05Z"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"final=2031-01-02T03:04:05Z"* ]] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: a Velero pod read that gives nothing is a miss, and the time check is never skipped (hosted#68 review)" {
+  export STUB_POD_NONE=1
+  refusal_step
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"miss: the start time of the Velero pod could not be read"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"reference="* ]]
+}
+
+@test "FAILING FIXTURE: a storage location check with no reference time is not ready (hosted#68 review)" {
+  velero_helpers
+  export STUB_BUSY=0 STUB_PHASE=Completed STUB_RESTARTED_AT=
+  run_velero 3600
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s' "$output" | tail -n1)" = "timeout:storage-location" ] || { echo "$output"; false; }
+  [ ! -e "$TMP/applied" ]
 }
 
 @test "FAILING FIXTURE: a pod that started after the last validation of the location is not ready (hosted#68 review)" {

@@ -889,18 +889,29 @@ VELERO_READY_WAIT="${VELERO_READY_WAIT:-180}"
 # Velero server pod, read from the cluster after the restart (velero_pod_start). The phase of a BackupStorageLocation survives a
 # restart, so Available alone can be the phase of the old server. The new
 # server validates the location again, and its lastValidationTime is later
-# than this time. Unset, the time is not checked.
+# than this time. It is required: empty means not ready.
 VELERO_RESTARTED_AT="${VELERO_RESTARTED_AT:-}"
 # velero_pod_start: the start time of the newest Velero server pod, from the
 # cluster. The reference of velero_storage_ready is a time of the cluster, not
 # of the runner, and not the restartedAt annotation, which the client writes.
 velero_pod_start() {
-  kubectl -n velero get pods -l name=velero \
-    -o jsonpath='{range .items[*]}{.status.startTime}{"\n"}{end}' 2>/dev/null | sort | tail -n1
+  local deadline start
+  deadline=$(( $(date +%s) + VELERO_READY_WAIT ))
+  while :; do
+    start="$(kubectl -n velero get pods -l name=velero \
+      -o jsonpath='{range .items[*]}{.status.startTime}{"\n"}{end}' 2>/dev/null | sort | tail -n1)" || start=""
+    # An empty answer or a failed read is no reference time: it is read again,
+    # then it is a failure. It never turns the time check off.
+    [ -z "$start" ] || { printf '%s' "$start"; return 0; }
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 5
+  done
 }
 
 velero_storage_ready() {
   local deadline rows
+  # No reference time, no check: a missing time never skips the comparison.
+  [ -n "$VELERO_RESTARTED_AT" ] || return 1
   deadline=$(( $(date +%s) + VELERO_READY_WAIT ))
   while :; do
     rows="$(kubectl -n velero get backupstoragelocations \
@@ -1034,6 +1045,25 @@ velero_restart() {
     && kubectl -n velero rollout status deployment/velero --timeout="${ROLLOUT_WAIT_S}s" >/dev/null
 }
 
+# velero_refusal_step WORK: restart Velero on another repository password
+# (WORK/velero.env), make a backup, restart it on the keyring password, and
+# prove that the backup was refused. After each restart the reference time of
+# the storage location check is the start time of the new Velero pod, read from
+# the cluster, never the runner clock (hosted#68 review). The reference is
+# read again after the second restart, for the backup that follows this step.
+velero_refusal_step() {
+  local work="$1" phase
+  k2c "$work/velero.env" && velero_restart || { miss "Velero did not restart with another password"; k2c; velero_restart; return 1; }
+  VELERO_RESTARTED_AT="$(velero_pod_start)" \
+    || { miss "the start time of the Velero pod could not be read, so the storage location check has no reference time"; return 1; }
+  phase="$(velero_backup)"
+  k2c && velero_restart || { miss "Velero did not restart with the keyring password"; return 1; }
+  VELERO_RESTARTED_AT="$(velero_pod_start)" \
+    || { miss "the start time of the Velero pod could not be read after the restart on the keyring password"; return 1; }
+  password_refused "$phase" || return 1
+  ok "a backup with another repository password does not complete (${phase})"
+}
+
 class_keyring_generated_keys() {
   local work old new ids phase
   [ -n "${KEYRING_FILE:-}" ] && [ -s "$KEYRING_FILE" ] && [ -n "${SUBSTRATE_ENV_FILE:-}" ] && [ -s "$SUBSTRATE_ENV_FILE" ] \
@@ -1087,13 +1117,7 @@ class_keyring_generated_keys() {
   # 4. Velero: the keyring password opens the repository, another does not.
   ( umask 077; grep -v '^VELERO_REPO_PASSWORD=' "$KEYRING_FILE" > "$work/velero.env"
     printf 'VELERO_REPO_PASSWORD=%s\n' "$(head -c 32 /dev/urandom | base64 -w0)" >> "$work/velero.env" )
-  k2c "$work/velero.env" && velero_restart || { miss "Velero did not restart with another password"; k2c; velero_restart; rm -rf "$work"; return 1; }
-  VELERO_RESTARTED_AT="$(velero_pod_start)"
-  phase="$(velero_backup)"
-  k2c && velero_restart || { miss "Velero did not restart with the keyring password"; rm -rf "$work"; return 1; }
-  VELERO_RESTARTED_AT="$(velero_pod_start)"
-  password_refused "$phase" || { rm -rf "$work"; return 1; }
-  ok "a backup with another repository password does not complete (${phase})"
+  velero_refusal_step "$work" || { rm -rf "$work"; return 1; }
   phase="$(velero_backup)"
   [ "$phase" = Completed ] || { miss "a backup with the keyring repository password ends ${phase}"; rm -rf "$work"; return 1; }
   ok "a backup with the keyring repository password completes"
@@ -2408,7 +2432,7 @@ time_bound_of() {
     # backups and the settle (review of hosted#807).
     keyring-generated-keys)    b=$(( 6 * (BAO_DELETE_WAIT_S + BAO_STATE_WAIT_S) + 2 * ROLLOUT_WAIT_S
                                      + 2 * (VELERO_QUEUE_WAIT + VELERO_RUN_WAIT) + ROLLOUT_WAIT_S + SETTLE_S
-                                     + 2 * (VELERO_READY_WAIT + 2 * (VELERO_PICKUP_WAIT + VELERO_DELETE_WAIT)) )) ;;
+                                     + 2 * (2 * VELERO_READY_WAIT + 2 * (VELERO_PICKUP_WAIT + VELERO_DELETE_WAIT)) )) ;;
     setec-disk-signing-seed)   b=$(( 2 * SEED_WAIT + SANDBOX_WAIT )) ;;
     substrate-cloud-credentials) b=0 ;;
     vendor-issued-inputs)      b=0 ;;
