@@ -885,12 +885,20 @@ velero_in_flight() {
 # ago takes backups only after its controllers ran (drill rotation run 1,
 # hosted#59 thread: a backup stayed with no phase for 20 minutes).
 VELERO_READY_WAIT="${VELERO_READY_WAIT:-180}"
-# VELERO_RESTARTED_AT: the time (UTC, YYYY-MM-DDTHH:MM:SSZ) taken before the
-# restart of the Velero server. The phase of a BackupStorageLocation survives a
+# VELERO_RESTARTED_AT: the start time (UTC, YYYY-MM-DDTHH:MM:SSZ) of the new
+# Velero server pod, read from the cluster after the restart (velero_pod_start). The phase of a BackupStorageLocation survives a
 # restart, so Available alone can be the phase of the old server. The new
 # server validates the location again, and its lastValidationTime is later
 # than this time. Unset, the time is not checked.
 VELERO_RESTARTED_AT="${VELERO_RESTARTED_AT:-}"
+# velero_pod_start: the start time of the newest Velero server pod, from the
+# cluster. The reference of velero_storage_ready is a time of the cluster, not
+# of the runner, and not the restartedAt annotation, which the client writes.
+velero_pod_start() {
+  kubectl -n velero get pods -l name=velero \
+    -o jsonpath='{range .items[*]}{.status.startTime}{"\n"}{end}' 2>/dev/null | sort | tail -n1
+}
+
 velero_storage_ready() {
   local deadline rows
   deadline=$(( $(date +%s) + VELERO_READY_WAIT ))
@@ -936,14 +944,19 @@ VELERO_DELETE_WAIT="${VELERO_DELETE_WAIT:-60}"
 # within VELERO_DELETE_WAIT. A backup that stays would run when the server
 # restarts on the keyring password, and it would end Completed.
 velero_delete_backup() {
-  local deadline
+  local deadline out rc
   kubectl -n velero delete backup "$1" --ignore-not-found --wait=false >/dev/null 2>&1 || return 1
   deadline=$(( $(date +%s) + VELERO_DELETE_WAIT ))
-  while kubectl -n velero get backup "$1" >/dev/null 2>&1; do
+  while :; do
+    # --ignore-not-found: exit 0 and no output is gone, exit 0 and a name is
+    # still there, and a non-zero exit is an error (an API that does not
+    # answer), which is not "gone". An error is read again until the deadline.
+    rc=0
+    out="$(kubectl -n velero get backup "$1" --ignore-not-found -o name 2>/dev/null)" || rc=$?
+    [ "$rc" -ne 0 ] || [ -n "$out" ] || return 0
     [ "$(date +%s)" -lt "$deadline" ] || return 1
     sleep 5
   done
-  return 0
 }
 
 velero_backup() {
@@ -1074,11 +1087,11 @@ class_keyring_generated_keys() {
   # 4. Velero: the keyring password opens the repository, another does not.
   ( umask 077; grep -v '^VELERO_REPO_PASSWORD=' "$KEYRING_FILE" > "$work/velero.env"
     printf 'VELERO_REPO_PASSWORD=%s\n' "$(head -c 32 /dev/urandom | base64 -w0)" >> "$work/velero.env" )
-  VELERO_RESTARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   k2c "$work/velero.env" && velero_restart || { miss "Velero did not restart with another password"; k2c; velero_restart; rm -rf "$work"; return 1; }
+  VELERO_RESTARTED_AT="$(velero_pod_start)"
   phase="$(velero_backup)"
-  VELERO_RESTARTED_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   k2c && velero_restart || { miss "Velero did not restart with the keyring password"; rm -rf "$work"; return 1; }
+  VELERO_RESTARTED_AT="$(velero_pod_start)"
   password_refused "$phase" || { rm -rf "$work"; return 1; }
   ok "a backup with another repository password does not complete (${phase})"
   phase="$(velero_backup)"

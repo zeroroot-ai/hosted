@@ -503,7 +503,7 @@ velero_helpers() {
 import re, sys
 text = open(sys.argv[1]).read()
 out = []
-for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "velero_delete_backup", "velero_backup"):
+for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "velero_delete_backup", "velero_pod_start", "velero_backup"):
     m = re.search(r"^%s\(\) \{.*?^\}\n" % name, text, re.M | re.S)
     if not m:
         sys.exit("no function %s in the script" % name)
@@ -543,13 +543,17 @@ case "$*" in
     [ -z "${STUB_DELETE_FAILS:-}" ] || exit 1
     echo "$5" >> "$STUB_DIR/deleted" ;;
   "-n velero get backup rotation-drill-"?*)
-    # The check that a deleted backup is gone: no other flag than the name.
-    if [ "$#" -eq 5 ]; then
-      [ -n "${STUB_STAYS:-}" ] || ! grep -qx "$5" "$STUB_DIR/deleted" 2>/dev/null || exit 1
+    # The check that a deleted backup is gone: --ignore-not-found -o name.
+    # STUB_GET_ERROR: the API does not answer.
+    if [ "$#" -eq 8 ] && [ "$6" = --ignore-not-found ]; then
+      [ -z "${STUB_GET_ERROR:-}" ] || { echo "The connection to the server was refused - did you specify the right host or port? (connection refused)" >&2; exit 1; }
+      if [ -n "${STUB_STAYS:-}" ] || ! grep -qx "$5" "$STUB_DIR/deleted" 2>/dev/null; then echo "backup.velero.io/$5"; fi
       exit 0
     fi
     echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
   # What the diagnostics read.
+  # The Velero server pods: two start times, the newest counts.
+  "-n velero get pods -l name=velero -o jsonpath="*) printf '2026-10-20T12:00:00Z\n%s\n' "${STUB_POD_START:-2026-10-20T13:00:05Z}" ;;
   "-n velero get pods -o wide"|"-n velero get backupstoragelocations"|"-n velero logs deployment/velero --tail=60") echo "stub diagnostics" ;;
   "-n velero get backup rotation-drill-"*" -o yaml") printf 'status:\n  phase: ""\n' ;;
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
@@ -654,6 +658,33 @@ run_velero() {
 @test "FAILING FIXTURE: an unpicked backup that is still there after its delete is a stale backup (hosted#68 review)" {
   velero_helpers
   export STUB_BUSY=0 STUB_PHASE_EMPTY=1 STUB_STAYS=1
+  run_velero 3600
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s' "$output" | tail -n1)" = "timeout:stale-backup" ] || { echo "$output"; false; }
+  [ "$(wc -l < "$TMP/applies")" -eq 1 ]
+}
+
+@test "velero_pod_start reads the newest start time of the Velero pods, from the cluster (hosted#68 review)" {
+  velero_helpers
+  STUB_POD_START=2026-10-20T13:07:09Z PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c '. "$1"; velero_pod_start' _ "$TMP/velero.sh"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2026-10-20T13:07:09Z" ] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: a pod that started after the last validation of the location is not ready (hosted#68 review)" {
+  velero_helpers
+  # The location kept Available from the old server. The new pod started at
+  # 13:00:05, and the last validation is older.
+  export STUB_BUSY=0 STUB_PHASE=Completed STUB_RESTARTED_AT=2026-10-20T13:00:05Z STUB_BSL_VALIDATED=2026-10-20T12:30:00Z
+  run_velero 3600
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s' "$output" | tail -n1)" = "timeout:storage-location" ] || { echo "$output"; false; }
+  [ ! -e "$TMP/applied" ]
+}
+
+@test "FAILING FIXTURE: a get that fails with connection refused is not a backup that is gone (hosted#68 review)" {
+  velero_helpers
+  export STUB_BUSY=0 STUB_PHASE_EMPTY=1 STUB_GET_ERROR=1
   run_velero 3600
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(printf '%s' "$output" | tail -n1)" = "timeout:stale-backup" ] || { echo "$output"; false; }
