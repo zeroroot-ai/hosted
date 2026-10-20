@@ -952,11 +952,12 @@ $(excluded_namespaces_yaml)
   # The tenant namespaces exist already, with no label (see above).
   includedResources:
     - namespaces
-    # No priorityclasses: see wait_priority_classes above. Everything else a
-    # restored pod is admitted against (its ServiceAccount, its ConfigMaps)
-    # is namespaced and chart-owned too, and Velero restores it here because
-    # Argo has not reached the wave that creates it yet; existingResourcePolicy
-    # none leaves Argo's later apply to find it equal.
+    # No priorityclasses: see wait_priority_classes above. The ServiceAccounts
+    # and ConfigMaps are namespaced and chart-owned too. Velero restores one
+    # that is missing, and existingResourcePolicy none leaves one that exists
+    # as it is. Argo is often first: in drill run 39189378263, 26 ConfigMaps
+    # of the release existed already. So this Restore is not what supplies
+    # them, and Argo's later apply finds the ones Velero made equal.
     - serviceaccounts
     - configmaps
     - persistentvolumeclaims

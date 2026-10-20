@@ -80,8 +80,9 @@ PY
   # for the EC2 callers that do not run through make (drill-rotate-keys.sh
   # runs with-cluster.sh directly). Many callers send a password or a token
   # on stdin, and a secret must not move to argv. A tool that links
-  # client-go and opens its own exec stream (the cilium CLI) does not read
-  # this variable.
+  # client-go and opens its own exec stream does not read this variable.
+  # docs/kubectl-transport.md lists each tool of this repository and says
+  # which opens one (none today).
   export KUBECTL_REMOTE_COMMAND_WEBSOCKETS=false
   local deadline; deadline=$(( $(date +%s) + 120 ))
   until kubectl cluster-info >/dev/null 2>&1; do

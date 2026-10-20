@@ -15,10 +15,8 @@ A tool that links client-go opens its own stream and ignores the variable.
 | Terraform providers `kubernetes`, `kubectl`, `helm` | `bootstrap/`, `substrate/` | No. They read and write objects. | Not applicable. |
 | cmctl | `test/rotation/exit-test-rotation.sh` | No. `cmctl renew` sets a condition on a Certificate. | Not applicable. |
 | velero | inside the Velero pod, run by `kubectl exec` | Through kubectl, so the variable covers it. | The describe output is empty. `backup_resource_list` refuses a list that does not name the release namespace. |
+| kubectl port-forward | `scripts/lib/port-forward-loop.sh` | Yes, a port stream. It has its own variable, `KUBECTL_PORT_FORWARD_WEBSOCKETS`, and the repository does not set it. | The probe through the forward gets a connection error, and the loop or the probe retries or fails by name. Whether it needs the same gate is open in [hosted#57](https://github.com/zeroroot-ai/hosted/issues/57). |
 | session-manager-plugin | `scripts/lib/ssm-forward.sh` | No. It carries the API port to the EC2 node. | The API call fails. `ec2_cluster_connect` waits for `kubectl cluster-info` and fails after 120 seconds. |
-
-`kubectl port-forward` is a stream too.
-It has its own variable, `KUBECTL_PORT_FORWARD_WEBSOCKETS`, and the repository does not set it.
 
 ## Callers that send a secret on stdin
 
