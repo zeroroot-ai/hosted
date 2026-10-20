@@ -574,6 +574,13 @@ secret_value() {
 # set_at_source KEY PROPERTY VALUE: the write of a rotation at its source, the
 # OpenBao key, through the same script that the redis class uses. From charts
 # 0.147.0 the script takes the value on stdin only (charts#679).
+#
+# set_at_source --object KEY JSON: the same call writes several properties of
+# KEY in ONE write (charts#738): the setter takes `--object KEY` as its two
+# arguments and the JSON object on stdin, and it removes the one trailing
+# newline. A slot of the CG signing key is two properties, kid and key. Two
+# writes leave a slot with a key and no kid between them, which the daemon
+# refuses, and the setter refuses the empty value of a clear.
 set_at_source() {
   printf '%s\n' "$3" | NS="$NS" RELEASE="$RELEASE" "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" "$1" "$2" >/dev/null
 }
@@ -1161,7 +1168,9 @@ class_platform_signing_keys() {
   # 1. Rotate at the source: the write of step 1 of the sidecar.
   new="drill$(LC_ALL=C tr -dc 'a-z0-9' < /dev/urandom | head -c 8)"
   seed="$(head -c 32 /dev/urandom | base64 | tr -d '\n=' | tr '+/' '-_')"
-  set_at_source "${CG_KEY_KEY}-next" key "$seed" && set_at_source "${CG_KEY_KEY}-next" kid "$new" \
+  # printf is a builtin, so the seed is on no argv. The kid and the seed are
+  # URL-safe base64 and letters, so they need no JSON escape.
+  set_at_source --object "${CG_KEY_KEY}-next" "$(printf '{"kid":"%s","key":"%s"}' "$new" "$seed")" \
     || { miss "the write of the next kid failed"; seed=""; rm -rf "$work"; return 1; }
   seed=""
   ok "published the next kid ${new} at the source"
@@ -1182,7 +1191,7 @@ class_platform_signing_keys() {
   ok "the sidecar promoted ${new}, and ${old} still verifies"
 
   # 3. Retire the old kid with the write of step 3. Each pod refuses it.
-  set_at_source "${CG_KEY_KEY}-previous" kid "" && set_at_source "${CG_KEY_KEY}-previous" key "" \
+  set_at_source --object "${CG_KEY_KEY}-previous" '{"kid":"","key":""}' \
     || { miss "the clear of the previous slot failed"; rm -rf "$work"; return 1; }
   cg_all_pods 404 "$old" "$work/svid.pem" "$work/key.pem" "$work/bundle.pem" \
     || { miss "the old kid is still served after the clear: ${REASON}"; rm -rf "$work"; return 1; }

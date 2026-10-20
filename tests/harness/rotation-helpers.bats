@@ -171,6 +171,108 @@ SH
   [ "$(grep -v '^\s*#' "$TEST" | grep -c 'scripts/baseline-set-secret.sh" "\$')" = 1 ]
 }
 
+# set_at_source --object writes all the properties of a key in one write, with
+# the JSON on stdin and the key as the one argument after --object (charts#738).
+@test "set_at_source --object gives the setter the object on stdin, in one call" {
+  python3 - "$TEST" "$TMP/set.sh" <<'EOPY'
+import re, sys
+m = re.search(r"^set_at_source\(\) \{.*?^\}\n", open(sys.argv[1]).read(), re.M | re.S)
+open(sys.argv[2], "w").write(m.group(0))
+EOPY
+  mkdir -p "$TMP/charts/scripts"
+  cat > "$TMP/charts/scripts/baseline-set-secret.sh" <<'SH'
+#!/usr/bin/env bash
+[ "$#" -eq 2 ] && [ "$1" = --object ] || { echo "setter stub: $*" >&2; exit 2; }
+printf '%s ' "$2" >> "$REC"; cat >> "$REC"
+SH
+  chmod +x "$TMP/charts/scripts/baseline-set-secret.sh"
+  run env REC="$TMP/rec" D="$TMP" bash -c 'NS=gibson RELEASE=gibson CHARTS_ROOT="$D/charts"; . "$D/set.sh"; set_at_source --object gibson-cg-signing-key-previous "{\"kid\":\"\",\"key\":\"\"}"'
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$TMP/rec")" = 'gibson-cg-signing-key-previous {"kid":"","key":""}' ]
+}
+
+# The next slot that step 1 of platform-signing-keys writes holds both the new
+# kid and its seed, in ONE object (review of hosted#49). The class runs with
+# stubs up to that write; the stub setter records it and fails, so the class
+# stops there.
+next_slot_write() {
+  python3 - "$1" "$TMP/cg.sh" <<'EOPY'
+import re, sys
+text = open(sys.argv[1]).read()
+out = [re.search(r"^CG_KEY_KEY=.*$", text, re.M).group(0), re.search(r"^CG_SVID_SLACK_S=.*$", text, re.M).group(0)]
+for n in ("set_at_source", "class_platform_signing_keys"):
+    out.append(re.search(r"^%s\(\) \{.*?^\}\n" % n, text, re.M | re.S).group(0))
+open(sys.argv[2], "w").write("\n".join(out) + "\n")
+EOPY
+  openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes -days 1 \
+    -subj "/CN=reader" -keyout "$TMP/svid.key" -out "$TMP/svid.pem" 2>/dev/null
+  mkdir -p "$TMP/charts/scripts"
+  cat > "$TMP/charts/scripts/baseline-set-secret.sh" <<'SH'
+#!/usr/bin/env bash
+printf '%s %s\n' "$1" "$2" >> "$REC.args"; cat >> "$REC"; exit 1
+SH
+  chmod +x "$TMP/charts/scripts/baseline-set-secret.sh"
+  : > "$TMP/rec"; : > "$TMP/rec.args"
+  run env REC="$TMP/rec" D="$TMP" bash -c '
+    NS=gibson RELEASE=gibson DAEMON_STS=gibson-gibson-workloads ROTATION_WAIT=1500 CHARTS_ROOT="$D/charts"
+    ok() { echo "ok: $*"; }
+    miss() { echo "miss: $*"; return 1; }
+    secret_value() { [ "$1 $2" = "gibson-gibson-workloads-cg-signing-key current.kid" ] && echo kid0; }
+    kubectl() {
+      case "$*" in
+        "-n gibson get configmap gibson-server -o jsonpath={.data.server\.conf}") echo "{\"server\":{\"trust_domain\":\"example.org\"}}" ;;
+        "-n gibson get statefulset gibson-gibson-workloads -o json")
+          echo "{\"spec\":{\"template\":{\"spec\":{\"containers\":[{\"env\":[{\"name\":\"GIBSON_AUTHZ_REGISTRY_READER_SVIDS\",\"value\":\"spiffe://example.org/platform/ext-authz\"}]}]}}}}" ;;
+        *) echo "kubectl stub: undeclared call: $*" >&2; return 1 ;;
+      esac
+    }
+    spire() { cat "$D/svid.pem" "$D/svid.key"; }
+    spire_bundle() { cp "$D/svid.pem" "$1"; }
+    cg_all_pods() { return 0; }
+    . "$D/cg.sh"; class_platform_signing_keys' _
+}
+
+@test "step 1 writes the next slot as one object with the new kid and its 32-byte seed" {
+  next_slot_write "$TEST"
+  [[ "$output" == *"miss: the write of the next kid failed"* ]] || { echo "$output"; false; }
+  [ "$(cat "$TMP/rec.args")" = "--object gibson-cg-signing-key-next" ] || { cat "$TMP/rec.args"; false; }
+  run python3 - "$TMP/rec" <<'EOPY'
+import base64, json, re, sys
+o = json.loads(open(sys.argv[1]).read())
+assert sorted(o) == ["key", "kid"], sorted(o)
+assert re.fullmatch(r"drill[a-z0-9]{8}", o["kid"]), o["kid"]
+k = o["key"]
+assert len(base64.urlsafe_b64decode(k + "=" * (-len(k) % 4))) == 32, k
+EOPY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: a next slot with no key is refused by the step 1 check" {
+  sed 's/"$(printf '"'"'{"kid":"%s","key":"%s"}'"'"' "$new" "$seed")"/"$(printf '"'"'{"kid":"%s"}'"'"' "$new")"/' "$TEST" > "$TMP/nokey.sh"
+  run grep -c "printf '{\"kid\":\"%s\"}' \"\$new\"" "$TMP/nokey.sh"
+  [ "$output" -eq 1 ]
+  next_slot_write "$TMP/nokey.sh"
+  run python3 -c 'import json,sys; o=json.loads(open(sys.argv[1]).read()); assert sorted(o) == ["key", "kid"], sorted(o)' "$TMP/rec"
+  [ "$status" -ne 0 ]
+}
+
+@test "FAILING FIXTURE: no slot of the CG signing key is written one property at a time" {
+  python3 - "$TEST" "$TMP/cg.sh" <<'EOPY'
+import re, sys
+m = re.search(r"^class_platform_signing_keys\(\) \{.*?^\}\n", open(sys.argv[1]).read(), re.M | re.S)
+open(sys.argv[2], "w").write(m.group(0))
+EOPY
+  one='set_at_source "\$\{CG_KEY_KEY\}-(next|previous)" (kid|key) '
+  run grep -cE "$one" "$TMP/cg.sh"
+  [ "$output" -eq 0 ] || { grep -nE "$one" "$TMP/cg.sh"; false; }
+  run grep -cF 'set_at_source --object "${CG_KEY_KEY}-' "$TMP/cg.sh"
+  [ "$output" -eq 2 ]
+  # The fixture: the form for charts 0.151.1 was two writes, and the check sees it.
+  printf '%s\n' '  set_at_source "${CG_KEY_KEY}-previous" kid "" && set_at_source "${CG_KEY_KEY}-previous" key ""' > "$TMP/old.sh"
+  run grep -cE "$one" "$TMP/old.sh"
+  [ "$output" -eq 1 ]
+}
+
 # --- consumer_on_role (hosted#591) -------------------------------------------
 # kubectl is a stub. STUB_PODS is the pod list, one "name start ip deleted|ready"
 # line each. pg_su models Postgres: STUB_SESSIONS sessions of v-new exist, all
