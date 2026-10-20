@@ -44,6 +44,18 @@ whatever its name. The word rules, on a sensitive variable in an argument:
 `redis-cli -a/--pass`, `mc alias set`, `--password`, `mysql -p`,
 `--from-literal`, helm `--set`, `gh --body` and `aws configure set`.
 
+Documented limits. The guard reads one script at a time, as words, and does
+not run it. It does not see: a secret that enters a function as an argument
+(`login() { curl -u admin:"$1" x; }`, `login "$ADMIN_PASSWORD"`), a string
+that a shell reads again (`sh -c "curl -u admin:$P x"`, `eval`), `timeout`
+with options before the duration (`timeout -s KILL 5 cmd`), and a secret read
+into a variable with an unremarkable name from a command that is not on the
+list above (`X="$(jq -r .token f)"`). Name such a variable after what it holds
+(TOKEN, SECRET, PASSWORD), or pass the value on stdin. An unquoted heredoc that
+feeds a shell (`sh <<EOF`, `kubectl exec ... -- sh <<EOF`) is scanned line by
+line. An array that expands a secret is tainted, and `"${args[@]}"` in an
+argument of a command is refused.
+
 The name of a secret variable is matched without case: token, secret, pass,
 password, pat, api_key, _key, cookie or jwe.
 
@@ -152,18 +164,80 @@ ASSIGN = re.compile(r"^\s*(?:export\s+|local\s+|declare\s+(?:-\w+\s+)?|readonly\
 VAR = re.compile(r"\$\{?([A-Za-z_]\w*)")
 
 
-def tainted_names(lines: list[str]) -> set[str]:
-    """The names that carry a secret in this file."""
-    assigns = []
+def split_statements(line: str) -> list[str]:
+    """The statements of a line, split at ; and && outside quotes (not ;; and
+    not inside a substitution)."""
+    out, cur, quote, depth, i = [], [], "", 0, 0
+    while i < len(line):
+        c = line[i]
+        if quote:
+            cur.append(c)
+            if c == quote and not (quote == '"' and line[i - 1] == "\\"):
+                quote = ""
+        elif c in "'\"":
+            quote = c; cur.append(c)
+        elif line.startswith("$(", i) or line.startswith("<(", i):
+            depth += 1; cur.append(line[i:i + 2]); i += 2
+            continue
+        elif c == ")" and depth:
+            depth -= 1; cur.append(c)
+        elif depth == 0 and c == ";" and not line.startswith(";;", i):
+            out.append("".join(cur)); cur = []
+        elif depth == 0 and line.startswith("&&", i):
+            out.append("".join(cur)); cur = []; i += 1
+        else:
+            cur.append(c)
+        i += 1
+    out.append("".join(cur))
+    return [x for x in out if x.strip()]
+
+
+def refs(text: str) -> set[str]:
+    """The variables a text expands, outside command substitutions."""
+    body, _ = substitutions(text)
+    return set(VAR.findall(body))
+
+
+ARRAY = re.compile(r"^\s*(?:local\s+|declare\s+(?:-\w+\s+)?)?([A-Za-z_]\w*)\+?=\((.*)\)\s*$")
+
+
+def tainted_names(lines: list[str]) -> tuple[set[str], set[str]]:
+    """The names that carry a secret in this file, and the arrays among them.
+
+    An assignment, a `printf -v`, a `for` list, a `read` from a secret and an
+    array literal each carry a secret that they expand. A parameter expansion
+    (`${X:-d}`, `${X#*/}`) keeps it. A command substitution does not, except a
+    plain copy through printf (`$(printf '%s' "$X")`) or a read of a secret."""
+    assigns: list[tuple[str, str]] = []
+    arrays: set[str] = set()
     for line in lines:
         if line.lstrip().startswith("#"):
             continue
-        m = ASSIGN.match(line)
-        if m:
-            assigns.append((m.group(1), m.group(2)))
-        r = re.match(r"^\s*read\s+(?:-\w+\s+)*([A-Za-z_]\w*)\s*$", line)
-        if r and SENSITIVE_NAME.search(r.group(1)):
-            assigns.append((r.group(1), "read"))
+        for st in split_statements(line):
+            m = ASSIGN.match(st)
+            arr = ARRAY.match(st)
+            if arr:
+                arrays.add(arr.group(1))
+                assigns.append((arr.group(1), arr.group(2)))
+            elif m:
+                assigns.append((m.group(1), m.group(2)))
+            pv = re.match(r"^\s*printf\s+-v\s+([A-Za-z_]\w*)\s+(.*)$", st)
+            if pv:
+                assigns.append((pv.group(1), pv.group(2)))
+            fo = re.match(r"^\s*for\s+([A-Za-z_]\w*)\s+in\s+(.*)$", st)
+            if fo:
+                assigns.append((fo.group(1), fo.group(2)))
+            r = re.match(r"^\s*read\s+(?:-\w+\s+)*([A-Za-z_]\w*)\b(.*)$", st)
+            if r:
+                rest = r.group(2)
+                src = re.search(r"<\s*<\((.*)\)\s*$", rest)
+                here = re.search(r"<<<\s*(.*)$", rest)
+                if src and reads_secret(src.group(1)):
+                    assigns.append((r.group(1), "$(" + src.group(1) + ")"))
+                elif here:
+                    assigns.append((r.group(1), here.group(1)))
+                elif SENSITIVE_NAME.search(r.group(1)):
+                    assigns.append((r.group(1), "read"))
     tainted = {n for n, _ in assigns if SENSITIVE_NAME.search(n)}
     changed = True
     while changed:
@@ -173,16 +247,21 @@ def tainted_names(lines: list[str]) -> set[str]:
                 continue
             c = COPY.match(rhs)
             src = (c.group(1) or c.group(2)) if c else None
-            if reads_secret(rhs) or (src and (src in tainted or SENSITIVE_NAME.search(src))):
+            expands = any(v in tainted or SENSITIVE_NAME.search(v) for v in refs(rhs))
+            if reads_secret(rhs) or expands or (src and (src in tainted or SENSITIVE_NAME.search(src))):
                 tainted.add(n)
                 changed = True
-    return tainted
+    return tainted, arrays & tainted
+
+
+BUILTINS = {"echo", "printf", "declare", "local", "export", "unset", "read", "mask", "log", "say", "set", "typeset", "readonly", "return", "exit"}
 
 
 class Word:
-    def __init__(self, text: str, names: set[str]):
+    def __init__(self, text: str, names: set[str], raw: str = ""):
         self.text = text
         self.names = names
+        self.raw = raw or text
 
     def secret(self, tainted: set[str]) -> bool:
         return any(n in tainted or SENSITIVE_NAME.search(n) for n in self.names)
@@ -317,11 +396,11 @@ def option_values(args: list[Word], names: tuple[str, ...]):
                 yield opt, Word(w.text[len(opt):], w.names)
 
 
-def word_findings(line: str, tainted: set[str]) -> list[str]:
+def word_findings(line: str, tainted: set[str], arrays: set[str] = frozenset()) -> list[str]:
     out = []
     text, bodies = substitutions(line)
     for body in bodies:
-        out += word_findings(body, tainted)
+        out += word_findings(body, tainted, arrays)
     for seg in segments(text):
         cmds = [command_of(seg)]
         if any(w.text == "--" for w in seg):
@@ -336,8 +415,17 @@ def word_findings(line: str, tainted: set[str]) -> list[str]:
                 if sec(v):
                     out.append("a credential in a header argument (use -H @<(printf ...))")
             for opt, v in option_values(args, ("-e", "--env")):
-                if sec(v) and re.match(r"^\w+=", v.text):
+                kv = re.match(r"^(\w+)=", v.text)
+                # The value is sensitive, or the name of the variable says so.
+                if kv and v.names and (sec(v) or SENSITIVE_NAME.search(kv.group(1))):
                     out.append("a credential in a container environment argument (export it and pass -e NAME)")
+            for opt, v in option_values(args, ("-d", "--data", "--data-raw", "--data-binary", "--data-urlencode")):
+                if sec(v) and not v.text.startswith("@"):
+                    out.append("a credential in the body of a request (send it with -d @-)")
+            if cmd not in BUILTINS:
+                for w in args:
+                    if any(re.search(r"\$\{%s\[[@*]\]" % re.escape(a), w.raw) for a in arrays):
+                        out.append("a credential in an argument array (build the command without it, and pass it on stdin)")
             for i, w in enumerate(args):
                 if w.text in ("--arg", "--argjson") and i + 2 < len(args) + 0 and sec(args[i + 2]):
                     out.append("a credential as a jq --arg (read it with env.NAME)")
@@ -384,9 +472,14 @@ def logical_lines(text: str) -> list[tuple[int, str]]:
             line = line.rstrip()[:-1] + " " + raw[i].strip()
         i += 1
         out.append((start, line))
-        m = re.search(r"<<-?\s*\\?['\"]?([A-Za-z_]\w*)['\"]?(?!<)", line) if "<<<" not in line else None
+        m = re.search(r"<<-?\s*(\\?['\"]?)([A-Za-z_]\w*)['\"]?(?!<)", line) if "<<<" not in line else None
         if m:
-            while i < len(raw) and raw[i].strip() != m.group(1):
+            # An unquoted heredoc that feeds a shell (sh, bash, also after
+            # `kubectl exec ... --`) is a script: its lines are scanned.
+            feeds_shell = not m.group(1) and re.search(r"(?:^|[\s;|&(])(?:sh|bash)\b[^|;&]*<<", line)
+            while i < len(raw) and raw[i].strip() != m.group(2):
+                if feeds_shell:
+                    out.append((i + 1, raw[i]))
                 i += 1
             i += 1
     return out
@@ -403,11 +496,11 @@ def findings(text: str, name: str) -> list[str]:
                 out.append(f"{name}:{n}: {what}: {line.strip()[:120]}")
                 seen.add((n, what))
     lines = logical_lines(text)
-    tainted = tainted_names([l for _, l in lines])
+    tainted, arrays = tainted_names([l for _, l in lines])
     for n, line in lines:
         if line.lstrip().startswith("#"):
             continue
-        for what in word_findings(line, tainted):
+        for what in word_findings(line, tainted, arrays):
             if (n, what) not in seen:
                 out.append(f"{name}:{n}: {what}: {line.strip()[:120]}")
                 seen.add((n, what))
@@ -426,6 +519,12 @@ K="$API_KEY" jq -n --arg n "$NAME" '{k: env.K, n: $n}'
 PROJECT_ID="$(kubectl get secret z -o jsonpath='{.data.project_id}' | base64 -d)"
 jq -nc --arg p "$PROJECT_ID" '{projectId:$p}'
 docker exec -i -e API_TOKEN c cmd
+kubectl exec -i pod -- sh <<'EOT'
+redis-cli -a "$REDISCLI_AUTH_FROM_POD" ping
+EOT
+args=(--max-time 5 -H "Accept: json")
+curl "${args[@]}" https://x
+printf '%s\n' "${args[@]}"
 helm upgrade x y --set image.tag="$TAG"
 kubectl create secret generic x --from-file=password=/dev/stdin
 printf '%s\\n' "$P" | redis-cli --pass-stdin ping
@@ -488,6 +587,25 @@ BAD += [
     # Inside a command substitution and after kubectl exec --.
     (TAINT + 'OUT="$(curl -u admin:"$P" https://x)"', "(-u)"),
     (TAINT + 'kubectl exec pod -- redis-cli -a "$P" ping', "redis-cli"),
+    # Review of hosted#82: the name of the variable of -e says it is sensitive.
+    ('docker run --env "API_TOKEN=$T" img', "container environment"),
+    # The body of a request through a tainted name, with a plain name.
+    (TAINT + 'curl -d "{\\"p\\":\\"$P\\"}" https://x', "body of a request"),
+    (TAINT + 'curl --data-raw "$P" https://x', "body of a request"),
+    # Copies that keep the secret.
+    ('printf -v X "%s" "$API_TOKEN"\ncurl -H "X-Auth: $X" https://x', "header argument"),
+    ('X="${API_TOKEN:-none}"\ncurl -H "X-Auth: $X" https://x', "header argument"),
+    ('A="$NEO4J_PASSWORD"; P="${A#*/}"\ncurl -u "admin:$P" https://x', "(-u)"),
+    ('X="$API_TOKEN"; export X\ncurl -H "X-Auth: $X" https://x', "header argument"),
+    ('for t in "$API_TOKEN"; do curl -H "X-Auth: $t" https://x; done', "header argument"),
+    ('read -r X < <(kubectl get secret s -o jsonpath="{.data.token}" | base64 -d)\ncurl -H "X-Auth: $X" https://x', "header argument"),
+    # Arrays.
+    ('args=(-u "admin:$ADMIN_PASSWORD")\ncurl "${args[@]}" https://x', "argument array"),
+    ('args+=(--password "$DB_PASSWORD")\npsql "${args[@]}"', "argument array"),
+    (TAINT + 'a=(-a "$P")\nredis-cli "${a[@]}" ping', "argument array"),
+    # An unquoted heredoc that feeds a shell is a script.
+    ('kubectl exec -i pod -- sh <<EOT\nredis-cli -a "$REDIS_PASSWORD" ping\nEOT', "redis-cli"),
+    ('bash <<EOT\ncurl -u admin:"$ADMIN_PASSWORD" https://x\nEOT', "(-u)"),
 ]
 def selftest() -> int:
     got = findings(TAINT + GOOD, "good")
