@@ -641,19 +641,39 @@ YAML
 # runs proves nothing: NOAUTH and WRONGPASS are answers too, so the probe
 # needs PONG from the password of the Secret.
 wait_redis_on_real_secret() {
-  local bound deadline sts pod revs want pw ping
+  local bound deadline sts pod revs want pw ping uid0 uid pc how
   bound="$(restore_bound "$RESTORE_REDIS_TIMEOUT")"
   deadline=$(( $(date +%s) + bound ))
   sts="${NS}-redis-stack"; pod="${sts}-0"
+  uid0=""
+  how="replaced by the StatefulSet"
   while :; do
     revs="$(kubectl -n "$NS" get "statefulset/${sts}" -o jsonpath='{.status.updateRevision}' 2>/dev/null)" || revs=""
     want="$(kubectl -n "$NS" get "pod/${pod}" \
       -o jsonpath='{.metadata.labels.controller-revision-hash}|{.metadata.ownerReferences[0].kind}|{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" || want=""
-    if [ -n "$revs" ] && [ "$want" = "${revs}|StatefulSet|True" ]; then break; fi
+    uid="$(kubectl -n "$NS" get "pod/${pod}" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || uid=""
+    # Ready on the revision of the StatefulSet, and, after a delete, a new pod.
+    if [ -n "$revs" ] && [ "$want" = "${revs}|StatefulSet|True" ] && [ -n "$uid" ] && [ "$uid" != "$uid0" ]; then
+      pc="$(kubectl -n "$NS" get "pod/${pod}" -o jsonpath='{.spec.priorityClassName}' 2>/dev/null)" || pc=""
+      [ -z "$pc" ] || break
+      # The pod has no priorityClassName: the resource modifier removed it and
+      # the StatefulSet did not replace the pod, because the backup and the
+      # chart have the same revision. Redis would run without its priority
+      # until the next roll. Delete the pod once, so that the StatefulSet makes
+      # it from its own spec.
+      if [ -z "$uid0" ]; then
+        printf '  the restored Redis pod has no priorityClassName and the StatefulSet did not replace it: deleting it once\n'
+        uid0="$uid"; how="deleted once, then made again by the StatefulSet"
+        kubectl -n "$NS" delete "pod/${pod}" --wait=true >/dev/null \
+          || die "could not delete the restored Redis pod ${NS}/${pod}, which runs without its priorityClassName"
+        continue
+      fi
+      die "the Redis pod ${NS}/${pod} that the StatefulSet made has no priorityClassName: its spec does not set one, so Redis runs without its priority"
+    fi
     printf '  waiting for %s: revision %s, pod %s          \r' "$pod" "${revs:-<none>}" "${want:-<none>}"
     [ "$(date +%s)" -lt "$deadline" ] || {
       printf '\n' >&2
-      die "Redis pod ${NS}/${pod} is not Ready on the revision ${revs:-<none>} of its StatefulSet within ${bound}s (pod: ${want:-<none>}). The restored pod could not start until External Secrets wrote the password Secret, and the StatefulSet replaces it once after that"
+      die "Redis pod ${NS}/${pod} is not Ready on the revision ${revs:-<none>} of its StatefulSet within ${bound}s (pod: ${want:-<none>}). The restored pod could not start until External Secrets wrote the password Secret, and the StatefulSet replaces it once after that, or this step deletes it once when it has no priorityClassName"
     }
     sleep 10
   done
@@ -663,7 +683,7 @@ wait_redis_on_real_secret() {
   pw=""
   [ "$ping" = PONG ] \
     || die "Redis answers '${ping}' to PING with the password of the Secret ${NS}/${sts}, not PONG. The restored data is in a Redis that refuses its own Secret"
-  printf '  ✓ Redis runs on the real Secret and answers PONG to its password (restarted once by the StatefulSet)\n'
+  printf '  ✓ Redis runs on the real Secret with priorityClassName %s, and answers PONG to its password (%s)\n' "$pc" "$how"
 }
 
 # wait_eso — every Secret is out of the restored store before ANY other

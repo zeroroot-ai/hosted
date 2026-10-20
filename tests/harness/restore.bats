@@ -317,6 +317,17 @@ for d in docs:
     printf 'gibson/gibson-redis-stack-0/data Completed\n'; exit 0 ;;
   # Redis on the real Secret after the umbrella (hosted#7).
   "-n gibson get statefulset/gibson-redis-stack -o jsonpath={.status.updateRevision}") printf 'rev1'; exit 0 ;;
+  # The restored pod: its uid changes when it is deleted. STUB_REDIS_PC_EMPTY:
+  # the pod has no priorityClassName until it is deleted once (the backup and
+  # the chart have the same revision, so the StatefulSet does not replace it).
+  # STUB_REDIS_PC_NEVER: a new pod has none either.
+  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath={.metadata.uid}")
+    if [ -e "$STATE/redis-pod-deleted" ]; then printf 'uid-2'; else printf 'uid-1'; fi; exit 0 ;;
+  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath={.spec.priorityClassName}")
+    if [ -n "${STUB_REDIS_PC_NEVER:-}" ]; then exit 0; fi
+    if [ -n "${STUB_REDIS_PC_EMPTY:-}" ] && [ ! -e "$STATE/redis-pod-deleted" ]; then exit 0; fi
+    printf 'gibson-platform-critical'; exit 0 ;;
+  "-n gibson delete pod/gibson-redis-stack-0 --wait=true") : > "$STATE/redis-pod-deleted"; exit 0 ;;
   "-n gibson get pod/gibson-redis-stack-0 -o jsonpath="*) printf 'rev1|StatefulSet|True'; exit 0 ;;
   "-n gibson get secret gibson-redis-stack -o json")
     printf '{"data":{"redis-password":"%s"}}' "$(printf '%s' hunter2 | base64)"; exit 0 ;;

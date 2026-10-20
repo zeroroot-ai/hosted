@@ -28,18 +28,23 @@ case "$*" in
 esac
 while [ "$1" != "redis-cli" ]; do shift; done; shift
 read -r p
-# STUB_DROP: the password is lost on stdin.
-[ -z "${STUB_DROP:-}" ] || p=""
+# STUB_DROP=N: the password is lost on stdin for the first N calls. The reader
+# of the real exec exits 97 on an empty read, and the caller sends it again.
+n=$(( $(cat "$TMP/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$TMP/calls"
+[ -z "${STUB_DROP:-}" ] || [ "$n" -gt "$STUB_DROP" ] || p=""
+[ -n "$p" ] || exit 97
+# STUB_LOADING: Redis answers an error to each call.
+[ -z "${STUB_LOADING:-}" ] || { echo "LOADING Redis is loading the dataset in memory"; exit 0; }
 [ "$p" = hunter2 ] || { echo "NOAUTH Authentication required."; exit 0; }
 [ "$1" = -n ] && { db="$2"; shift 2; } || db=0
 cmd="$1"; shift
 case "$cmd" in
-  HGET)   cat "$R/idx.$2" 2>/dev/null ;;
-  HKEYS)  ls "$R" | sed -n 's/^idx\.//p' ;;
+  HGET)   cat "$R/idx.$2" 2>/dev/null || true ;;
+  HKEYS)  ls "$R" | sed -n 's/^idx\.//p'; true ;;
   JSON.SET) printf '%s' "$3" > "$R/doc.$db.$1" ;;
-  JSON.GET) if [ -f "$R/doc.$db.$1" ]; then printf '["%s"]\n' "$(sed 's/.*"id":"\([^"]*\)".*/\1/' "$R/doc.$db.$1")"; fi ;;
+  JSON.GET) if [ -f "$R/doc.$db.$1" ]; then printf '["%s"]\n' "$(sed 's/.*"id":"\([^"]*\)".*/\1/' "$R/doc.$db.$1")"; fi; true ;;
   XADD)   printf '1-0\nmarker\n%s\n' "$4" > "$R/stream.$db.$1"; echo 1-0 ;;
-  XRANGE) cat "$R/stream.$db.$1" 2>/dev/null ;;
+  XRANGE) cat "$R/stream.$db.$1" 2>/dev/null || true ;;
   *) echo "ERR unknown command $cmd"; exit 1 ;;
 esac
 SH
@@ -107,10 +112,34 @@ drive() { run bash "$TMP/drive.sh" "$@"; }
   [[ "$output" == *"someone-else"* ]]
 }
 
-@test "FAILING FIXTURE: a password lost on every try is a stop, never an empty answer (stdin)" {
+@test "a password lost on stdin twice is sent again, and the seed goes on (STDIN_LOST)" {
   echo 3 > "$TMP/redis/idx.restore-loop"
-  STUB_DROP=1 drive markers_redis_seed
+  STUB_DROP=2 drive markers_redis_seed
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"written to DB 3 and read back"* ]]
+}
+
+@test "FAILING FIXTURE: a password lost on every try is a stop that says so, never an empty answer (STDIN_LOST)" {
+  echo 3 > "$TMP/redis/idx.restore-loop"
+  STUB_DROP=99 drive markers_redis_seed
   [ "$status" -ne 0 ]
+  [[ "$output" == *"the password did not reach redis-cli on stdin in 4 tries"* ]] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: a redis-cli error in the check is named, and is not read as an empty volume" {
+  echo 3 > "$TMP/redis/idx.restore-loop"
+  drive markers_redis_seed
+  [ "$status" -eq 0 ]
+  STUB_LOADING=1 drive markers_redis_check
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"LOADING Redis is loading the dataset in memory"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"came back empty"* ]]
+}
+
+@test "FAILING FIXTURE: a redis-cli error in the absence check is no proof of absence" {
+  STUB_LOADING=1 drive markers_redis_absent
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"its absence is not proved"* ]] || { echo "$output"; false; }
 }
 
 @test "the absence check passes on an empty Redis and fails when the index still names the tenant" {
