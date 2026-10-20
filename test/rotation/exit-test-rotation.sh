@@ -880,8 +880,43 @@ velero_in_flight() {
         | .metadata.name'
 }
 
+# velero_storage_ready: every BackupStorageLocation of the velero namespace is
+# Available, within VELERO_READY_WAIT. A Velero server that restarted a moment
+# ago takes backups only after its controllers ran (drill rotation run 1,
+# hosted#59 thread: a backup stayed with no phase for 20 minutes).
+VELERO_READY_WAIT="${VELERO_READY_WAIT:-180}"
+velero_storage_ready() {
+  local deadline ph
+  deadline=$(( $(date +%s) + VELERO_READY_WAIT ))
+  while :; do
+    ph="$(kubectl -n velero get backupstoragelocations -o jsonpath='{range .items[*]}{.status.phase}{"\n"}{end}' 2>/dev/null || true)"
+    [ -n "$ph" ] && ! printf '%s\n' "$ph" | grep -qvx Available && return 0
+    [ "$(date +%s)" -lt "$deadline" ] || return 1
+    sleep 10
+  done
+}
+
+# velero_diagnose NAME: what the Velero server says when a backup is not
+# picked up, on stderr. The next run then names the cause.
+velero_diagnose() {
+  {
+    echo "    --- the Velero server, for backup $1 ---"
+    kubectl -n velero get pods -o wide 2>&1 | sed 's/^/      /'
+    kubectl -n velero get backupstoragelocations 2>&1 | sed 's/^/      /'
+    kubectl -n velero get backup "$1" -o yaml 2>&1 | sed -n '/^status:/,$p' | sed 's/^/      /'
+    kubectl -n velero logs deployment/velero --tail=60 2>&1 | sed 's/^/      /'
+  } >&2 || true
+}
+
+# VELERO_PICKUP_WAIT: a new backup has a phase of the controller within this
+# time. A backup with no phase after it was never picked up, and it is no
+# result of the repository password. It is deleted, so that a later restart of
+# the server on the right password does not run it, and the backup is made
+# once more. A second miss is a timeout with the diagnostics.
+VELERO_PICKUP_WAIT="${VELERO_PICKUP_WAIT:-240}"
+
 velero_backup() {
-  local name phase="" deadline queue_deadline busy
+  local name phase="" deadline queue_deadline busy pickup_deadline attempt=0
   queue_deadline=$(( $(date +%s) + VELERO_QUEUE_WAIT ))
   while :; do
     # A list that cannot be read is not an empty queue.
@@ -890,8 +925,11 @@ velero_backup() {
     [ "$(date +%s)" -lt "$queue_deadline" ] || { printf 'timeout:queue (%s)' "$(printf '%s' "$busy" | tr '\n' ' ')"; return; }
     sleep 15
   done
-  name="rotation-drill-$(date +%s)"
-  kubectl apply -f - >/dev/null <<YAML || { echo create-failed; return; }
+  velero_storage_ready || { velero_diagnose "(none made yet)"; printf 'timeout:storage-location'; return; }
+  while :; do
+    attempt=$(( attempt + 1 ))
+    name="rotation-drill-$(date +%s)-${attempt}"
+    kubectl apply -f - >/dev/null <<YAML || { echo create-failed; return; }
 apiVersion: velero.io/v1
 kind: Backup
 metadata:
@@ -905,21 +943,30 @@ spec:
   defaultVolumesToFsBackup: true
   ttl: 1h0m0s
 YAML
-  deadline=""
-  while :; do
-    phase="$(kubectl -n velero get backup "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
-    case "$phase" in
-      Completed|PartiallyFailed|Failed|FailedValidation) break ;;
-      ""|New|Queued|ReadyToStart)
-        # Still in the queue: a Schedule fired between the wait and the create.
-        [ "$(date +%s)" -lt "$queue_deadline" ] || { phase="timeout:${phase:-New}"; break; } ;;
-      *)
-        [ -n "$deadline" ] || deadline=$(( $(date +%s) + VELERO_RUN_WAIT ))
-        [ "$(date +%s)" -lt "$deadline" ] || { phase="timeout:${phase}"; break; } ;;
-    esac
-    sleep 15
+    deadline=""
+    pickup_deadline=$(( $(date +%s) + VELERO_PICKUP_WAIT ))
+    while :; do
+      phase="$(kubectl -n velero get backup "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      case "$phase" in
+        Completed|PartiallyFailed|Failed|FailedValidation) printf '%s' "$phase"; return ;;
+        "")
+          # No phase: the controller has not touched the backup.
+          if [ "$(date +%s)" -ge "$pickup_deadline" ]; then
+            velero_diagnose "$name"
+            kubectl -n velero delete backup "$name" --ignore-not-found --wait=false >/dev/null 2>&1 || true
+            [ "$attempt" -lt 2 ] && continue 2
+            printf 'timeout:unreconciled'; return
+          fi ;;
+        New|Queued|ReadyToStart)
+          # Still in the queue: a Schedule fired between the wait and the create.
+          [ "$(date +%s)" -lt "$queue_deadline" ] || { printf 'timeout:%s' "$phase"; return; } ;;
+        *)
+          [ -n "$deadline" ] || deadline=$(( $(date +%s) + VELERO_RUN_WAIT ))
+          [ "$(date +%s)" -lt "$deadline" ] || { printf 'timeout:%s' "$phase"; return; } ;;
+      esac
+      sleep 15
+    done
   done
-  printf '%s' "$phase"
 }
 
 # password_refused PHASE: true when PHASE, the end of a backup made with a
@@ -931,6 +978,8 @@ password_refused() {
     PartiallyFailed|Failed) return 0 ;;
     Completed) miss "a backup with a password that is not the keyring password completed" ;;
     FailedValidation) miss "the backup with another repository password failed validation, so it never read the repository" ;;
+    timeout:unreconciled) miss "the Velero server did not pick up the backup with another repository password in two tries (no phase), so it proves no refusal. The diagnostics of the Velero server are above" ;;
+    timeout:storage-location) miss "no BackupStorageLocation was Available after the restart of the Velero server, so no backup could start and the refusal is not proved. The diagnostics are above" ;;
     *) miss "the backup with another repository password did not end (${1:-no phase}), so it proves no refusal" ;;
   esac
 }
@@ -2311,7 +2360,8 @@ time_bound_of() {
     # on the failure path, which then returns), the OpenBao rollout, two
     # backups and the settle (review of hosted#807).
     keyring-generated-keys)    b=$(( 6 * (BAO_DELETE_WAIT_S + BAO_STATE_WAIT_S) + 2 * ROLLOUT_WAIT_S
-                                     + 2 * (VELERO_QUEUE_WAIT + VELERO_RUN_WAIT) + ROLLOUT_WAIT_S + SETTLE_S )) ;;
+                                     + 2 * (VELERO_QUEUE_WAIT + VELERO_RUN_WAIT) + ROLLOUT_WAIT_S + SETTLE_S
+                                     + 2 * (VELERO_READY_WAIT + 2 * VELERO_PICKUP_WAIT) )) ;;
     setec-disk-signing-seed)   b=$(( 2 * SEED_WAIT + SANDBOX_WAIT )) ;;
     substrate-cloud-credentials) b=0 ;;
     vendor-issued-inputs)      b=0 ;;
