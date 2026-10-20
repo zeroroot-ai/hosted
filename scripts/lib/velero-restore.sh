@@ -796,7 +796,27 @@ YAML
     fi
     TENANT_NS_RESTORED="${TENANT_NS_RESTORED:+${TENANT_NS_RESTORED} }${ns}"
   done
+  # The plugin namespaces of the backup. The tenant-operator makes them and
+  # runs each plugin in them, so no Restore touches them (hosted#8).
+  PLUGIN_NS_OF_BACKUP="$(printf '%s\n' "$list" | backup_list_section "v1/Namespace" \
+    | grep -E '^tenant-.+-plugins$' | tr '\n' ' ' | sed 's/ $//' || true)"
+  printf '  - plugin namespaces left to the tenant-operator: %s\n' "${PLUGIN_NS_OF_BACKUP:-none}"
   printf '  ✓ tenant namespaces of the backup, created without the managed-by label: %s\n' "${TENANT_NS_RESTORED:-none}"
+}
+
+# excluded_namespaces_yaml [namespace...] — the excludedNamespaces block of a
+# Restore: the namespaces given, then each plugin namespace of the backup.
+# A plugin namespace belongs to the tenant-operator. Its policy
+# gibson-tenant-plugin-workloads lets only replicaset-controller create a Pod
+# there and lets no one create a StatefulSet, so a Restore that creates a
+# plugin pod or StatefulSet ends PartiallyFailed (hosted#8). Prints nothing
+# when the list is empty, because an empty list is a null field in the CRD.
+excluded_namespaces_yaml() {
+  local all="$* ${PLUGIN_NS_OF_BACKUP:-}" n out=""
+  for n in $all; do
+    out="${out}    - ${n}"$'\n'
+  done
+  [ -z "$out" ] || printf '  excludedNamespaces:\n%s' "$out"
 }
 
 # wait_tenant_namespace_labels — each tenant namespace that the restore
@@ -927,6 +947,8 @@ metadata:
 spec:
   backupName: ${RESTORE_FROM}
   existingResourcePolicy: none
+  # No plugin namespace: the tenant-operator makes it and its workloads.
+$(excluded_namespaces_yaml)
   # The tenant namespaces exist already, with no label (see above).
   includedResources:
     - namespaces
@@ -965,9 +987,9 @@ metadata:
 spec:
   backupName: ${RESTORE_FROM}
   existingResourcePolicy: none
-  # Not the release namespace: Argo makes its workloads (see above).
-  excludedNamespaces:
-    - ${NS}
+  # Not the release namespace, where Argo makes the workloads, and not a
+  # plugin namespace, which the tenant-operator owns (see above).
+$(excluded_namespaces_yaml "$NS")
   includedResources:
     - pods
     - persistentvolumeclaims
@@ -999,9 +1021,9 @@ metadata:
 spec:
   backupName: ${RESTORE_FROM}
   existingResourcePolicy: none
-  # Not the release namespace: Argo makes its workloads (see above).
-  excludedNamespaces:
-    - ${NS}
+  # Not the release namespace, where Argo makes the workloads, and not a
+  # plugin namespace, which the tenant-operator owns (see above).
+$(excluded_namespaces_yaml "$NS")
   includedResources:
     - statefulsets
 YAML
