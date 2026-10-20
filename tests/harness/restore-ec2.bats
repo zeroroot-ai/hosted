@@ -178,8 +178,20 @@ case "$args" in
   # The Redis pod after the umbrella (hosted#7): the StatefulSet revision, the
   # pod on it, the Secret, and PING with the password of the Secret.
   # STUB_REDIS_PING: the answer to PING (default PONG).
-  "-n gibson get statefulset/gibson-redis-stack -o jsonpath={.status.updateRevision}") printf 'rev1'; exit 0 ;;
-  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath="*) printf '%s|StatefulSet|True' "${STUB_REDIS_POD_REV:-rev1}"; exit 0 ;;
+  # STUB_SLOW_REV: the read takes two seconds, so a deadline of one second has passed.
+  "-n gibson get statefulset/gibson-redis-stack -o jsonpath={.status.updateRevision}") [ -z "${STUB_SLOW_REV:-}" ] || sleep 2; printf 'rev1'; exit 0 ;;
+  # The restored pod: its uid changes when it is deleted. STUB_REDIS_PC_EMPTY:
+  # the pod has no priorityClassName until it is deleted once (the backup and
+  # the chart have the same revision, so the StatefulSet does not replace it).
+  # STUB_REDIS_PC_NEVER: a new pod has none either.
+  # One read of the pod: revision|owner|Ready|uid|priorityClassName.
+  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath="*)
+    uid=uid-1; pc=gibson-platform-critical
+    [ ! -e "$STATE/redis-pod-deleted" ] || uid=uid-2
+    if [ -n "${STUB_REDIS_PC_NEVER:-}" ]; then pc=
+    elif [ -n "${STUB_REDIS_PC_EMPTY:-}" ] && [ ! -e "$STATE/redis-pod-deleted" ]; then pc=; fi
+    printf '%s|StatefulSet|True|%s|%s' "${STUB_REDIS_POD_REV:-rev1}" "$uid" "$pc"; exit 0 ;;
+  "-n gibson delete pod/gibson-redis-stack-0 --ignore-not-found --wait=true --timeout="[1-9]*s) echo "$args" > "$STATE/redis-delete.args"; : > "$STATE/redis-pod-deleted"; exit 0 ;;
   "-n gibson get secret gibson-redis-stack -o json")
     printf '{"data":{"redis-password":"%s"}}' "$(printf '%s' hunter2 | base64)"; exit 0 ;;
   "-n gibson exec -i gibson-redis-stack-0 -c redis-stack -- sh -c "*)
@@ -513,6 +525,45 @@ assert "operation: remove" in text and "/spec/priorityClassName" in text, text
 assert "optional" not in text and "secretKeyRef" not in text, text
 PY
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
+@test "a Redis pod that the StatefulSet replaced has its priorityClassName, and nothing is deleted (hosted#7)" {
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  assert_output_has "Redis runs on the real Secret with priorityClassName gibson-platform-critical, and answers PONG to its password (replaced by the StatefulSet)"
+  [ ! -e "$STATE/redis-pod-deleted" ]
+}
+
+@test "FAILING FIXTURE: a restored Redis pod with no priorityClassName that the StatefulSet did not replace is deleted once (hosted#7)" {
+  # The backup and the chart have the same revision, so the StatefulSet keeps
+  # the pod that the modifier stripped. The log must not say it restarted.
+  export STUB_REDIS_PC_EMPTY=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  assert_output_has "the restored Redis pod has no priorityClassName and the StatefulSet did not replace it: deleting it once"
+  assert_output_has "with priorityClassName gibson-platform-critical, and answers PONG to its password (deleted once, then made again by the StatefulSet)"
+  [ -e "$STATE/redis-pod-deleted" ]
+  [[ "$output" != *"(replaced by the StatefulSet)"* ]]
+  # The delete is bound by the deadline and ignores a pod that is already gone.
+  grep -q -- '--ignore-not-found --wait=true --timeout=[1-9][0-9]*s' "$STATE/redis-delete.args"
+}
+
+@test "FAILING FIXTURE: a restore that passed its deadline before the delete dies, and no delete is sent (hosted#7)" {
+  # The pod has no priorityClassName, the deadline of the Redis wait is one
+  # second, and the first read of the StatefulSet takes two.
+  export STUB_REDIS_PC_EMPTY=1 STUB_SLOW_REV=1 RESTORE_TIMEOUT=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "the Redis restore passed its 1s deadline before the delete of gibson/gibson-redis-stack-0"
+  [ ! -e "$STATE/redis-delete.args" ]
+  [ ! -e "$STATE/redis-pod-deleted" ]
+}
+
+@test "FAILING FIXTURE: a Redis pod that the StatefulSet made with no priorityClassName stops the restore (hosted#7)" {
+  export STUB_REDIS_PC_EMPTY=1 STUB_REDIS_PC_NEVER=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "that the StatefulSet made has no priorityClassName"
 }
 
 @test "FAILING FIXTURE: a Redis Restore that moves no volume data stops the restore (hosted#7)" {

@@ -111,23 +111,30 @@ REDIS_MARKER_DOC="gibson:restore-loop:mission"
 REDIS_MARKER_STREAM="gibson:restore-loop:timeline"
 
 # redis_do <db> <args...> — one redis-cli call in the Redis pod, with the
-# password of the Secret on stdin. db is the logical DB, or 0.
+# password of the Secret on stdin. db is the logical DB, or 0. It prints the
+# answer. When the call fails, or Redis answers with an error, it prints the
+# error and returns 1: the caller decides what that means, and an error is
+# never read as "the key is not there".
 redis_do() {
   local db="$1" pw out rc=0; shift
   pw="$(redis_password)"
-  [ -n "$pw" ] || die "the Secret ${NS}/${NS}-redis-stack holds no Redis password"
+  [ -n "$pw" ] || { printf 'the Secret %s/%s-redis-stack holds no Redis password' "$NS" "$NS"; return 1; }
   out="$(redis_cli "${NS}-redis-stack-0" "$pw" -n "$db" "$@")" || rc=$?
   pw=""
-  [ "$rc" -eq 0 ] || die "redis-cli $1 failed (exit ${rc}): ${out:0:200}"
+  if [ "$rc" -ne 0 ] || [[ "$out" =~ ^(\(error\)\ )?(ERR|NOAUTH|WRONGPASS|WRONGTYPE|LOADING|MISCONF|READONLY|NOPERM|BUSY|NOSCRIPT|EXECABORT|MASTERDOWN|CLUSTERDOWN)([[:space:]]|$) ]]; then
+    printf 'redis-cli %s failed (exit %s): %s' "$1" "$rc" "${out:0:300}"
+    return 1
+  fi
   printf '%s' "$out"
 }
 
 # redis_tenant_db — the logical DB of the tenant, from the master index in DB
-# 0. The index comes back with the volume, so an empty answer after a restore
-# means the volume did not.
+# 0. It prints the index. Exit 1: the index holds no DB for the tenant (the
+# index comes back with the volume, so after a restore that means the volume
+# did not). Exit 2: the call failed, and it prints the error.
 redis_tenant_db() {
   local idx
-  idx="$(redis_do 0 HGET "$REDIS_MASTER_INDEX" "$TENANT")"
+  idx="$(redis_do 0 HGET "$REDIS_MASTER_INDEX" "$TENANT")" || { printf '%s' "$idx"; return 2; }
   [[ "$idx" =~ ^[0-9]+$ ]] || return 1
   printf '%s' "$idx"
 }
@@ -178,39 +185,56 @@ wait_for() {
 # are called by markers_seed, markers_check and markers_absent below, and
 # tests/harness/restore-markers-redis.bats runs them on their own.
 markers_redis_seed() {
-  local db
+  local db rc=0 out
   # The tenant Redis. Redis writes its append-only file each second, so the
   # marker is given time to reach the volume before the backup reads it.
-  db="$(redis_tenant_db)" \
-    || die "the master index ${REDIS_MASTER_INDEX} in Redis DB 0 holds no logical DB for the tenant ${TENANT}: the tenant has no Redis DB to lose. Fields: $(redis_do 0 HKEYS "$REDIS_MASTER_INDEX" | tr '\n' ' ')"
-  redis_do "$db" JSON.SET "$REDIS_MARKER_DOC" '$' "{\"id\":\"${GRAPH_MARKER}\"}" >/dev/null
-  redis_do "$db" XADD "$REDIS_MARKER_STREAM" '*' marker "$GRAPH_MARKER" >/dev/null
-  [ "$(redis_do "$db" JSON.GET "$REDIS_MARKER_DOC" '$.id')" = "[\"${GRAPH_MARKER}\"]" ] \
+  db="$(redis_tenant_db)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) die "the master index ${REDIS_MASTER_INDEX} in Redis DB 0 holds no logical DB for the tenant ${TENANT}: the tenant has no Redis DB to lose. Fields: $(redis_do 0 HKEYS "$REDIS_MASTER_INDEX" | tr '\n' ' ')" ;;
+    *) die "could not read the master index ${REDIS_MASTER_INDEX}: ${db}" ;;
+  esac
+  out="$(redis_do "$db" JSON.SET "$REDIS_MARKER_DOC" '$' "{\"id\":\"${GRAPH_MARKER}\"}")" || die "could not write the document marker: ${out}"
+  out="$(redis_do "$db" XADD "$REDIS_MARKER_STREAM" '*' marker "$GRAPH_MARKER")" || die "could not write the stream marker: ${out}"
+  out="$(redis_do "$db" JSON.GET "$REDIS_MARKER_DOC" '$.id')" || die "could not read the document marker back: ${out}"
+  [ "$out" = "[\"${GRAPH_MARKER}\"]" ] \
     || die "the tenant Redis DB ${db} does not hold the document it was just given"
-  redis_do "$db" XRANGE "$REDIS_MARKER_STREAM" - + | grep -qxF "$GRAPH_MARKER" \
+  out="$(redis_do "$db" XRANGE "$REDIS_MARKER_STREAM" - +)" || die "could not read the stream marker back: ${out}"
+  printf '%s\n' "$out" | grep -qxF "$GRAPH_MARKER" \
     || die "the tenant Redis DB ${db} does not hold the stream entry it was just given"
   sleep 3
   note "redis document and stream entry written to DB ${db} and read back"
 }
 
 markers_redis_check() {
-  local db
+  local db rc=0 out
   # The tenant Redis. An empty Redis has no master index, so a restore that
-  # left the volume empty fails here, at the lookup of the tenant DB.
-  db="$(redis_tenant_db)" \
-    || die "the restored Redis has no logical DB for the tenant ${TENANT} in its master index ${REDIS_MASTER_INDEX}: the Redis volume came back empty"
-  [ "$(redis_do "$db" JSON.GET "$REDIS_MARKER_DOC" '$.id')" = "[\"${GRAPH_MARKER}\"]" ] \
+  # left the volume empty fails here, at the lookup of the tenant DB. A call
+  # that fails says so with the error of redis-cli, not "empty".
+  db="$(redis_tenant_db)" || rc=$?
+  case "$rc" in
+    0) ;;
+    1) die "the restored Redis has no logical DB for the tenant ${TENANT} in its master index ${REDIS_MASTER_INDEX}: the Redis volume came back empty" ;;
+    *) die "could not read the master index ${REDIS_MASTER_INDEX} of the restored Redis: ${db}" ;;
+  esac
+  out="$(redis_do "$db" JSON.GET "$REDIS_MARKER_DOC" '$.id')" || die "could not read the document of the restored Redis DB ${db}: ${out}"
+  [ "$out" = "[\"${GRAPH_MARKER}\"]" ] \
     || die "the restored Redis DB ${db} does not hold the document written before the teardown (a mission doc class)"
-  redis_do "$db" XRANGE "$REDIS_MARKER_STREAM" - + | grep -qxF "$GRAPH_MARKER" \
+  out="$(redis_do "$db" XRANGE "$REDIS_MARKER_STREAM" - +)" || die "could not read the stream of the restored Redis DB ${db}: ${out}"
+  printf '%s\n' "$out" | grep -qxF "$GRAPH_MARKER" \
     || die "the restored Redis DB ${db} does not hold the stream entry written before the teardown (the Timeline tail class)"
   printf '\033[1;32m     ✓ the tenant Redis DB %s holds the document and the stream entry\033[0m\n' "$db"
 }
 
 markers_redis_absent() {
-  local db
-  if db="$(redis_tenant_db)"; then
-    die "the master index of Redis names a DB for the tenant ${TENANT} after a wipe and a nameless recreate: the Redis volume was restored without being asked"
-  fi
+  local db rc=0
+  # A failed call is no proof of absence.
+  db="$(redis_tenant_db)" || rc=$?
+  case "$rc" in
+    0) die "the master index of Redis names a DB for the tenant ${TENANT} after a wipe and a nameless recreate: the Redis volume was restored without being asked" ;;
+    1) ;;
+    *) die "could not read the master index ${REDIS_MASTER_INDEX}, so its absence is not proved: ${db}" ;;
+  esac
   printf '\033[1;32m     ✓ the Redis master index holds no DB of the tenant\033[0m\n'
 }
 
