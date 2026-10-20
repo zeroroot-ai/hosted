@@ -390,7 +390,7 @@ if [ -n "$ghcr_token" ]; then
   if out="$(GHCR_PULL_TOKEN="$ghcr_token" python3 "$GHCR_PULL_PROBE" 2>&1)"; then
     ok ghcr "$out"
   else
-    miss ghcr "GHCR refused the keyring's GHCR_PULL_TOKEN (${out##*$'\n'}). The token is revoked, expired or has no Read on the package. Fix: ${ghcr_set_hint}"
+    miss ghcr "GHCR refused the GHCR_PULL_TOKEN (${out##*$'\n'}). In a workflow this token is the job token, and the only fix is an owner grant: open the package on github.com/orgs/zeroroot-ai/packages, then Package settings, Manage Actions access, add zeroroot-ai/hosted with role Read. The GitHub API cannot set this. Outside a workflow the keyring token is revoked, expired or has no Read on the package: ${ghcr_set_hint}"
   fi
 elif [ "$ghcr_required" = 1 ]; then
   miss ghcr "the keyring carries no GHCR_PULL_TOKEN, so no private first-party image can be pulled. Fix: ${ghcr_set_hint}"
