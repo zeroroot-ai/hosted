@@ -167,15 +167,18 @@ PY
 
 @test "saas overlay: FAILING FIXTURE: a bad call or bad input is exit 2 with a named error, never a traceback" {
   F="$CHART_DIR/../testdata"
-  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/csi-pod-no-exclude.yaml"
-  [ "$status" -eq 2 ]; [[ "$output" == *"--expect N is required"* ]]
-  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/csi-pod-no-exclude.yaml" --expect
-  [ "$status" -eq 2 ]; [[ "$output" == *"--expect needs a number"* ]]
-  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/csi-pod-no-exclude.yaml" --expect x
-  [ "$status" -eq 2 ]; [[ "$output" == *"--expect needs a number, got 'x'"* ]]
-  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/csi-pod-no-name.yaml" --expect 1
-  [ "$status" -eq 2 ]; [[ "$output" == *"has no metadata.name"* ]]
-  run python3 "$CHART_DIR/../check-csi-excludes.py" "$F/not-yaml.yaml" --expect 1
-  [ "$status" -eq 2 ]; [[ "$output" == *"check-csi-excludes: cannot read"* ]]
-  [[ "$output" != *"Traceback"* ]]
+  C="$CHART_DIR/../check-csi-excludes.py"
+  # The bad YAML is written here, not kept under gitops/, where the guards that
+  # read every YAML file would refuse it.
+  printf 'kind: Pod\n  bad: [unclosed\n' > "$TMP/not-yaml.yaml"
+  run python3 "$C" "$F/csi-pod-no-exclude.yaml"
+  [ "$status" -eq 2 ]; [[ "$output" == *"--expect N is required"* ]]; [[ "$output" != *"Traceback"* ]]
+  run python3 "$C" "$F/csi-pod-no-exclude.yaml" --expect
+  [ "$status" -eq 2 ]; [[ "$output" == *"--expect needs a number"* ]]; [[ "$output" != *"Traceback"* ]]
+  run python3 "$C" "$F/csi-pod-no-exclude.yaml" --expect x
+  [ "$status" -eq 2 ]; [[ "$output" == *"--expect needs a number, got 'x'"* ]]; [[ "$output" != *"Traceback"* ]]
+  run python3 "$C" "$F/csi-pod-no-name.yaml" --expect 1
+  [ "$status" -eq 2 ]; [[ "$output" == *"has no metadata.name"* ]]; [[ "$output" != *"Traceback"* ]]
+  run python3 "$C" "$TMP/not-yaml.yaml" --expect 1
+  [ "$status" -eq 2 ]; [[ "$output" == *"check-csi-excludes: cannot read"* ]]; [[ "$output" != *"Traceback"* ]]
 }
