@@ -45,8 +45,19 @@ C=203.0.113.21
 
 # req <method> <path> [curl args...] — prints the status code (app. host)
 # api <method> <path> [curl args...] — the same against the api. host
+#
+# REQ_COOKIE=<name=value; ...> req ... sends a Cookie header. The value goes to
+# the container as a curl config on stdin (-K -), never as an argument of
+# docker, where a process list shows it.
 _req() {
   local host="$1" method="$2" path="$3"; shift 3
+  if [ -n "${REQ_COOKIE:-}" ]; then
+    printf 'header = "Cookie: %s"\n' "$REQ_COOKIE" \
+      | docker run -i --rm --network "$NET" --ip "$C" "$CURL_IMAGE" -sk -o /dev/null -K - \
+          -X "$method" -H "Host: $host" --resolve "$host:$EDGE_PORT:$EDGE_IP" \
+          -w '%{http_code}' "$@" "https://$host:$EDGE_PORT$path"
+    return
+  fi
   docker run --rm --network "$NET" --ip "$C" "$CURL_IMAGE" -sk -o /dev/null \
     -X "$method" -H "Host: $host" --resolve "$host:$EDGE_PORT:$EDGE_IP" \
     -w '%{http_code}' "$@" "https://$host:$EDGE_PORT$path"
@@ -101,19 +112,19 @@ UA='Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrom
 
 echo "8. opaque_session_cookie: first-party session cookies are not read as attack text"
 check "GET /missions with __Secure-authjs.session-token carrying MkDir" \
-  "$(req GET /missions -A "$UA" -H "Cookie: __Secure-authjs.session-token=$JWE; __Host-authjs.csrf-token=ab12%7Ccd34")" 200
+  "$(REQ_COOKIE="__Secure-authjs.session-token=$JWE; __Host-authjs.csrf-token=ab12%7Ccd34" req GET /missions -A "$UA")" 200
 check "GET /missions with a chunked __Secure-authjs.session-token.0/.1" \
-  "$(req GET /missions -A "$UA" -H "Cookie: __Secure-authjs.session-token.0=$JWE; __Secure-authjs.session-token.1=$JWE")" 200
+  "$(REQ_COOKIE="__Secure-authjs.session-token.0=$JWE; __Secure-authjs.session-token.1=$JWE" req GET /missions -A "$UA")" 200
 check "GET /missions with the plain-http authjs.session-token" \
-  "$(req GET /missions -A "$UA" -H "Cookie: authjs.session-token=$JWE")" 200
+  "$(REQ_COOKIE="authjs.session-token=$JWE" req GET /missions -A "$UA")" 200
 check "GET /oauth/v2/keys with __Host-zitadel.useragent carrying MkDir" \
-  "$(req GET /oauth/v2/keys -A "$UA" -H "Cookie: __Host-zitadel.useragent=$JWE")" 200
+  "$(REQ_COOKIE="__Host-zitadel.useragent=$JWE" req GET /oauth/v2/keys -A "$UA")" 200
 check "GET /missions with the login app's sessions cookie carrying MkDir" \
-  "$(req GET /missions -A "$UA" -H "Cookie: sessions=$JWE")" 200
+  "$(REQ_COOKIE="sessions=$JWE" req GET /missions -A "$UA")" 200
 check "CONTROL: GET /missions?q=mkdir( is still blocked" \
   "$(req GET '/missions?q=mkdir(' -A "$UA")" 403
 check "CONTROL: MkDir in a cookie the exclusion does not name is still blocked" \
-  "$(req GET /missions -A "$UA" -H "Cookie: tracking=$JWE")" 403
+  "$(REQ_COOKIE="tracking=$JWE" req GET /missions -A "$UA")" 403
 
 echo "9. grpc_web_on_app: a gRPC-web call to Zitadel on the app host is refused"
 # A gRPC-web frame: 1-byte flag, 4-byte length, then a protobuf message whose

@@ -72,7 +72,7 @@ esac
 # against.
 # ---------------------------------------------------------------------------
 info "resolving the signing secret for this API key..."
-CLI_SECRET="$(stripe listen --api-key "$API_KEY" --print-secret 2>/dev/null | tr -d '\r\n')"
+CLI_SECRET="$(STRIPE_API_KEY="$API_KEY" stripe listen --print-secret 2>/dev/null | tr -d '\r\n')"
 [ -n "$CLI_SECRET" ] || die "stripe listen --print-secret returned nothing (is the key valid?)"
 
 cluster_secret() {
@@ -160,7 +160,7 @@ fi
 info "forwarding Stripe events → $FORWARD_TO"
 info "press Ctrl+C to stop"
 while true; do
-  stripe listen --api-key "$API_KEY" --forward-to "$FORWARD_TO" --skip-verify || true
+  STRIPE_API_KEY="$API_KEY" stripe listen --forward-to "$FORWARD_TO" --skip-verify || true
   warn "listener exited — restarting in 3s"
   sleep 3
 done

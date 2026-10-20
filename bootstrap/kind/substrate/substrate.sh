@@ -258,9 +258,11 @@ say "all three answer"
 #               the kind Docker network only. Gone in 30 days.
 # ---------------------------------------------------------------------------
 step "bucket $BUCKET"
+# The MinIO credential goes to docker in its environment, and -e MC_HOST_local
+# with no value passes it on. An argument of docker shows in a process list.
 mc() {
-  docker exec -i -e MC_CONFIG_DIR=/tmp/mc \
-    -e "MC_HOST_local=http://$ROOT_USER:$ROOT_PASSWORD@127.0.0.1:9000" \
+  MC_HOST_local="http://$ROOT_USER:$ROOT_PASSWORD@127.0.0.1:9000" \
+    docker exec -i -e MC_CONFIG_DIR=/tmp/mc -e MC_HOST_local \
     "$C_MINIO" mc --quiet "$@"
 }
 mc mb --ignore-existing --with-lock "local/$BUCKET" >/dev/null
@@ -305,8 +307,8 @@ cat > "$WORK/policy.json" <<JSON
   ]
 }
 JSON
-docker exec -i -e MC_CONFIG_DIR=/tmp/mc \
-  -e "MC_HOST_local=http://$ROOT_USER:$ROOT_PASSWORD@127.0.0.1:9000" \
+MC_HOST_local="http://$ROOT_USER:$ROOT_PASSWORD@127.0.0.1:9000" \
+docker exec -i -e MC_CONFIG_DIR=/tmp/mc -e MC_HOST_local \
   "$C_MINIO" sh -c "cat > /tmp/$PLATFORM_POLICY.json && mc --quiet admin policy create local $PLATFORM_POLICY /tmp/$PLATFORM_POLICY.json" \
   < "$WORK/policy.json" >/dev/null
 mc admin user add local "$BUCKET_ACCESS_KEY" "$BUCKET_SECRET_KEY" >/dev/null
