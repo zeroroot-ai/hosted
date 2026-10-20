@@ -700,6 +700,13 @@ check-pull-token-read-only: ## A job token that becomes the GHCR pull token hold
 	@python3 scripts/check-pull-token-read-only.py
 check: check-pull-token-read-only
 
+.PHONY: check-ci-lanes
+check-ci-lanes: ## The merge gate keeps its parallel jobs, its three lanes and an aggregator that passes only on success
+	@printf "$(GREEN)▶$(NC) check-ci-lanes...\n"
+	@python3 scripts/check-ci-lanes.py --selftest
+	@python3 scripts/check-ci-lanes.py
+check: check-ci-lanes
+
 .PHONY: check-kubectl-spdy
 check-kubectl-spdy: ## A workflow job that runs kubectl exec sets KUBECTL_REMOTE_COMMAND_WEBSOCKETS=false (hosted#10)
 	@printf "$(GREEN)▶$(NC) check-kubectl-spdy...\n"
