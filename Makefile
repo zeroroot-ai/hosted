@@ -708,6 +708,13 @@ check-pull-token-read-only: ## A job token that becomes the GHCR pull token hold
 	@python3 scripts/check-pull-token-read-only.py
 check: check-pull-token-read-only
 
+.PHONY: check-bats-coverage
+check-bats-coverage: ## Each tracked bats file is run by exactly one recipe of make check
+	@printf "$(GREEN)▶$(NC) check-bats-coverage...\n"
+	@python3 scripts/check-bats-coverage.py --selftest
+	@python3 scripts/check-bats-coverage.py
+check: check-bats-coverage
+
 .PHONY: check-ci-lanes
 check-ci-lanes: ## The merge gate keeps its parallel jobs, its three lanes and an aggregator that passes only on success
 	@printf "$(GREEN)▶$(NC) check-ci-lanes...\n"
@@ -1281,32 +1288,27 @@ check-overlay-belief-trainer: ## Every cloud overlay pins the belief trainer cop
 	@bats tests/harness/belief-trainer-image.bats
 
 .PHONY: check-verbs
-check-verbs: require-charts charts-vendored ## The bringup verbs fail closed: no ENV, a RESTORE_FROM that is not a backup, a used Postgres archive, a keyring member missing or unquoted, a substrate line that does not answer
-	@printf "$(GREEN)▶$(NC) check-verbs...\n"
-	@bats tests/harness/recreate.bats
-	@bats tests/harness/instance-type.bats
-	@bats tests/harness/restore.bats
-	@bats tests/harness/restore-ec2.bats
-	@bats tests/harness/preflight.bats
-	@bats tests/harness/keyring-credential.bats
-	@bats tests/harness/with-cluster.bats
-	@bats tests/harness/bringup-status.bats
-	@bats tests/harness/purge-tenant-backup.bats
-	@bats tests/harness/drill-teardown.bats
-	@bats tests/harness/keyring-to-cluster.bats
-	@bats tests/harness/keyring-vendor-dates.bats
-	@bats tests/harness/substrate-rotate.bats
-	@bats tests/harness/keyring-rotation.bats
-	@bats tests/harness/cluster-probe.bats
-	@bats tests/harness/apex-zone-id.bats
-	@bats tests/harness/wait-apps.bats
-	@bats tests/harness/port-forward-loop.bats
-	@bats tests/harness/wait-archiving.bats
-	@bats tests/harness/ensure-container.bats
-	@bats tests/harness/coredns-platform-hosts.bats
-	@bats tests/harness/ssm-forward.bats
-	@bats tests/harness/ec2-cluster-access.bats
-	@bats tests/harness/zitadel-console.bats
+# check-verbs runs in two targets of about five minutes each, one job each in
+# ci.yml (the verbs file took 9 minutes 55 seconds of a 12 minute limit).
+# check-verbs-a is an explicit list. check-verbs-b is every file of
+# tests/harness that no other recipe or list of this Makefile names, so a new
+# bats file runs in b by default. scripts/check-bats-coverage.py keeps each
+# tracked bats file in exactly one recipe of `make check`.
+VERBS_A_BATS := tests/harness/restore-ec2.bats tests/harness/restore.bats \
+  tests/harness/recreate.bats tests/harness/instance-type.bats tests/harness/zitadel-console.bats
+BATS_NAMED := $(shell grep -ho 'tests/harness/[A-Za-z0-9._-]*\.bats' $(firstword $(MAKEFILE_LIST)) | sort -u)
+VERBS_B_BATS := $(filter-out $(BATS_NAMED),$(sort $(wildcard tests/harness/*.bats)))
+
+.PHONY: check-verbs-a check-verbs-b
+check-verbs: check-verbs-a check-verbs-b ## The bringup verbs fail closed: no ENV, a RESTORE_FROM that is not a backup, a used Postgres archive, a keyring member missing or unquoted, a substrate line that does not answer
+
+check-verbs-a: require-charts charts-vendored ## The first half of check-verbs: the restore and recreate verbs
+	@printf "$(GREEN)▶$(NC) check-verbs-a...\n"
+	@bats $(VERBS_A_BATS)
+
+check-verbs-b: require-charts charts-vendored ## The second half of check-verbs: every other bats file of tests/harness that no other recipe runs
+	@printf "$(GREEN)▶$(NC) check-verbs-b...\n"
+	@bats $(VERBS_B_BATS)
 
 # Air-gap manifest freshness (deploy#1171): airgap/{images.txt,images.yaml} in charts
 # are generated from `helm template` over every ci/ profile. Deliberately NOT in

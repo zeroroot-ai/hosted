@@ -1,0 +1,1 @@
+t/ghost.bats: no recipe of make check runs it

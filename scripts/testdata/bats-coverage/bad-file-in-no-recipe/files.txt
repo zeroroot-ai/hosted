@@ -1,0 +1,4 @@
+t/x.bats
+t/y.bats
+t/z.bats
+t/lost.bats

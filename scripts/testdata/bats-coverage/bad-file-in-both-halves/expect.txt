@@ -1,0 +1,1 @@
+t/x.bats: 2 commands of make check run it
