@@ -33,7 +33,7 @@ spec:
     # by deploy's publish-umbrella-chart workflow (deploy#1777/#1785).
     - repoURL: ghcr.io/zeroroot-ai/charts
       chart: gibson-operator-crds
-      targetRevision: "0.151.1"
+      targetRevision: "0.152.0"
   destination:
     server: https://kubernetes.default.svc
     namespace: gibson
