@@ -177,3 +177,22 @@ probe_against() {
   probe_against 200 '<html>oops</html>'
   [ "$output" = error ] || { echo "$output"; false; }
 }
+
+@test "FAILING FIXTURE: each miss of the session class names the probe result, and no check reads the probe bare (review of hosted#797)" {
+  run python3 - "$REPO_ROOT/test/rotation/exit-test-rotation.sh" <<'PY'
+import re, sys
+lines = open(sys.argv[1]).read().split("\n")
+bare = [i + 1 for i, l in enumerate(lines)
+        if re.search(r'\[ "\$\(session_probe [^)]*\)+" = (accepted|refused) \]', l)]
+assert not bare, "a check reads session_probe bare (the miss cannot name the result), lines %s" % bare
+calls = [i for i, l in enumerate(lines)
+         if re.search(r'\bprobe(_old)?="\$\(session_probe ', l)]
+assert len(calls) >= 6, "the session class makes %d probe calls, want at least 6" % len(calls)
+for i in calls:
+    window = "\n".join(lines[i:i + 5])
+    assert "miss " in window and "probe result" in window, \
+        "the miss after line %d does not name the probe result" % (i + 1)
+print("ok %d probe calls, each with a miss that names the result" % len(calls))
+PY
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
