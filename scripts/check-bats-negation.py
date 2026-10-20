@@ -12,6 +12,12 @@ nothing (hosted#12 review). The effective forms are:
 or `! command || { echo why; false; }`, which runs the handler when the
 negation fails.
 
+A `!` is effective in two cases only: a handler after it that can fail
+(`|| false`, `|| exit 1`, `|| { ...; return 1; }`), and the last command of a
+subshell or command substitution (`( ! cmd )`, `x=$(true; ! cmd)`), where the
+non-zero status of the group stops the test. `&&` does not help, and neither
+does `|| true`. A `!` after `&&` or in a case branch is as inert as one alone.
+
 The scan skips the bodies of heredocs, because a stub script written by a
 test is not run by bats. A herestring (`<<<`), a shift (`$(( 1 <<x ))`) and
 text inside a quoted string are not heredocs. A heredoc whose terminator never
@@ -77,15 +83,36 @@ def heredoc_start(line: str):
     return None
 
 
+# A handler after `||` that can fail the test: false, exit, return 1, or a
+# call that dies. `|| true` or `|| echo ...` lets the test go on, so the
+# negation stays inert.
+FAILING_HANDLER = re.compile(r"\|\|(?=.*\b(?:false|exit\s+[1-9]\d*|return\s+[1-9]\d*|die|fail)\b)")
+CASE_LABEL = re.compile(r"^[^\s()]+\)\s*(?=!)")
+
+
 def bare_negation(line: str) -> bool:
-    """True when a statement of the line starts with `!` and has no `||`.
-    Statements are split at `;`. A `{`, `(`, `then`, `do` or `else` before the
-    `!` is skipped. An `if` or `while` condition is not a statement of this
-    kind. A `&&` does not help: bash never stops for an inverted status."""
-    for seg in mask(line).split(";"):
-        seg = LEAD.sub("", seg.strip())
-        if BARE.match(seg) and "||" not in seg:
-            return True
+    """True when a statement of the line starts with `!` and cannot fail the
+    test. Statements are split at `;` and `&&`. A `{`, `(`, `then`, `do`, `else`
+    or a case label before the `!` is skipped. An `if` or `while` condition is
+    not a statement of this kind. The `!` is effective in two cases only: a
+    handler after it that fails (`|| false`, `|| { ...; false; }`, `|| exit 1`),
+    and the last command of a subshell or a command substitution, where the
+    non-zero status of the group stops the test. `&&` does not help, and
+    neither does `|| true`: bash never stops for an inverted status."""
+    masked = mask(line)
+    bounds = [0] + [m.end() for m in re.finditer(r";|&&", masked)]
+    for i, start in enumerate(bounds):
+        end = bounds[i + 1] - 1 if i + 1 < len(bounds) else len(masked)
+        seg = LEAD.sub("", masked[start:end].strip())
+        seg = CASE_LABEL.sub("", seg)
+        if not BARE.match(seg):
+            continue
+        # The handler may run on past the next `;` ( `|| { echo x; false; }` ).
+        if "||" in seg and FAILING_HANDLER.search(masked[start:]):
+            continue
+        if seg.count(")") > seg.count("("):
+            continue  # the last command of ( ... ) or $( ... )
+        return True
     return False
 
 
@@ -142,7 +169,7 @@ def expected_lines(path: pathlib.Path):
 def selftest() -> int:
     bads = sorted(FIXTURES.glob("bad-*.bats"))
     goods = sorted(FIXTURES.glob("good-*.bats"))
-    if len(bads) < 9 or not goods:
+    if len(bads) < 13 or not goods:
         print("check-bats-negation: selftest: the fixtures are missing", file=sys.stderr)
         return 2
     for f in bads + goods:
