@@ -1,3 +1,4 @@
+# expect: none
 @test "run and status" {
   run grep -q hi "$BATS_TEST_TMPDIR/f"
   [ "$status" -ne 0 ]

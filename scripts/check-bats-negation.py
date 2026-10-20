@@ -32,39 +32,64 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "scripts" / "testdata" / "bats-negation"
 # A heredoc start: `<<` or `<<-`, then a word. Not `<<<` (a herestring), not
-# `$(( 1 <<x ))` (a shift), and not text inside a quoted string.
-HEREDOC = re.compile(r"(?<![<$(])<<(?![<(])-?\s*\\?['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
-BARE = re.compile(r"^\s*!\s+\S")
+# `$(( 1 <<x ))` (a shift), and not text inside a quoted string or a comment.
+HEREDOC = re.compile(r"<<(?![<(])-?\s*\\?['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?")
+BARE = re.compile(r"^!\s+\S")
+LEAD = re.compile(r"^(?:[{(]\s*|(?:then|do|else)\s+)+")
 
 
-def in_quotes(line: str, pos: int) -> bool:
-    """True when the character at pos sits inside a quoted string."""
-    quote = ""
-    i = 0
-    while i < pos:
+def mask(line: str) -> str:
+    """The line with the text of each quoted string and the trailing comment
+    blanked, so an operator is found only where the shell reads one. The
+    length stays, so a position in the mask is a position in the line."""
+    out, quote, i = [], "", 0
+    while i < len(line):
         c = line[i]
-        if quote == '"' and c == "\\":
-            i += 2
-            continue
         if quote:
+            if quote == '"' and c == "\\":
+                out.append("  "); i += 2; continue
             if c == quote:
                 quote = ""
+                out.append(c)
+            else:
+                out.append(" ")
         elif c in "\"'":
             quote = c
+            out.append(c)
+        elif c == "#" and (i == 0 or line[i - 1] in " \t;"):
+            out.append(" " * (len(line) - i))
+            break
+        else:
+            out.append(c)
         i += 1
-    return bool(quote)
+    return "".join(out)
 
 
 def heredoc_start(line: str):
-    for m in HEREDOC.finditer(line):
-        before = line[: m.start()]
-        if in_quotes(line, m.start()) or before.count("((") > before.count("))"):
+    masked = mask(line)
+    for m in re.finditer(r"(?<!<)<<(?![<(])", masked):
+        before = masked[: m.start()]
+        if before.count("((") > before.count("))"):
             continue
-        return m
+        d = HEREDOC.match(line, m.start())
+        if d:
+            return d
     return None
 
 
-def findings(path: pathlib.Path) -> list[str]:
+def bare_negation(line: str) -> bool:
+    """True when a statement of the line starts with `!` and has no `||`.
+    Statements are split at `;`. A `{`, `(`, `then`, `do` or `else` before the
+    `!` is skipped. An `if` or `while` condition is not a statement of this
+    kind. A `&&` does not help: bash never stops for an inverted status."""
+    for seg in mask(line).split(";"):
+        seg = LEAD.sub("", seg.strip())
+        if BARE.match(seg) and "||" not in seg:
+            return True
+    return False
+
+
+def findings_at(path: pathlib.Path) -> list[tuple[int, str]]:
     lines = path.read_text(encoding="utf-8", errors="replace").split("\n")
     out, i = [], 0
     while i < len(lines):
@@ -75,8 +100,8 @@ def findings(path: pathlib.Path) -> list[str]:
         i += 1
         if logical.lstrip().startswith("#"):
             continue
-        if BARE.match(logical) and not re.search(r"\|\||&&", logical):
-            out.append(f"{path.name}:{start}: {logical.strip()[:100]}")
+        if bare_negation(logical):
+            out.append((start, logical.strip()[:100]))
         m = heredoc_start(logical)
         if not m:
             continue
@@ -84,10 +109,14 @@ def findings(path: pathlib.Path) -> list[str]:
         # with no terminator hides every later line, so it is a finding.
         end = next((j for j in range(i, len(lines)) if lines[j].strip() == m.group(1)), None)
         if end is None:
-            out.append(f"{path.name}:{start}: a heredoc with terminator {m.group(1)} that never ends, so the scan cannot see the lines after it")
+            out.append((start, f"a heredoc with terminator {m.group(1)} that never ends, so the scan cannot see the lines after it"))
         else:
             i = end + 1
     return out
+
+
+def findings(path: pathlib.Path) -> list[str]:
+    return [f"{path.name}:{n}: {t}" for n, t in findings_at(path)]
 
 
 def tracked_bats() -> list[pathlib.Path]:
@@ -100,21 +129,32 @@ def tracked_bats() -> list[pathlib.Path]:
     return sorted(ROOT / n for n in names if not n.startswith("scripts/testdata/"))
 
 
+def expected_lines(path: pathlib.Path):
+    """The lines a fixture must raise, from its first line: `# expect: 4,9`,
+    or `# expect: none`."""
+    first = path.read_text(encoding="utf-8").split("\n", 1)[0]
+    m = re.match(r"#\s*expect:\s*(none|[0-9,\s]+)$", first)
+    if not m:
+        return None
+    return [] if m.group(1) == "none" else [int(x) for x in m.group(1).split(",")]
+
+
 def selftest() -> int:
     bads = sorted(FIXTURES.glob("bad-*.bats"))
     goods = sorted(FIXTURES.glob("good-*.bats"))
-    if len(bads) < 5 or not goods:
+    if len(bads) < 9 or not goods:
         print("check-bats-negation: selftest: the fixtures are missing", file=sys.stderr)
         return 2
-    for b in bads:
-        if len(findings(b)) != 1:
-            print(f"check-bats-negation: selftest: {b.name} gave {findings(b)}, want one finding", file=sys.stderr)
+    for f in bads + goods:
+        want = expected_lines(f)
+        if want is None or (f in bads) == (want == []):
+            print(f"check-bats-negation: selftest: {f.name} has no usable `# expect:` line", file=sys.stderr)
             return 2
-    for g in goods:
-        if findings(g):
-            print(f"check-bats-negation: selftest: {g.name} gave {findings(g)}", file=sys.stderr)
+        got = [n for n, _ in findings_at(f)]
+        if got != want:
+            print(f"check-bats-negation: selftest: {f.name} raised lines {got}, want {want}", file=sys.stderr)
             return 2
-    print(f"✅ self-test: {len(bads)} bare negations are refused, {len(goods)} effective forms pass")
+    print(f"✅ self-test: {len(bads)} bare negations are refused at the lines they name, {len(goods)} effective forms pass")
     return 0
 
 
