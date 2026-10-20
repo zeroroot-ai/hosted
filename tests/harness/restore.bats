@@ -620,7 +620,7 @@ for d in yaml.safe_load_all(open(sys.argv[1])):
     seen += 1
     if "priorityclasses" in (d["spec"].get("includedResources") or []):
         sys.exit("Restore %s carries priorityclasses" % d["metadata"]["name"])
-sys.exit(0 if seen == 5 else "expected 5 Restores, saw %d" % seen)
+sys.exit(0 if seen == 6 else "expected 6 Restores, saw %d" % seen)
 ' "$STATE/applied-raw.yaml"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
