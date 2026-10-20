@@ -81,11 +81,15 @@ def has_place(job: dict, workflow: dict) -> bool:
     if is_false(workflow.get("env")) or is_false(job.get("env")):
         return True
     for step in job.get("steps") or []:
-        if uses(step, SETTER_ACTIONS) or is_false(step.get("env")) and step_runs_kubectl(step):
+        if uses(step, SETTER_ACTIONS):
             return True
         if step_runs_kubectl(step):
+            # A step env reaches that step only. The next kubectl step needs
+            # its own place.
+            if is_false(step.get("env")):
+                continue
             return False
-    return False
+    return True
 
 
 def findings(path: pathlib.Path) -> list[str]:
@@ -108,7 +112,7 @@ def setter_action_ok() -> list[str]:
 def selftest() -> int:
     bads = sorted(FIXTURES.glob("bad-*.yml"))
     goods = sorted(FIXTURES.glob("good-*.yml"))
-    if len(bads) < 6 or len(goods) < 3:
+    if len(bads) < 7 or len(goods) < 3:
         print("check-kubectl-spdy: selftest: the fixtures are missing", file=sys.stderr)
         return 2
     for b in bads:
