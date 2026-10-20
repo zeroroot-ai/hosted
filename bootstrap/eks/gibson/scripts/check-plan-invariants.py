@@ -66,6 +66,22 @@ PROTECTED_TYPES = {
     "aws_kms_key": "decrypts every object written under it",
 }
 
+# A replace that the configuration asks for on purpose. The staging node sets
+# `user_data_replace_on_change`, so a change of the node-init script replaces
+# the instance and the Elastic IP association that points at it. The address
+# survives. The root volume does not: it holds the container images, every
+# local-path volume and the Velero staging area, and it has
+# delete_on_termination. So this replace wipes the staging cluster. That is
+# safe because the drill rebuilds staging from nothing and restores it.
+# The rule needs both facts in the plan: the instance sets
+# user_data_replace_on_change, and user_data_base64 is the only attribute that
+# forces the replace. Any other cause on these types still fails. The rule
+# reads plan content, never a line number.
+INTENDED_REPLACE_PATHS = {
+    "aws_instance": [["user_data_base64"]],
+    "aws_eip_association": [["instance_id"]],
+}
+
 CYCLE_RE = re.compile(r"^\s*Error: Cycle:", re.M)
 
 
@@ -112,11 +128,40 @@ def check_cycle(log_path: pathlib.Path | None) -> None:
         )
 
 
+def _is_replace(change: dict) -> bool:
+    return set(change.get("change", {}).get("actions", [])) in REPLACE_ACTIONS
+
+
+def _is_intended_instance(change: dict) -> bool:
+    return (
+        change["type"] == "aws_instance"
+        and change["change"].get("replace_paths") == INTENDED_REPLACE_PATHS["aws_instance"]
+        and (change["change"].get("after") or {}).get("user_data_replace_on_change") is True
+    )
+
+
+def is_intended_replace(change: dict, plan: dict) -> bool:
+    """True for a replace that only a node-init change forces.
+
+    The association follows the instance, so it counts only when an instance
+    in the same plan is replaced for that reason.
+    """
+    if change["type"] == "aws_instance":
+        return _is_intended_instance(change)
+    if change["type"] != "aws_eip_association":
+        return False
+    if change["change"].get("replace_paths") != INTENDED_REPLACE_PATHS["aws_eip_association"]:
+        return False
+    return any(
+        _is_replace(c) and _is_intended_instance(c) for c in plan["resource_changes"]
+    )
+
+
 def check_replacements(plan: dict) -> None:
     replaced = [
         change
         for change in plan["resource_changes"]
-        if set(change.get("change", {}).get("actions", [])) in REPLACE_ACTIONS
+        if _is_replace(change) and not is_intended_replace(change, plan)
     ]
     if not replaced:
         return
@@ -192,15 +237,22 @@ def main() -> None:
     check_replacements(plan)
 
     changes = plan["resource_changes"]
+    accepted = [c["address"] for c in changes if _is_replace(c)]
     actions = [c["change"]["actions"] for c in changes]
     creates = sum(1 for a in actions if a == ["create"])
     updates = sum(1 for a in actions if a == ["update"])
     deletes = sum(1 for a in actions if a == ["delete"])
     buckets = sum(1 for c in changes if c["type"] == "aws_s3_bucket")
     noops = sum(1 for a in actions if a == ["no-op"])
+    accepted_text = (
+        f"{len(accepted)} replace(s) accepted, forced by user data alone: "
+        + ", ".join(accepted)
+        if accepted
+        else "0 to replace"
+    )
     print(
         f"OK — plan is clean: {creates} to add, {updates} to change, {deletes} to "
-        f"destroy, 0 to replace. {buckets} S3 bucket(s) present, none in the "
+        f"destroy, {accepted_text}. {buckets} S3 bucket(s) present, none in the "
         f"replace set. {noops + updates + deletes} existing resource(s) in the "
         f"plan, so a replacement was possible and did not happen."
     )
