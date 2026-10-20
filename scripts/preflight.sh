@@ -390,7 +390,7 @@ if [ -n "$ghcr_token" ]; then
   if out="$(GHCR_PULL_TOKEN="$ghcr_token" python3 "$GHCR_PULL_PROBE" 2>&1)"; then
     ok ghcr "$out"
   else
-    miss ghcr "GHCR refused the keyring's GHCR_PULL_TOKEN (${out##*$'\n'}). The token is revoked, expired or has no Read on the package. Fix: ${ghcr_set_hint}"
+    miss ghcr "GHCR refused the keyring's GHCR_PULL_TOKEN (${out##*$'\n'}). The token is revoked, expired or has no Read on the package. In a workflow the token is the job token: the package then grants this repository read in its settings (Manage Actions access), and nothing else helps. Otherwise fix: ${ghcr_set_hint}"
   fi
 elif [ "$ghcr_required" = 1 ]; then
   miss ghcr "the keyring carries no GHCR_PULL_TOKEN, so no private first-party image can be pulled. Fix: ${ghcr_set_hint}"

@@ -764,6 +764,10 @@ staging_with_stripe() {
   [ "$status" -eq 1 ]
   [[ "$output" == *"GHCR refused the keyring's GHCR_PULL_TOKEN (GET /token for zeroroot-ai/billing: HTTP 403)"* ]]
   [[ "$output" == *"preflight FAIL at 11 ghcr"* ]]
+  # A workflow passes the job token. The remedy for it is the package setting,
+  # not a new token in the keyring (signup exit test runs 39286781441 and
+  # 39414983194).
+  [[ "$output" == *"Manage Actions access"* ]]
   [[ "$output" != *"ghp_batsfixture"* ]]
   [[ "$output" != *"preflight PASS"* ]]
 }
