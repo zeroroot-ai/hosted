@@ -114,6 +114,9 @@ permissions:
   contents: read
 
 env:
+  # The WebSocket transport of kubectl drops stream bytes and the exec still
+  # exits 0 (hosted#10). scripts/check-kubectl-spdy.py keeps this line.
+  KUBECTL_REMOTE_COMMAND_WEBSOCKETS: "false"
   NS: gibson
   # The chart source, checked out below. Every verb reads it from here.
   CHARTS_ROOT: ${{ github.workspace }}/charts

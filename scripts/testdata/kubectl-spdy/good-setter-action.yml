@@ -1,0 +1,12 @@
+name: good
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: ./.github/actions/install-cluster-tools
+      - run: kubectl get pods
+  m:
+    runs-on: ubuntu-latest
+    steps:
+      - run: make recreate ENV=kind
