@@ -170,12 +170,24 @@ case "$args" in
   # STUB_MARKER_DROP=1: the write leaves the file empty, as the stdin path did.
   *"exec pod/backup-canary -- sh -c printf %s \"\$1\" > /data/marker && sync sh backup-canary "*)
     w=$(( $(cat "$STATE/marker-writes" 2>/dev/null || echo 0) + 1 )); echo "$w" > "$STATE/marker-writes"
+    # STUB_MARKER_WRITE: flaky:N fails the first N write execs, dead fails each.
+    case "${STUB_MARKER_WRITE:-ok}" in
+      flaky:*) [ "$w" -gt "${STUB_MARKER_WRITE#flaky:}" ] || { echo "error: write exec dropped" >&2; exit 1; } ;;
+      dead) echo "error: write exec container not found" >&2; exit 1 ;;
+    esac
     if [ -n "${STUB_MARKER_DROP:-}" ]; then : > "$STATE/marker"; exit 0; fi
     printf '%s' "${@: -1}" > "$STATE/marker"
     exit 0 ;;
   # The stdin path is gone. A call to it is an undeclared call.
   # The read back of the marker, before the backup.
-  *"exec pod/backup-canary -- cat /data/marker"*) cat "$STATE/marker" 2>/dev/null; exit 0 ;;
+  # STUB_MARKER_RBACK: flaky:N fails the first N read back execs, dead fails each.
+  *"exec pod/backup-canary -- cat /data/marker"*)
+    r=$(( $(cat "$STATE/marker-readbacks" 2>/dev/null || echo 0) + 1 )); echo "$r" > "$STATE/marker-readbacks"
+    case "${STUB_MARKER_RBACK:-ok}" in
+      flaky:*) [ "$r" -gt "${STUB_MARKER_RBACK#flaky:}" ] || { echo "error: read back exec dropped" >&2; exit 1; } ;;
+      dead) echo "error: read back exec container not found" >&2; exit 1 ;;
+    esac
+    cat "$STATE/marker" 2>/dev/null; exit 0 ;;
 
   # --- backup-verify verify -------------------------------------------------
   *"get secret velero-repo-credentials"*) b64 "$STUB_REPO_PASSWORD"; exit 0 ;;
@@ -200,6 +212,7 @@ case "$args" in
       unreadable) echo "cat: read error: I/O error" >&2; printf '\nMARKER-READ-FAILED\n'; exit 0 ;;
       partial) echo "cat: read error: I/O error" >&2; printf 'backup-canary\nMARKER-READ-FAILED\n'; exit 0 ;;
       dead) echo "error: unable to upgrade connection: container not found" >&2; exit 1 ;;
+      foreign) printf 'a marker from another backup'; exit 0 ;;
     esac
     cat "$STATE/marker" 2>/dev/null || printf 'no marker was recorded'
     exit 0 ;;
@@ -383,6 +396,55 @@ refute_cluster_deleted() {
   [ "$output" = 0 ]
   run grep -q "delete cluster" "$STATE/kind.log"
   [ "$status" -ne 0 ]
+}
+
+@test "a write exec that fails twice is tried again, and the teardown proceeds (hosted#11)" {
+  run env STUB_MARKER_WRITE=flaky:2 MARKER_WRITE_POLL=0 MODE=preserve CLUSTER=teardown-bats BACKUP_TIMEOUT=30 VERIFY_TIMEOUT=30 \
+    bash "$TEARDOWN" "$SUBSTRATE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$STATE/marker-writes")" = 3 ]
+  assert_output_has "restored marker: backup-canary preserve-kind-"
+}
+
+@test "a read back exec that fails twice is tried again, and the teardown proceeds (hosted#11)" {
+  run env STUB_MARKER_RBACK=flaky:2 MARKER_WRITE_POLL=0 MODE=preserve CLUSTER=teardown-bats BACKUP_TIMEOUT=30 VERIFY_TIMEOUT=30 \
+    bash "$TEARDOWN" "$SUBSTRATE"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$STATE/marker-readbacks")" = 3 ]
+}
+
+@test "FAILING FIXTURE: a write exec that never succeeds stops the teardown before any backup and names the error (hosted#11)" {
+  run env STUB_MARKER_WRITE=dead MARKER_WRITE_POLL=0 MODE=preserve CLUSTER=teardown-bats BACKUP_TIMEOUT=30 VERIFY_TIMEOUT=30 \
+    bash "$TEARDOWN" "$SUBSTRATE"
+  [ "$status" -ne 0 ]
+  assert_output_has "in 4 tries (last error, write: error: write exec container not found"
+  run grep -cE "backup\.postgresql\.cnpg\.io|backup\.velero\.io" "$STATE/kubectl.log"
+  [ "$output" = 0 ]
+}
+
+@test "FAILING FIXTURE: a read back exec that never succeeds stops the teardown before any backup and names the error (hosted#11)" {
+  run env STUB_MARKER_RBACK=dead MARKER_WRITE_POLL=0 MODE=preserve CLUSTER=teardown-bats BACKUP_TIMEOUT=30 VERIFY_TIMEOUT=30 \
+    bash "$TEARDOWN" "$SUBSTRATE"
+  [ "$status" -ne 0 ]
+  assert_output_has "in 4 tries (last error, read back: error: read back exec container not found"
+  run grep -cE "backup\.postgresql\.cnpg\.io|backup\.velero\.io" "$STATE/kubectl.log"
+  [ "$output" = 0 ]
+}
+
+@test "FAILING FIXTURE: a restored marker that is not the recorded marker stops the teardown (hosted#11)" {
+  run env STUB_MARKER_READ=foreign MARKER_READ_POLL=0 MODE=preserve CLUSTER=teardown-bats BACKUP_TIMEOUT=30 VERIFY_TIMEOUT=30 \
+    bash "$TEARDOWN" "$SUBSTRATE"
+  [ "$status" -ne 0 ]
+  assert_output_has "the restored canary marker is not the marker written before the backup"
+  assert_output_has "Restored: 'a marker from another backup'"
+  run grep -q "delete cluster" "$STATE/kind.log"
+  [ "$status" -ne 0 ]
+}
+
+@test "FAILING FIXTURE: a backup name with a quote is refused before any call (hosted#11)" {
+  run bash "$VERIFY" record --substrate-env kind --backup-name "x'y: z"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"is not a Kubernetes object name"* ]]
 }
 
 @test "a restored marker read that fails twice on the stream is retried, and the teardown proceeds" {
@@ -614,6 +676,8 @@ plant_canary() {
   local pf="$STATE/pf"
   printf '%s\n' "$SEAL_KEY" > "$pf"
   printf 'openbao-seal-canary %s' "$1" > "$STATE/plain"
+  # The marker that the stub volume holds and the record names.
+  printf 'backup-canary %s' "$1" > "$STATE/marker"
   openssl enc -aes-256-cbc -pbkdf2 -iter 100000 -salt -pass "file:$pf" \
     -in "$STATE/plain" -out "$STATE/cipher"
   mkdir -p "$STATE/bucket/backups/canary"
@@ -621,7 +685,8 @@ plant_canary() {
 import base64, json, sys
 rec = {"backup": sys.argv[2], "plaintext": "openbao-seal-canary " + sys.argv[2],
        "alg": "aes-256-cbc/pbkdf2-100000/salted+hmac-sha256",
-       "ciphertext": base64.b64encode(open(sys.argv[1], "rb").read()).decode()}
+       "ciphertext": base64.b64encode(open(sys.argv[1], "rb").read()).decode(),
+       "marker": "backup-canary " + sys.argv[2]}
 if sys.argv[3] != "none":
     rec["mac"] = sys.argv[3]
 json.dump(rec, sys.stdout)

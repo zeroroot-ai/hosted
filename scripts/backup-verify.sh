@@ -123,6 +123,10 @@ note()   { printf '    %s\n' "$*"; }
 
 [ -n "$SUB" ] || cannot "--substrate-env is required"
 [ -n "$BACKUP_NAME" ] || cannot "--backup-name is required"
+# The name goes into a Restore manifest and into an S3 key, so it must be a
+# Kubernetes object name. A quote or a newline in it would write more YAML.
+[[ "$BACKUP_NAME" =~ ^[a-z0-9]([-a-z0-9.]{0,251}[a-z0-9])?$ ]] \
+  || cannot "--backup-name '${BACKUP_NAME}' is not a Kubernetes object name (lowercase letters, digits, '-' and '.')"
 [ "$CMD" != verify ] || [ -n "$CNPG_BACKUP" ] || cannot "--cnpg-backup is required for verify"
 for tool in kubectl aws openssl python3; do
   command -v "$tool" >/dev/null 2>&1 || cannot "$tool is not on PATH"
@@ -302,15 +306,30 @@ YAML
   # as "$1" and never parses it again, so a quote in BACKUP_NAME (an
   # operator argument) cannot run a command. The marker is not a secret: it
   # holds the backup name and a time.
-  kubectl -n "$CANARY_NS" exec "pod/$CANARY_NAME" -- sh -c 'printf %s "$1" > /data/marker && sync' sh "$MARKER" \
-    || fail canary "could not write the canary marker"
-  # The read back is the proof that the backup carries the marker. A
-  # mismatch fails at once: the write has one path, and a second try would
-  # hide a fault of that path.
-  got="$(kubectl -n "$CANARY_NS" exec "pod/$CANARY_NAME" -- cat /data/marker 2>"$WORK/marker-write.err")" \
-    || fail canary "could not read the canary marker back: $(tr '\n' ' ' < "$WORK/marker-write.err" | cut -c1-300)"
-  [ "$got" = "$MARKER" ] \
-    || fail canary "the canary marker read back ${#got} bytes, not the ${#MARKER} bytes written"
+  # Each try writes and reads back. An exec that exits non-zero (write or
+  # read back) is a fault of the transport, so the loop tries again. A read
+  # back that answers with other bytes is a fault of the write path: it fails
+  # at once, because a second try would hide it.
+  marker_err="$WORK/marker-readback.err"
+  marker_ok=0 marker_last=""
+  for _try in 1 2 3 4; do
+    if ! kubectl -n "$CANARY_NS" exec "pod/$CANARY_NAME" -- sh -c 'printf %s "$1" > /data/marker && sync' sh "$MARKER" 2>"$marker_err"; then
+      marker_last="write: $(tr '\n' ' ' < "$marker_err" | cut -c1-300)"
+      [ "$_try" -lt 4 ] && sleep "${MARKER_WRITE_POLL:-3}"
+      continue
+    fi
+    if ! got="$(kubectl -n "$CANARY_NS" exec "pod/$CANARY_NAME" -- cat /data/marker 2>"$marker_err")"; then
+      marker_last="read back: $(tr '\n' ' ' < "$marker_err" | cut -c1-300)"
+      [ "$_try" -lt 4 ] && sleep "${MARKER_WRITE_POLL:-3}"
+      continue
+    fi
+    [ "$got" = "$MARKER" ] \
+      || fail canary "the canary marker read back ${#got} bytes, not the ${#MARKER} bytes written"
+    marker_ok=1
+    break
+  done
+  [ "$marker_ok" -eq 1 ] \
+    || fail canary "could not write and read back the canary marker in 4 tries (last error, ${marker_last:-none})"
   ok canary "pod/${CANARY_NAME} in ${CANARY_NS} holds a volume marker, read back, and rides in the backup"
 
   # The OpenBao ciphertext. The key comes from the CLUSTER, so what is
@@ -356,7 +375,7 @@ YAML
   MAC="$(hmac "$PF" "$WORK/cipher")" \
     || { rm -f "$PF"; fail openbao "could not authenticate the canary under the live store's seal key"; }
   rm -f "$PF"
-  python3 - "$WORK/cipher" "$BACKUP_NAME" "$PLAINTEXT" "$MAC" > "$WORK/canary.json" <<'PY'
+  python3 - "$WORK/cipher" "$BACKUP_NAME" "$PLAINTEXT" "$MAC" "$MARKER" > "$WORK/canary.json" <<'PY'
 import base64, json, sys
 cipher = open(sys.argv[1], "rb").read()
 json.dump({
@@ -365,6 +384,7 @@ json.dump({
     "alg": "aes-256-cbc/pbkdf2-100000/salted+hmac-sha256",
     "ciphertext": base64.b64encode(cipher).decode(),
     "mac": sys.argv[4],
+    "marker": sys.argv[5],
     "note": "sealed under the key the live OpenBao ran on; backup-verify opens it with the bringup keyring",
 }, sys.stdout)
 PY
@@ -523,6 +543,17 @@ case "$RESTORED" in
     velero_restore_diagnostics
     fail velero "the restored canary volume holds no marker: the repository opened but the bytes did not come back" ;;
 esac
+# The restored bytes must be the bytes that record wrote. Any non-empty text
+# is not enough: a stale or foreign file would pass it. The record holds the
+# marker in the canary record in the bucket.
+s3 s3 cp --no-progress "s3://${BUCKET_NAME}/${CANARY_KEY}" "$WORK/canary.json" >/dev/null 2>&1 \
+  || fail velero "no canary record at s3://${BUCKET_NAME}/${CANARY_KEY}: backup-verify record never ran, so the restored marker has nothing to match"
+RECORDED_MARKER="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("marker",""), end="")' "$WORK/canary.json")" \
+  || fail velero "the canary record at s3://${BUCKET_NAME}/${CANARY_KEY} is not JSON"
+[ -n "$RECORDED_MARKER" ] \
+  || fail velero "the canary record at s3://${BUCKET_NAME}/${CANARY_KEY} carries no marker: it was written by an older backup-verify. Run record again"
+[ "$RESTORED" = "$RECORDED_MARKER" ] \
+  || fail velero "the restored canary marker is not the marker written before the backup. Restored: '${RESTORED}'. Recorded: '${RECORDED_MARKER}'"
 ok velero "repository password matches the keyring, and ${CANARY_NS} restored into ${SCRATCH_NS} with its volume (${PVR_DONE} PodVolumeRestore completed)"
 note "restored marker: ${RESTORED}"
 
@@ -576,7 +607,7 @@ ok cnpg "base backup ${BACKUP_ID} is in the catalog, and $(cat "$WORK/wals.out")
 # ---------------------------------------------------------------------------
 # 3 openbao — the recorded ciphertext opens under the keyring's seal key.
 # ---------------------------------------------------------------------------
-s3 s3 cp --no-progress "s3://${BUCKET_NAME}/${CANARY_KEY}" "$WORK/canary.json" >/dev/null 2>&1 \
+[ -s "$WORK/canary.json" ] || s3 s3 cp --no-progress "s3://${BUCKET_NAME}/${CANARY_KEY}" "$WORK/canary.json" >/dev/null 2>&1 \
   || fail openbao "no canary record at s3://${BUCKET_NAME}/${CANARY_KEY}: backup-verify record never ran, so there is nothing to decrypt"
 python3 - "$WORK/canary.json" "$WORK/cipher" "$WORK/expected" "$WORK/mac" <<'PY' || exit 2
 import base64, json, sys
