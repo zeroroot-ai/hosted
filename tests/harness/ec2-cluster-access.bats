@@ -65,3 +65,13 @@ connect() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [[ "$output" == *"spdy=false"* ]] || { echo "$output"; false; }
 }
+
+@test "FAILING FIXTURE: a make verb sets WebSocket exec off when the caller set nothing (a dropped export fails here)" {
+  # The caller sets nothing, so a Makefile that lost its `export` prints an
+  # empty value. The test above sets true, and make then reads that value
+  # through the environment of the caller.
+  run env -u KUBECTL_REMOTE_COMMAND_WEBSOCKETS make -s -C "$REPO_ROOT" \
+    --eval 'spdy-probe: ; @echo "spdy=$$KUBECTL_REMOTE_COMMAND_WEBSOCKETS"' spdy-probe
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"spdy=false"* ]] || { echo "$output"; false; }
+}

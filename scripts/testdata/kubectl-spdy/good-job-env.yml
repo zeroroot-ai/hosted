@@ -1,0 +1,9 @@
+name: good
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    env:
+      KUBECTL_REMOTE_COMMAND_WEBSOCKETS: false
+    steps:
+      - run: bash test/identity/deny-probe.sh

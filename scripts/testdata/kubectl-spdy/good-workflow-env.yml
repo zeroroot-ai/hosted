@@ -1,0 +1,9 @@
+name: good
+on: workflow_dispatch
+env:
+  KUBECTL_REMOTE_COMMAND_WEBSOCKETS: "false"
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - run: kubectl get pods

@@ -1,0 +1,8 @@
+name: bad
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - run: kubectl -n gibson exec pod/x -- true
+      - uses: ./.github/actions/install-cluster-tools

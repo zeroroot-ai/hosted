@@ -13,3 +13,7 @@ runs:
       env:
         CLUSTER_TOOLS_DIR: ${{ runner.temp }}/cluster-tools
       run: "$GITHUB_ACTION_PATH/install.sh"
+    # Every later step of the job runs kubectl exec over SPDY (hosted#10).
+    - name: Run kubectl exec over SPDY
+      shell: bash
+      run: echo "KUBECTL_REMOTE_COMMAND_WEBSOCKETS=false" >> "$GITHUB_ENV"

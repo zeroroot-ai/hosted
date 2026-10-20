@@ -847,6 +847,13 @@ check-pull-token-read-only: ## A job token that becomes the GHCR pull token hold
 	@python3 scripts/check-pull-token-read-only.py
 check: check-pull-token-read-only
 
+.PHONY: check-kubectl-spdy
+check-kubectl-spdy: ## A workflow job that runs kubectl exec sets KUBECTL_REMOTE_COMMAND_WEBSOCKETS=false (hosted#10)
+	@printf "$(GREEN)▶$(NC) check-kubectl-spdy...\n"
+	@python3 scripts/check-kubectl-spdy.py --selftest
+	@python3 scripts/check-kubectl-spdy.py
+check: check-kubectl-spdy
+
 .PHONY: check-exit-tests-off-pr
 check-exit-tests-off-pr: ## Exit tests never run on a pull request (ADR-0080)
 	@printf "$(GREEN)▶$(NC) check-exit-tests-off-pr...\n"

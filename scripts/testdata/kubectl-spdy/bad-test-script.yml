@@ -1,0 +1,9 @@
+name: bad
+on: workflow_dispatch
+env:
+  OTHER: "false"
+jobs:
+  t:
+    runs-on: ubuntu-latest
+    steps:
+      - run: bash test/dr/preserve-restore-loop.sh
