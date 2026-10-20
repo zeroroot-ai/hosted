@@ -1598,7 +1598,7 @@ rotate_masterkey() {
 }
 
 class_platform_generated_secrets() {
-  local work deadline old_user new_user other s_old s_new s_newer
+  local work deadline old_user new_user other s_old s_new s_newer probe probe_old
   [ -n "${CHARTS_ROOT:-}" ] && [ -x "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" ] \
     || { miss "CHARTS_ROOT holds no scripts/baseline-set-secret.sh, so the test cannot write the OpenBao keys"; return 1; }
   work="$(mktemp -d)"; chmod 700 "$work"
@@ -1640,31 +1640,35 @@ class_platform_generated_secrets() {
   # A session made with a secret is accepted while the dashboard holds that
   # secret as AUTH_SECRET or AUTH_SECRET_PREVIOUS, and refused after.
   s_old="$(secret_value "$DASHBOARD_SECRETS" auth-secret)"; mask "$s_old"
-  [ "$(session_probe "$s_old")" = accepted ] \
-    || { miss "the dashboard refuses a session made with its own secret before the rotation"; rm -rf "$work"; return 1; }
-  [ "$(session_probe "$(head -c 32 /dev/urandom | base64 -w0)")" = refused ] \
-    || { miss "the dashboard accepts a session made with a random secret"; rm -rf "$work"; return 1; }
+  probe="$(session_probe "$s_old")"
+  [ "$probe" = accepted ] \
+    || { miss "the dashboard does not accept a session made with its own secret before the rotation (probe result: ${probe})"; rm -rf "$work"; return 1; }
+  probe="$(session_probe "$(head -c 32 /dev/urandom | base64 -w0)")"
+  [ "$probe" = refused ] \
+    || { miss "the dashboard does not refuse a session made with a random secret (probe result: ${probe})"; rm -rf "$work"; return 1; }
   s_new="$(head -c 32 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '=')"; mask "$s_new"
   set_at_source gibson-dashboard-session-secrets auth_secret_previous "$s_old" \
     && set_at_source gibson-dashboard-session-secrets auth_secret "$s_new" \
     || { miss "the write of the session secrets failed"; rm -rf "$work"; return 1; }
-  until [ "$(session_probe "$s_new")" = accepted ]; do
-    [ "$(date +%s)" -lt "$deadline" ] || { miss "the dashboard does not accept a session made with the new secret"; rm -rf "$work"; return 1; }
+  until probe="$(session_probe "$s_new")"; [ "$probe" = accepted ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "the dashboard does not accept a session made with the new secret (probe result: ${probe})"; rm -rf "$work"; return 1; }
     sleep 20
   done
-  [ "$(session_probe "$s_old")" = accepted ] \
-    || { miss "the dashboard on the new secret refuses a session made with the old one: sessions break"; rm -rf "$work"; return 1; }
+  probe="$(session_probe "$s_old")"
+  [ "$probe" = accepted ] \
+    || { miss "the dashboard on the new secret does not accept a session made with the old one: sessions break (probe result: ${probe})"; rm -rf "$work"; return 1; }
   ok "the dashboard accepts sessions made with the new and with the old session secret"
   s_newer="$(head -c 32 /dev/urandom | base64 -w0 | tr '+/' '-_' | tr -d '=')"; mask "$s_newer"
   set_at_source gibson-dashboard-session-secrets auth_secret_previous "$s_new" \
     && set_at_source gibson-dashboard-session-secrets auth_secret "$s_newer" \
     || { miss "the second write of the session secrets failed"; rm -rf "$work"; return 1; }
-  until [ "$(session_probe "$s_newer")" = accepted ] && [ "$(session_probe "$s_old")" = refused ]; do
-    [ "$(date +%s)" -lt "$deadline" ] || { miss "after a second rotation the dashboard does not refuse a session made with the first secret"; rm -rf "$work"; return 1; }
+  until probe="$(session_probe "$s_newer")"; probe_old="$(session_probe "$s_old")"; [ "$probe" = accepted ] && [ "$probe_old" = refused ]; do
+    [ "$(date +%s)" -lt "$deadline" ] || { miss "after a second rotation the dashboard does not refuse a session made with the first secret (probe result for the newest: ${probe}, for the first: ${probe_old})"; rm -rf "$work"; return 1; }
     sleep 20
   done
-  [ "$(session_probe "$s_new")" = accepted ] \
-    || { miss "after a second rotation the dashboard refuses a session made with the previous secret"; rm -rf "$work"; return 1; }
+  probe="$(session_probe "$s_new")"
+  [ "$probe" = accepted ] \
+    || { miss "after a second rotation the dashboard does not accept a session made with the previous secret (probe result: ${probe})"; rm -rf "$work"; return 1; }
   s_old=""; s_new=""; s_newer=""
   ok "after a second rotation the dashboard refuses a session made with the first secret"
   sleep "$SETTLE_S"
