@@ -303,9 +303,12 @@
       "user_data_base64"
      ],
      [
-      "instance_type"
+      "subnet_id"
      ]
-    ]
+    ],
+    "after": {
+     "user_data_replace_on_change": true
+    }
    }
   },
   {

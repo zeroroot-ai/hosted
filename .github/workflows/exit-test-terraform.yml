@@ -144,13 +144,15 @@ jobs:
           echo "--- a node replace forced by user data alone must pass ---"
           python3 scripts/check-plan-invariants.py scripts/testdata/plan-userdata-replace.json
 
-          echo "--- a node replace forced by anything else must fail ---"
-          if python3 scripts/check-plan-invariants.py scripts/testdata/plan-instance-type-replace.json; then
-            echo "GUARD BROKEN: a node replace for another cause was accepted" >&2
-            exit 1
-          fi
+          echo "--- a node replace forced by anything else than user data must fail ---"
+          for fx in plan-instance-subnet-replace plan-userdata-no-flag-replace plan-userdata-and-bucket-replace; do
+            if python3 scripts/check-plan-invariants.py "scripts/testdata/${fx}.json"; then
+              echo "GUARD BROKEN: the fixture ${fx} was accepted" >&2
+              exit 1
+            fi
+          done
 
-          echo "OK — the assertion script fails in all four directions."
+          echo "OK — the assertion script fails in every direction and accepts the one intended replace."
 
       # ADR-0073, hosted#418: exactly two SCPs attach to the workload account,
       # and no policy attaches to nothing. The check reads the Terraform text
