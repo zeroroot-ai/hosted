@@ -48,7 +48,7 @@ YELLOW:= \033[0;33m
 RED   := \033[0;31m
 NC    := \033[0m
 
-.PHONY: check-apiserver-cidrs check-kind-apiserver-cidrs help require-charts apex-zone-init apex-zone-plan substrate preflight require-env require-mode teardown recreate eks-plan status smoke-signup smoke-entitlements stripe-listen verify-profile verify-saas-surfaces verify-selfhosted-seams verify-harness wait-root restart-daemon restart-dashboard restart-ext-authz restart-tenant-operator restart-platform-operator
+.PHONY: check-apiserver-cidrs check-kind-apiserver-cidrs help require-charts apex-zone-init apex-zone-plan substrate preflight require-env require-mode teardown recreate eks-plan status smoke-signup smoke-entitlements stripe-listen verify-profile verify-saas-surfaces verify-selfhosted-seams verify-harness wait-root
 
 help: ## Show available targets
 	@echo "Usage: make <target>"
@@ -86,13 +86,6 @@ help: ## Show available targets
 	@echo "  verify-saas-surfaces    SaaS web surfaces: www / docs / app login (deploy#1041)"
 	@echo "  verify-selfhosted-seams Self-hosted seams: login front door, signup, bootstrap, docs (deploy#1039)"
 	@echo "  verify-harness          Offline: prove the two suites above fail closed with no cluster"
-	@echo ""
-	@echo "Inner loop (after recreate is green):"
-	@echo "  restart-daemon          rebuild + kind-load + rollout daemon StatefulSet"
-	@echo "  restart-dashboard       rebuild + kind-load + rollout dashboard Deployment"
-	@echo "  restart-ext-authz       rebuild + kind-load + rollout ext-authz Deployment"
-	@echo "  restart-tenant-operator rebuild + kind-load + rollout tenant-operator Deployment"
-	@echo "  restart-platform-operator rebuild + kind-load + rollout platform-operator Deployment"
 	@echo ""
 	@echo "Variables:"
 	@echo "  CLUSTER          $(CLUSTER)"
@@ -488,146 +481,6 @@ wait-root:
 	  sleep 10; \
 	done
 	@printf "$(GREEN)▶$(NC) All ArgoCD Applications are Synced+Healthy.\n"
-
-# ======================================================================
-# Inner-loop restart targets (deploy#89)
-# ======================================================================
-# Each target rebuilds the service image from its source repo, loads it into
-# the kind cluster, and rolls out the relevant workload.  The kind-loaded
-# image takes precedence over the registry pull because values-kind.yaml sets
-# imagePullPolicy: IfNotPresent on every first-party image.
-#
-# Source repos are expected at sibling paths relative to enterprise/deploy.
-# Since the monorepo fold, ext-authz and both operators build from the gibson
-# repo via build/*.Dockerfile (they are subdirs, not standalone repos):
-#   enterprise/platform/gibson/      → daemon (Dockerfile)
-#   enterprise/platform/gibson/      → ext-authz (build/ext-authz.Dockerfile)
-#   enterprise/platform/gibson/      → tenant-operator (build/tenant-operator.Dockerfile)
-#   enterprise/platform/gibson/      → platform-operator (build/platform-operator.Dockerfile)
-#   enterprise/platform/dashboard/   → dashboard
-#
-# IMAGE TAG convention: <service>:dev — never pushed to a registry; loaded
-# directly into the kind cluster so the ghcr.io tag in the Helm values is
-# irrelevant for the inner loop.  On rollout-restart Kubernetes re-resolves
-# IfNotPresent against the locally-loaded digest, picking up the new layer.
-#
-# Daemon uses a StatefulSet; all others are Deployments.
-
-# Absolute path to the workspace root so the recipe works regardless of cwd.
-WORKSPACE_ROOT := $(abspath $(dir $(abspath $(lastword $(MAKEFILE_LIST))))/../..)
-
-restart-daemon:
-	@printf "$(GREEN)▶$(NC) restart-daemon: build → load → rollout...\n"
-	@REPO="$(WORKSPACE_ROOT)/enterprise/platform/gibson"; \
-	if [ ! -f "$$REPO/Dockerfile" ]; then \
-	  printf "$(RED)!$(NC) Dockerfile not found at $$REPO/Dockerfile\n"; exit 1; \
-	fi; \
-	printf "  building ghcr.io/zeroroot-ai/gibson:dev from $$REPO\n"; \
-	docker build -t ghcr.io/zeroroot-ai/gibson:dev "$$REPO"
-	@printf "  kind load ghcr.io/zeroroot-ai/gibson:dev\n"
-	@kind load docker-image ghcr.io/zeroroot-ai/gibson:dev --name $(CLUSTER)
-	@printf "  patching StatefulSet/gibson-gibson-workloads → image :dev + IfNotPresent\n"
-	@$(KUBECTL) -n $(NAMESPACE) set image statefulset/gibson-gibson-workloads \
-	  gibson=ghcr.io/zeroroot-ai/gibson:dev
-	@$(KUBECTL) -n $(NAMESPACE) patch statefulset gibson-gibson-workloads --type=json \
-	  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
-	@printf "  forcing pod recreation (set-image above is a no-op when already tagged :dev)\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout restart statefulset/gibson-gibson-workloads
-	@printf "  rolling out StatefulSet/gibson-gibson-workloads (timeout 5m)...\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout status statefulset/gibson-gibson-workloads --timeout=5m
-	@printf "$(GREEN)▶$(NC) restart-daemon complete.\n"
-
-restart-dashboard:
-	@printf "$(GREEN)▶$(NC) restart-dashboard: build → load → rollout...\n"
-	@REPO="$(WORKSPACE_ROOT)/enterprise/platform/dashboard"; \
-	if [ ! -f "$$REPO/Dockerfile" ]; then \
-	  printf "$(RED)!$(NC) Dockerfile not found at $$REPO/Dockerfile\n"; exit 1; \
-	fi; \
-	printf "  building ghcr.io/zeroroot-ai/dashboard:dev from $$REPO\n"; \
-	docker build --build-arg DASHBOARD_HSTS_DISABLED=1 \
-	  -t ghcr.io/zeroroot-ai/dashboard:dev "$$REPO"
-	@printf "  kind load ghcr.io/zeroroot-ai/dashboard:dev\n"
-	@kind load docker-image ghcr.io/zeroroot-ai/dashboard:dev --name $(CLUSTER)
-	@printf "  patching Deployment/gibson-dashboard → image :dev\n"
-	@$(KUBECTL) -n $(NAMESPACE) set image deployment/gibson-dashboard \
-	  dashboard=ghcr.io/zeroroot-ai/dashboard:dev
-	@printf "  patching Deployment/gibson-dashboard → imagePullPolicy IfNotPresent\n"
-	@$(KUBECTL) -n $(NAMESPACE) patch deployment gibson-dashboard --type=json \
-	  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
-	@printf "  forcing pod recreation (set-image above is a no-op when already tagged :dev)\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout restart deployment/gibson-dashboard
-	@printf "  rolling out Deployment/gibson-dashboard (timeout 5m)...\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout status deployment/gibson-dashboard --timeout=5m
-	@printf "$(GREEN)▶$(NC) restart-dashboard complete.\n"
-
-restart-ext-authz:
-	@printf "$(GREEN)▶$(NC) restart-ext-authz: build → load → rollout...\n"
-	@REPO="$(WORKSPACE_ROOT)/enterprise/platform/gibson"; \
-	DOCKERFILE="$$REPO/build/ext-authz.Dockerfile"; \
-	if [ ! -f "$$DOCKERFILE" ]; then \
-	  printf "$(RED)!$(NC) Dockerfile not found at $$DOCKERFILE\n"; exit 1; \
-	fi; \
-	printf "  building ghcr.io/zeroroot-ai/ext-authz:dev from $$REPO (build/ext-authz.Dockerfile)\n"; \
-	docker build -f "$$DOCKERFILE" \
-	  -t ghcr.io/zeroroot-ai/ext-authz:dev "$$REPO"
-	@printf "  kind load ghcr.io/zeroroot-ai/ext-authz:dev\n"
-	@kind load docker-image ghcr.io/zeroroot-ai/ext-authz:dev --name $(CLUSTER)
-	@printf "  patching Deployment/gibson-ext-authz → image :dev + IfNotPresent\n"
-	@$(KUBECTL) -n $(NAMESPACE) set image deployment/gibson-ext-authz \
-	  ext-authz=ghcr.io/zeroroot-ai/ext-authz:dev
-	@$(KUBECTL) -n $(NAMESPACE) patch deployment gibson-ext-authz --type=json \
-	  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
-	@printf "  forcing pod recreation (set-image above is a no-op when already tagged :dev)\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout restart deployment/gibson-ext-authz
-	@printf "  rolling out Deployment/gibson-ext-authz (timeout 5m)...\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout status deployment/gibson-ext-authz --timeout=5m
-	@printf "$(GREEN)▶$(NC) restart-ext-authz complete.\n"
-
-restart-tenant-operator:
-	@printf "$(GREEN)▶$(NC) restart-tenant-operator: build → load → rollout...\n"
-	@REPO="$(WORKSPACE_ROOT)/enterprise/platform/gibson"; \
-	DOCKERFILE="$$REPO/build/tenant-operator.Dockerfile"; \
-	if [ ! -f "$$DOCKERFILE" ]; then \
-	  printf "$(RED)!$(NC) Dockerfile not found at $$DOCKERFILE\n"; exit 1; \
-	fi; \
-	printf "  building ghcr.io/zeroroot-ai/gibson-tenant-operator:dev from $$REPO (build/tenant-operator.Dockerfile)\n"; \
-	docker build -f "$$DOCKERFILE" \
-	  -t ghcr.io/zeroroot-ai/gibson-tenant-operator:dev "$$REPO"
-	@printf "  kind load ghcr.io/zeroroot-ai/gibson-tenant-operator:dev\n"
-	@kind load docker-image ghcr.io/zeroroot-ai/gibson-tenant-operator:dev --name $(CLUSTER)
-	@printf "  patching Deployment/gibson-tenant-operator → image :dev + IfNotPresent\n"
-	@$(KUBECTL) -n $(NAMESPACE) set image deployment/gibson-tenant-operator \
-	  manager=ghcr.io/zeroroot-ai/gibson-tenant-operator:dev
-	@$(KUBECTL) -n $(NAMESPACE) patch deployment gibson-tenant-operator --type=json \
-	  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
-	@printf "  forcing pod recreation (set-image above is a no-op when already tagged :dev)\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout restart deployment/gibson-tenant-operator
-	@printf "  rolling out Deployment/gibson-tenant-operator (timeout 5m)...\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout status deployment/gibson-tenant-operator --timeout=5m
-	@printf "$(GREEN)▶$(NC) restart-tenant-operator complete.\n"
-
-restart-platform-operator:
-	@printf "$(GREEN)▶$(NC) restart-platform-operator: build → load → rollout...\n"
-	@REPO="$(WORKSPACE_ROOT)/enterprise/platform/gibson"; \
-	DOCKERFILE="$$REPO/build/platform-operator.Dockerfile"; \
-	if [ ! -f "$$DOCKERFILE" ]; then \
-	  printf "$(RED)!$(NC) Dockerfile not found at $$DOCKERFILE\n"; exit 1; \
-	fi; \
-	printf "  building ghcr.io/zeroroot-ai/platform-operator:dev from $$REPO (build/platform-operator.Dockerfile)\n"; \
-	docker build -f "$$DOCKERFILE" \
-	  -t ghcr.io/zeroroot-ai/platform-operator:dev "$$REPO"
-	@printf "  kind load ghcr.io/zeroroot-ai/platform-operator:dev\n"
-	@kind load docker-image ghcr.io/zeroroot-ai/platform-operator:dev --name $(CLUSTER)
-	@printf "  patching Deployment/gibson-platform-operator → image :dev + IfNotPresent\n"
-	@$(KUBECTL) -n $(NAMESPACE) set image deployment/gibson-platform-operator \
-	  manager=ghcr.io/zeroroot-ai/platform-operator:dev
-	@$(KUBECTL) -n $(NAMESPACE) patch deployment gibson-platform-operator --type=json \
-	  -p='[{"op":"replace","path":"/spec/template/spec/containers/0/imagePullPolicy","value":"IfNotPresent"}]'
-	@printf "  forcing pod recreation (set-image above is a no-op when already tagged :dev)\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout restart deployment/gibson-platform-operator
-	@printf "  rolling out Deployment/gibson-platform-operator (timeout 5m)...\n"
-	@$(KUBECTL) -n $(NAMESPACE) rollout status deployment/gibson-platform-operator --timeout=5m
-	@printf "$(GREEN)▶$(NC) restart-platform-operator complete.\n"
 
 # ======================================================================
 # Live deployment-profile verification (deploy#1137)

@@ -98,7 +98,9 @@ case "$*" in
     if [ "$k" = daemonset ]; then
       printf '{"kind":"DaemonSet","spec":{"selector":{"matchLabels":{"stub-workload":"%s"}}},"status":{"desiredNumberScheduled":1}}' "$w"
     else
-      printf '{"kind":"x","spec":{"replicas":1,"selector":{"matchLabels":{"stub-workload":"%s"}}}}' "$w"
+      # WANT0=<kind>/<name>: that workload wants 0 pods.
+      rep=1; [ "$4" != "${WANT0:-}" ] || rep=0
+      printf '{"kind":"x","spec":{"replicas":%s,"selector":{"matchLabels":{"stub-workload":"%s"}}}}' "$rep" "$w"
     fi ;;
   "-n "*" delete pod "*"-0 --ignore-not-found --wait=true --timeout="*)
     w="${5%-0}"; echo "restart ${w/--//}" >> "$D/log"; echo x >> "$D/deleted.$w"
@@ -202,7 +204,7 @@ SH
 
 rotate() {
   run env PATH="$D/bin:$PATH" SUBSTRATE_SH="$D/bin/substrate" K2C="$D/bin/k2c" SLEEP_SECS=0 RESTART_TIMEOUT=2 RESTART_PODS_POLL=0 \
-    WAIT_SECS="${WAIT_SECS:-0}" QUIET_SECS="${QUIET_SECS:-0}" U="${U:-platform}" TFRES="${TFRES:-}" APPLY_FAIL="${APPLY_FAIL:-}" \
+    WANT0="${WANT0:-}" WAIT_SECS="${WAIT_SECS:-0}" QUIET_SECS="${QUIET_SECS:-0}" U="${U:-platform}" TFRES="${TFRES:-}" APPLY_FAIL="${APPLY_FAIL:-}" \
     "$REPO/scripts/substrate-rotate.sh" "$STATE" "${E:-staging}" "${U:-platform}"
 }
 slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfvars.json"; }
@@ -226,6 +228,15 @@ slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfva
   run grep -q "restart statefulset/gibson-openbao" "$D/log"
   [ "$status" -ne 0 ]
   grep -q "substrate.env" "$D/log"
+}
+
+@test "FAILING FIXTURE: a reader that wants 0 pods is reported as nothing to restart, never as restarted (hosted#12)" {
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  WANT0=deployment/velero rotate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"nothing to restart in velero/deployment/velero"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"restarted velero/deployment/velero"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"restarted "*"deployment/envreader"* ]] || { echo "$output"; false; }
 }
 
 @test "FAILING FIXTURE: the old key used after the switch stops the rotation, and both keys stay" {
