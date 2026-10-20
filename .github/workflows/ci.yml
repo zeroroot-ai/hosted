@@ -11,11 +11,20 @@
 # ADR-0080: exit tests never run on a pull request, and check-exit-tests-off-pr
 # in this very suite enforces that. This is not an exit test. It touches no
 # cluster, no cloud and no secret.
+#
+# THE GATE RUNS IN TWO PARALLEL JOBS. The merge gate budget is ten minutes.
+# `make check` took 14 minutes 46 seconds on main, 8 of them in check-verbs, in
+# a job limit of 15. The run of 14:13 UTC on main and the run of hosted#70 were
+# cancelled by that limit. `checks` runs everything but check-verbs, `verbs`
+# runs check-verbs, and `ci-required` reports the one verdict. The three run on
+# pull_request, merge_group and push to main. scripts/check-ci-lanes.py keeps
+# the split.
 # ----------------------------------------------------------------------------
 name: ci
 
 on:
   pull_request:
+  merge_group:
   push:
     branches: [main]
 
@@ -27,13 +36,10 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  # The ruleset requires the context `ci-required`. Keep this name in step with
-  # rulesets/repo/hosted.json in zeroroot-ai/.github, or main blocks on a check
-  # that never reports.
-  ci-required:
-    name: ci-required
+  checks:
+    name: checks
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
@@ -45,60 +51,18 @@ jobs:
       # ADR-0009: no service uses the Kubernetes auth method of OpenBao or any
       # other TokenReview login (hosted#417). The action tests its own scanner
       # against each token first, then scans this tree. It runs before the
-      # charts checkout below, so it reads only the files of this repo.
+      # charts checkout of ci-setup, so it reads only the files of this repo.
       - name: OpenBao auth deny-list
         uses: zeroroot-ai/.github/actions/vault-auth-deny-list@58931387de5d0f2925ee29fa9781822b1e3a100d  # v0.20.0
         with:
           repo-root: ${{ github.workspace }}
 
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
-        with:
-          python-version: '3.12'
+      - uses: ./.github/actions/ci-setup
 
-      # check-exit-tests-off-pr.py parses workflow YAML. PyYAML is the only
-      # dependency any guard has outside the standard library.
-      - name: Install guard dependencies
-        run: python3 -m pip install -r requirements-ci.txt
-
-      # check-2core-overlay renders the umbrella and gibson-velero from a
-      # charts checkout (CHARTS_ROOT), the way the recreate verb does.
-      - name: Check out zeroroot-ai/charts
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
-        with:
-          repository: zeroroot-ai/charts
-          path: charts
-
-      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310  # v5
-        with:
-          version: v3.16.2
-
-      # Six guards, each of which self-tests before it scans: it proves it can
-      # still fail on a planted violation, then runs for real. A guard that
-      # cannot fail is worse than no guard. The sixth is check-teardown, four
-      # offline bats suites that stub aws/kubectl/kind on PATH, so they need no
-      # cluster and no network. Three of the four had pointed at the pre-split
-      # path since ADR-0086 and therefore ran NOTHING; they were outside the
-      # aggregate gate, so nobody saw it. Both halves are fixed here.
-      # bats from its pinned release on GitHub, not from apt: the Ubuntu
-      # mirror hung this step past the job timeout three times on 2026-10-07.
-      - name: Install bats
-        run: |
-          scripts/install-bats.sh "$HOME/.local"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-
-      # actionlint, for check-workflows. A workflow with a bad expression is
-      # rejected by GitHub at dispatch and reports failure with no jobs and no
-      # log, so the merge gate is the only place it can be caught.
-      - name: Install actionlint
-        run: |
-          set -euo pipefail
-          ver=1.7.7
-          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ver}/actionlint_${ver}_linux_amd64.tar.gz" \
-            | sudo tar -xz -C /usr/local/bin actionlint
-          actionlint --version
-
-      - name: make check
-        run: CHARTS_ROOT="$GITHUB_WORKSPACE/charts" make check
+      # Every guard of make check but check-verbs, which the `verbs` job runs.
+      # -o makes make treat check-verbs as made.
+      - name: make check, without check-verbs
+        run: CHARTS_ROOT="$GITHUB_WORKSPACE/charts" make -o check-verbs check
 
       # The promotion guards that read a change set (hosted#116, blocker 5):
       # the prod pin moves only to the version staging pins, and no env moves
@@ -111,3 +75,34 @@ jobs:
         run: |
           git fetch origin "$BASE_REF"
           make check-promotion-pr BASE="origin/${BASE_REF}"
+
+  verbs:
+    name: verbs
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: ./.github/actions/ci-setup
+      - name: make check-verbs
+        run: CHARTS_ROOT="$GITHUB_WORKSPACE/charts" make check-verbs
+
+  # The ruleset requires the context `ci-required`. Keep this name in step with
+  # rulesets/repo/hosted.json in zeroroot-ai/.github, or main blocks on a check
+  # that never reports. It is the one verdict of the two jobs above. It runs
+  # always, and it fails on any result but success: a skipped or a cancelled
+  # job (a job timeout, a concurrency cancel) is not a pass.
+  ci-required:
+    name: ci-required
+    needs: [checks, verbs]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      CHECKS_RESULT: ${{ needs.checks.result }}
+      VERBS_RESULT: ${{ needs.verbs.result }}
+    steps:
+      - name: Every job succeeded
+        run: |
+          echo "checks: ${CHECKS_RESULT}"
+          echo "verbs: ${VERBS_RESULT}"
+          [ "${CHECKS_RESULT}" = success ] && [ "${VERBS_RESULT}" = success ]

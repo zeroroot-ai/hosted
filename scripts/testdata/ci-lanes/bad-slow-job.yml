@@ -1,0 +1,28 @@
+name: ci
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+jobs:
+  checks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - run: make -o check-verbs check
+  verbs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - run: make check-verbs
+  ci-required:
+    needs: [checks, verbs]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    env:
+      CHECKS_RESULT: ${{ needs.checks.result }}
+      VERBS_RESULT: ${{ needs.verbs.result }}
+    steps:
+      - run: |
+          [ "${CHECKS_RESULT}" = success ] && [ "${VERBS_RESULT}" = success ]

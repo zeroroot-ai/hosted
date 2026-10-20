@@ -633,6 +633,14 @@ smoke-entitlements: ## Entitlements seam smoke: mTLS, DB, plans, grpcProvider, c
 require-charts:
 	@test -d "$(CHARTS_ROOT)/helm/gibson" || { printf "$(RED)!$(NC) no chart source at $(CHARTS_ROOT)/helm/gibson. Clone zeroroot-ai/charts there, or set CHARTS_ROOT=<checkout>\n"; exit 2; }
 
+# charts-vendored: the sub-chart tarballs of the charts checkout exist. The
+# restore tests read the vendored Velero CRD from them. Before the gate ran in
+# two jobs, check-2core-overlay vendored them as a side effect, and check-verbs
+# relied on it. A target that needs a tool says so (hosted merge gate split).
+.PHONY: charts-vendored
+charts-vendored: require-charts
+	@ls "$(CHARTS_ROOT)"/helm/gibson-velero/charts/velero-*.tgz >/dev/null 2>&1 || $(MAKE) -C "$(CHARTS_ROOT)" chart-deps
+
 # LOCAL ONLY, never CI (owner call 2026-09-15): kind and k3d are the developer
 # story and CI is a different thing. A 2-vCPU runner does not fit this platform
 # plus a k3s control plane — it evicted 35 pods when it was tried. What k3d is
@@ -699,6 +707,13 @@ check-pull-token-read-only: ## A job token that becomes the GHCR pull token hold
 	@python3 scripts/check-pull-token-read-only.py --selftest
 	@python3 scripts/check-pull-token-read-only.py
 check: check-pull-token-read-only
+
+.PHONY: check-ci-lanes
+check-ci-lanes: ## The merge gate keeps its parallel jobs, its three lanes and an aggregator that passes only on success
+	@printf "$(GREEN)▶$(NC) check-ci-lanes...\n"
+	@python3 scripts/check-ci-lanes.py --selftest
+	@python3 scripts/check-ci-lanes.py
+check: check-ci-lanes
 
 .PHONY: check-kubectl-spdy
 check-kubectl-spdy: ## A workflow job that runs kubectl exec sets KUBECTL_REMOTE_COMMAND_WEBSOCKETS=false (hosted#10)
@@ -1266,7 +1281,7 @@ check-overlay-belief-trainer: ## Every cloud overlay pins the belief trainer cop
 	@bats tests/harness/belief-trainer-image.bats
 
 .PHONY: check-verbs
-check-verbs: require-charts ## The bringup verbs fail closed: no ENV, a RESTORE_FROM that is not a backup, a used Postgres archive, a keyring member missing or unquoted, a substrate line that does not answer
+check-verbs: require-charts charts-vendored ## The bringup verbs fail closed: no ENV, a RESTORE_FROM that is not a backup, a used Postgres archive, a keyring member missing or unquoted, a substrate line that does not answer
 	@printf "$(GREEN)▶$(NC) check-verbs...\n"
 	@bats tests/harness/recreate.bats
 	@bats tests/harness/instance-type.bats
