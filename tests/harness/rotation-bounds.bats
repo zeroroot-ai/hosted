@@ -117,7 +117,7 @@ EOPY
         *) echo "kubectl stub: undeclared call: $*" >&2; return 1 ;;
       esac
     }
-    restart_pods() { sleep "$3"; }
+    restart_ext_authz() { sleep "$1"; }
     . "$D/src.sh"; class_openfga_preshared_key'
 }
 

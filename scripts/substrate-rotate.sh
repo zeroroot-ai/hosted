@@ -191,7 +191,11 @@ restart() {
   for w in "$@"; do
     restart_pods "$ns" "$w" "${RESTART_TIMEOUT:-600}" \
       || stop "$ns/$w does not run again after the restart; the old key stays. Run again after it does"
-    say "restarted $ns/$w"
+    if [ "$RESTART_PODS_RESULT" = nothing ]; then
+      say "nothing to restart in $ns/$w: it wants 0 pods, so no pod read the key"
+    else
+      say "restarted $ns/$w"
+    fi
   done
 }
 secret_value() { kubectl -n "$1" get secret "$2" -o json 2>/dev/null | jq -r --arg k "$3" '.data[$k] // empty' | base64 -d; }

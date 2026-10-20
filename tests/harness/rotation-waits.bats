@@ -267,7 +267,7 @@ fga_run() {
     pods_of() { echo gibson-gibson-workloads-0; }
     daemon_readyz() { if daemons_ready; then echo 200; else echo 503; fi; }
     refused_fga_calls() { wc -l < "$D/refused" | tr -d " "; }
-    restart_pods() { return 0; }
+    restart_ext_authz() { return 0; }
     bootstrap_ready() { return 0; }
     . "$1"; class_openfga_preshared_key' _ "$TMP/fga.sh"
 }

@@ -414,7 +414,7 @@ class_component_tls() {
     #    working TLS client today: the Prometheus scrape of both is broken
     #    (charts#543), so the listener half above is their proof.
     if [ "$port" = 8080 ]; then
-      restart_pods "$NS" deployment/"${RELEASE}-ext-authz" "$RESTART_WAIT_S" \
+      restart_ext_authz "$RESTART_WAIT_S" \
         || { miss "ext-authz is not ready after a restart, so its TLS call to OpenFGA fails with the new certificate"; rm -f "$cafile"; return 1; }
       ok "a new ext-authz pod is ready, so its TLS call to OpenFGA works with the new certificate"
     fi
@@ -464,11 +464,20 @@ bundle_skis() {
   rm -f "$1".part.*
 }
 
+# restart_ext_authz SECONDS: replace each ext-authz pod. A workload that wants
+# 0 pods returns 0 from restart_pods with nothing restarted, and no new pod
+# proves the new key or certificate. So the call fails then (hosted#12).
+restart_ext_authz() {
+  restart_pods "$NS" deployment/"${RELEASE}-ext-authz" "$1" || return 1
+  [ "$RESTART_PODS_RESULT" = restarted ] \
+    || { echo "ext-authz wants 0 pods, so no new pod started" >&2; return 1; }
+}
+
 # ext_authz_restarts_ready: restart ext-authz and wait until it is ready. A
 # new ext-authz pod fetches its registry from the daemon over SPIFFE mTLS at
 # start, and exits when the fetch fails.
 ext_authz_restarts_ready() {
-  restart_pods "$NS" deployment/"${RELEASE}-ext-authz" "$EXT_AUTHZ_RESTART_WAIT_S"
+  restart_ext_authz "$EXT_AUTHZ_RESTART_WAIT_S"
 }
 
 # spire_bundle FILE: the X.509 roots of the trust bundle, as PEM.
@@ -1900,7 +1909,7 @@ class_openfga_preshared_key() {
   refused="$(refused_fga_calls "$since")"
   [ "$refused" = 0 ] || { miss "the OpenFGA clients logged ${refused} refused OpenFGA calls during the rotations"; return 1; }
   ok "no OpenFGA client logged a refused call during the rotations"
-  restart_pods "$NS" deployment/"${RELEASE}-ext-authz" "$RESTART_WAIT_S" \
+  restart_ext_authz "$RESTART_WAIT_S" \
     || { miss "ext-authz does not start on the current key: its start self-check is refused"; return 1; }
   bootstrap_ready || { miss "the PlatformBootstrap is not Ready after the rotations"; return 1; }
   k0=""; k1=""; k2=""

@@ -29,9 +29,16 @@
 #
 # Returns 0 when the workload has its pods again, each new and Ready, and 1
 # with a reason on stderr at the timeout. Requires kubectl and jq.
+#
+# RESTART_PODS_RESULT tells the two returns of 0 apart. It is "restarted" when
+# each pod was replaced, and "nothing" when the workload wants 0 pods. A caller
+# that needs a real restart (an exit test) refuses "nothing". A caller that
+# prints a line says which one happened (hosted#12).
+RESTART_PODS_RESULT=""
 
 restart_pods() {
   local ns="$1" w="$2" timeout="$3" obj sel want pods old deadline pod left n k
+  RESTART_PODS_RESULT=""
   obj="$(kubectl -n "$ns" get "$w" -o json)" \
     || { echo "restart_pods: cannot read ${ns}/${w}" >&2; return 1; }
   sel="$(jq -r '.spec.selector.matchLabels // {} | to_entries | map("\(.key)=\(.value)") | join(",")' <<<"$obj")"
@@ -40,6 +47,7 @@ restart_pods() {
   [[ "$want" =~ ^[0-9]+$ ]] || { echo "restart_pods: ${ns}/${w} has no wanted pod count" >&2; return 1; }
   if [ "$want" -eq 0 ]; then
     echo "restart_pods: ${ns}/${w} wants 0 pods, so there is nothing to restart" >&2
+    RESTART_PODS_RESULT=nothing
     return 0
   fi
   # One read gives the pods to delete and their UIDs. Only the live pods: an
@@ -65,6 +73,7 @@ restart_pods() {
     [ "$(date +%s)" -lt "$deadline" ] || { echo "restart_pods: an old pod of ${ns}/${w} still runs, or a new one is not Ready, within ${timeout}s" >&2; return 1; }
     sleep "${RESTART_PODS_POLL:-5}"
   done
+  RESTART_PODS_RESULT=restarted
 }
 
 # _restart_pods_live: the pods of the list that are not being deleted and
