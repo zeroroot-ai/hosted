@@ -1,0 +1,14 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: bad-job
+spec:
+  template:
+    spec:
+      containers:
+        - name: c
+          image: x
+      volumes:
+        - name: spire-agent-socket
+          csi:
+            driver: csi.spiffe.io
