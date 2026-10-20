@@ -375,7 +375,8 @@ assert "labelSelector" not in p, p
 keys = [s["matchExpressions"][0]["key"] for s in p["orLabelSelectors"]]
 assert keys == ["statefulset.kubernetes.io/pod-name", "gibson.zeroroot.ai/backup-canary"], keys
 # The release namespace is Argo's (audit of the restore path, 2026-10-19).
-assert p["excludedNamespaces"] == ["gibson"], p
+# The plugin namespace of the backup is the tenant-operator's (hosted#8).
+assert p["excludedNamespaces"] == ["gibson", "tenant-acme-plugins"], p
 assert all(s["matchExpressions"][0]["operator"] == "Exists" and len(s["matchExpressions"]) == 1 for s in p["orLabelSelectors"]), p
 PY
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
@@ -400,7 +401,7 @@ for name in ("openbao", "builtins", "pods", "tenants"):
     assert "statefulsets" not in r["includedResources"], (name, r)
 st = yaml.safe_load(open(os.path.join(d, f"Restore-{b}-statefulsets.yaml")))["spec"]
 assert st["includedResources"] == ["statefulsets"], st
-assert st["excludedNamespaces"] == ["gibson"], st
+assert st["excludedNamespaces"] == ["gibson", "tenant-acme-plugins"], st
 PY
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
 }
