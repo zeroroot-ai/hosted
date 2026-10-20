@@ -1245,7 +1245,7 @@ check-velero-prefix: ## The EC2 and EKS recreate read the Velero prefix from the
 check: check-velero-prefix
 
 .PHONY: check-rotation-classes
-check-rotation-classes: ## Each tested credential class has a rotation test, each test has a tested class, and the monthly drill run never does the restore half (hosted#444)
+check-rotation-classes: ## Each tested credential class has a rotation test, each test has a tested class, and the rotation job of a drill never runs beside its restore job (hosted#444)
 	@printf "$(GREEN)▶$(NC) check-rotation-classes...\n"
 	@python3 scripts/check-rotation-classes.py --selftest
 	@bats tests/harness/rotation-masterkey.bats
