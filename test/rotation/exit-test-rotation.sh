@@ -575,15 +575,13 @@ secret_value() {
 # OpenBao key, through the same script that the redis class uses. From charts
 # 0.147.0 the script takes the value on stdin only (charts#679).
 #
-# set_at_source --object KEY JSON: the write of several properties of KEY in
-# ONE write (charts#738). A slot of the CG signing key is two properties, kid
-# and key. Two writes leave a slot with a key and no kid between them, which
-# the daemon refuses, and the setter refuses the empty value of a clear.
+# set_at_source --object KEY JSON: the same call writes several properties of
+# KEY in ONE write (charts#738): the setter takes `--object KEY` as its two
+# arguments and the JSON object on stdin, and it removes the one trailing
+# newline. A slot of the CG signing key is two properties, kid and key. Two
+# writes leave a slot with a key and no kid between them, which the daemon
+# refuses, and the setter refuses the empty value of a clear.
 set_at_source() {
-  if [ "$1" = --object ]; then
-    printf '%s' "$3" | NS="$NS" RELEASE="$RELEASE" "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" --object "$2" >/dev/null
-    return
-  fi
   printf '%s\n' "$3" | NS="$NS" RELEASE="$RELEASE" "${CHARTS_ROOT}/scripts/baseline-set-secret.sh" "$1" "$2" >/dev/null
 }
 
