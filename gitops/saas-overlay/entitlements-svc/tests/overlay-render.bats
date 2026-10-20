@@ -128,3 +128,15 @@ PY
     [[ "$output" == *"value: \"spiffe://${td}/platform/daemon\""* ]] || { echo "$env has no daemon ID in ${td}"; return 1; }
   done
 }
+
+@test "saas overlay: the SPIFFE CSI volume stays out of the Velero backup (drill run 39448187284, hosted#83)" {
+  render_saas
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$TMP/saas.yaml"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "saas overlay: FAILING FIXTURE: a pod that mounts the SPIFFE CSI volume and does not exclude it fails the check" {
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$CHART_DIR/../testdata/csi-no-exclude.yaml"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"volume spire-agent-socket is not in backup.velero.io/backup-volumes-excludes"* ]]
+}
