@@ -143,7 +143,15 @@ case "$args" in
     printf 'tenant-acme\ttenant-acme-neo4j-0\tdata\tCompleted\t541016231\n'
     printf 'tenant-acme\ttenant-acme-neo4j-0\ttmp\tCompleted\t0\n'
     printf 'tenant-acme\ttenant-acme-neo4j-0\tscratch\tCompleted\t\n'
-    printf 'gibson\tgibson-redis-stack-0\tdata\tCompleted\t169356\n'
+    # The volumes of the release namespace (hosted#7): the daemon and the SPIRE
+    # server are derived, Redis must come back, and an empty one is skipped.
+    # STUB_REDIS_PVB_FAILED: the backup saved no Redis volume.
+    # STUB_PVB_UNCLASSIFIED: a volume that no class names.
+    printf 'gibson\tgibson-gibson-workloads-0\tdata\tCompleted\t6905\n'
+    printf 'gibson\tgibson-server-0\tspire-data\tCompleted\t3305\n'
+    printf 'gibson\tgibson-gibson-workloads-0\ttmp\tCompleted\t0\n'
+    printf 'gibson\tgibson-redis-stack-0\tdata\t%s\t169356\n' "$([ -n "${STUB_REDIS_PVB_FAILED:-}" ] && echo Failed || echo Completed)"
+    [ -z "${STUB_PVB_UNCLASSIFIED:-}" ] || printf 'gibson\tgibson-newthing-0\tdata\tCompleted\t100\n'
     printf 'tenant-acme\tbelief-trainer-29123-24577\twork\tCompleted\t4096\n'
     printf 'tenant-acme\tbelief-trainer-29123-24577\tcache\tFailed\t1000\n'
     [ -z "${STUB_PVB_LOST:-}" ] || printf 'tenant-acme\ttenant-acme-neo4j-1\tdata\tFailed\t1000\n'
@@ -152,6 +160,11 @@ case "$args" in
   "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=$B-pods -o jsonpath={range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.phase}{\"\\n\"}{end}")
     [ -n "${STUB_TENANT_PVR_MISSING:-}" ] || printf 'tenant-acme/tenant-acme-neo4j-0/data Completed\n'
     printf 'tenant-backup-canary/backup-canary/data Completed\n'; exit 0 ;;
+  # The PodVolumeRestores of every Restore of the run, for the volumes of the
+  # release namespace that must come back. STUB_REDIS_PVR_MISSING: Redis has none.
+  "-n velero get podvolumerestores.velero.io -l velero.io/restore-name in ("*)
+    [ -n "${STUB_REDIS_PVR_MISSING:-}" ] || printf 'gibson/gibson-redis-stack-0/data Completed\n'
+    printf 'gibson/gibson-openbao-0/data Completed\n'; exit 0 ;;
   "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=$B-openbao -o jsonpath="*|\
   "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=$B-pods -o jsonpath="*)
     printf 'Completed\n'; exit 0 ;;
@@ -421,6 +434,36 @@ PY
   [ -z "$(line_of "apply Restore $BACKUP-statefulsets")" ]
 }
 
+@test "the volumes of the release namespace are declared: derived ones with their reason, Redis as must come back (hosted#7)" {
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  assert_output_has "derived by design: gibson/gibson-gibson-workloads-0/data (the daemon volume holds only config.yaml"
+  assert_output_has "derived by design: gibson/gibson-server-0/spire-data (the SPIRE server keeps its registrations in Postgres"
+  assert_output_has "must come back: gibson/gibson-redis-stack-0/data has a Completed PodVolumeRestore"
+  assert_output_has "not checked: gibson/gibson-gibson-workloads-0/tmp (empty)"
+}
+
+@test "FAILING FIXTURE: a Redis volume that the backup holds and no Restore moved stops the restore (hosted#7)" {
+  export STUB_REDIS_PVR_MISSING=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "no PodVolumeRestore completed for: gibson/gibson-redis-stack-0/data"
+}
+
+@test "FAILING FIXTURE: a Redis volume that the backup did not save stops the restore (hosted#7)" {
+  export STUB_REDIS_PVB_FAILED=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "did not save these volumes that must come back: gibson/gibson-redis-stack-0/data (Failed)"
+}
+
+@test "FAILING FIXTURE: a volume of the release namespace that no class names stops the restore (hosted#7)" {
+  export STUB_PVB_UNCLASSIFIED=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "no class: gibson/gibson-newthing-0/data (phase=Completed, bytes=100)"
+}
+
 @test "FAILING FIXTURE: the tenant volume check selects by the labels in the backup archive, and names each volume it leaves out (hosted#793, review of hosted#798)" {
   run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
@@ -428,7 +471,7 @@ PY
   assert_output_has "not checked: tenant-acme/belief-trainer-29123-24577/work (not-selected-by-the-pods-Restore(phase=Completed,bytes=4096))"
   assert_output_has "not checked: tenant-acme/belief-trainer-29123-24577/cache (not-selected-by-the-pods-Restore(phase=Failed,bytes=1000))"
   assert_output_has "not checked: tenant-acme/tenant-acme-neo4j-0/tmp (empty)"
-  [[ "$output" != *"not checked: gibson/"* ]]
+  [[ "$output" != *"not checked: gibson/gibson-redis-stack-0"* ]]
   export STUB_PVB_EMPTY=1
   run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
   [ "$status" -ne 0 ]

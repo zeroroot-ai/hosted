@@ -845,6 +845,78 @@ wait_tenant_namespace_labels() {
   done
 }
 
+# release_volume_class <pod/volume> — the class of one volume of the release
+# namespace that the backup holds. It sets REL_CLASS and REL_WHY. Every volume
+# with data has a class here, so a new volume is never ignored in silence
+# (hosted#7).
+#
+#   restore1   the secret store Restore (restore 1) moves it, and
+#              restore_secret_store proves a PodVolumeRestore for it.
+#   derived    the volume may start empty by design. The reason is the proof.
+#   must       the data must come back. A Completed PodVolumeRestore of this
+#              run is required.
+#
+# Why Argo's pods get no data from the pods Restore: Argo makes the pods of
+# the release first, and Velero moves data only into a pod that it creates.
+# Velero cannot create a pod with a protected component either
+# (gibson-platform-identity-pods). So the class is also the place that says
+# how the volume gets its data.
+release_volume_class() {
+  case "$1" in
+    "${NS}-openbao-0/data")
+      REL_CLASS=restore1
+      REL_WHY="the secret store Restore moves it before the umbrella exists" ;;
+    "${NS}-gibson-workloads-0/data")
+      REL_CLASS=derived
+      REL_WHY="the daemon volume holds only config.yaml, which the init container setup-config copies from the ConfigMap at each start, and the daemon writes nothing else there" ;;
+    "${NS}-server-0/spire-data")
+      REL_CLASS=derived
+      REL_WHY="the SPIRE server keeps its registrations in Postgres, makes new CA keys when its key file is empty, the spire-controller-manager writes the entries again, and the agents attest again" ;;
+    "${NS}-redis-stack-0/data")
+      REL_CLASS=must
+      REL_WHY="it holds the documents of every tenant and the Timeline tail, and the platform backup is their only copy (ADR-0075, ADR-0163)" ;;
+    *)
+      REL_CLASS=unknown
+      REL_WHY="" ;;
+  esac
+}
+
+# release_volumes_accounted "<pod/volume phase bytes>…" — each volume with data
+# in the release namespace has a class, and each class is met.
+release_volumes_accounted() {
+  local list="$1" v phase size got must="" lost="" unknown="" missing=""
+  while read -r v phase size; do
+    [ -n "$v" ] || continue
+    if ! [[ "$size" =~ ^[0-9]+$ ]] || [ "$size" -eq 0 ]; then
+      printf '  - not checked: %s/%s (empty)\n' "$NS" "$v"; continue
+    fi
+    release_volume_class "$v"
+    case "$REL_CLASS" in
+      unknown) unknown="${unknown}${NS}/${v} (phase=${phase}, bytes=${size}) " ;;
+      derived) printf '  - derived by design: %s/%s (%s)\n' "$NS" "$v" "$REL_WHY" ;;
+      restore1) printf '  - restored by restore 1: %s/%s (%s)\n' "$NS" "$v" "$REL_WHY" ;;
+      must)
+        [ "$phase" = Completed ] || lost="${lost}${NS}/${v} (${phase}) "
+        must="${must:+${must} }${NS}/${v}" ;;
+    esac
+  done <<< "$list"
+  [ -z "$unknown" ] \
+    || die "the backup ${RESTORE_FROM} holds volumes of the release namespace with no class: ${unknown}Name each one in release_volume_class as derived, restore1 or must (hosted#7). A volume that no class names is a volume that nobody decided about"
+  [ -z "$lost" ] \
+    || die "backup ${RESTORE_FROM} did not save these volumes that must come back: ${lost}The backup does not hold them"
+  [ -n "$must" ] || return 0
+  got="$(kubectl -n "$VELERO_NS" get podvolumerestores.velero.io \
+    -l "velero.io/restore-name in (${RESTORE_FROM}-openbao,${RESTORE_FROM}-builtins,${RESTORE_FROM}-pods,${RESTORE_FROM}-statefulsets)" \
+    -o jsonpath='{range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.phase}{"\n"}{end}')" \
+    || die "could not list the PodVolumeRestores of ${RESTORE_FROM}"
+  for v in $must; do
+    printf '%s\n' "$got" | grep -qxF "${v} Completed" || missing="${missing}${v} "
+  done
+  [ -z "$missing" ] \
+    || die "no PodVolumeRestore completed for: ${missing}The backup holds bytes for each one and the data must come back. Argo made the pod first, and Velero moves data only into a pod that it creates (hosted#7)"
+  for v in $must; do printf '  ✓ must come back: %s has a Completed PodVolumeRestore\n' "$v"; done
+}
+
 # tenant_volumes_restored <restore> — each volume that the pods Restore must
 # bring back has a Completed PodVolumeRestore in <restore>. The volumes it
 # must bring back: each PodVolumeBackup with bytes of a pod in a tenant
@@ -866,9 +938,9 @@ wait_tenant_namespace_labels() {
 # empty volume. The canary is always in the list, so a list with no volume at
 # all (no sync, a wrong label) is refused, not passed (hosted#793).
 #
-# The check reads only tenant-* namespaces, as the pods Restore excludes the
-# release namespace (hosted#796). A change that restores gibson volumes
-# (hosted#792) changes this prefix too.
+# The volumes of the release namespace go through release_volumes_accounted:
+# the pods Restore excludes that namespace (hosted#796), so each volume there
+# has a class that says how it gets its data, or that it needs none (hosted#7).
 tenant_volumes_restored() {
   local pvbs verdict want lost got missing
   [ -s "$WORK/backup.tar.gz" ] \
@@ -895,6 +967,9 @@ for line in sys.stdin:
     if len(f) != 5:
         continue
     ns, pod, vol, phase, size = f
+    if ns == sys.argv[2]:
+        print("REL %s/%s %s %s" % (pod, vol, phase or "none", size or "0"))
+        continue
     if not ns.startswith("tenant-"):
         continue
     name = "%s/%s/%s" % (ns, pod, vol)
@@ -908,8 +983,10 @@ for line in sys.stdin:
         print("WANT %s" % name)
     else:
         print("SKIP %s empty" % name)
-' "$WORK/backup.tar.gz")" \
+' "$WORK/backup.tar.gz" "$NS")" \
     || die "could not read the pods of ${RESTORE_FROM} from its archive"
+  release_volumes_accounted "$(printf '%s\n' "$verdict" | awk '$1 == "REL" {print $2, $3, $4}')"
+  verdict="$(printf '%s\n' "$verdict" | awk '$1 != "REL"')"
   printf '%s\n' "$verdict" | while read -r tag v why; do
     [ "$tag" = SKIP ] || continue
     printf '  - not checked: %s (%s)\n' "$v" "$why"
