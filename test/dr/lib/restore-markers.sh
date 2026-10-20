@@ -121,7 +121,7 @@ redis_do() {
   [ -n "$pw" ] || { printf 'the Secret %s/%s-redis-stack holds no Redis password' "$NS" "$NS"; return 1; }
   out="$(redis_cli "${NS}-redis-stack-0" "$pw" -n "$db" "$@")" || rc=$?
   pw=""
-  if [ "$rc" -ne 0 ] || [[ "$out" =~ ^(\(error\)\ )?(ERR|NOAUTH|WRONGPASS|WRONGTYPE|LOADING|MISCONF|READONLY|NOPERM)([[:space:]]|$) ]]; then
+  if [ "$rc" -ne 0 ] || [[ "$out" =~ ^(\(error\)\ )?(ERR|NOAUTH|WRONGPASS|WRONGTYPE|LOADING|MISCONF|READONLY|NOPERM|BUSY|NOSCRIPT|EXECABORT|MASTERDOWN|CLUSTERDOWN)([[:space:]]|$) ]]; then
     printf 'redis-cli %s failed (exit %s): %s' "$1" "$rc" "${out:0:300}"
     return 1
   fi

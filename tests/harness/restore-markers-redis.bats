@@ -33,8 +33,8 @@ read -r p
 n=$(( $(cat "$TMP/calls" 2>/dev/null || echo 0) + 1 )); echo "$n" > "$TMP/calls"
 [ -z "${STUB_DROP:-}" ] || [ "$n" -gt "$STUB_DROP" ] || p=""
 [ -n "$p" ] || exit 97
-# STUB_LOADING: Redis answers an error to each call.
-[ -z "${STUB_LOADING:-}" ] || { echo "LOADING Redis is loading the dataset in memory"; exit 0; }
+# STUB_REPLY: Redis answers this error reply to each call.
+[ -z "${STUB_REPLY:-}" ] || { echo "$STUB_REPLY"; exit 0; }
 [ "$p" = hunter2 ] || { echo "NOAUTH Authentication required."; exit 0; }
 [ "$1" = -n ] && { db="$2"; shift 2; } || db=0
 cmd="$1"; shift
@@ -130,14 +130,24 @@ drive() { run bash "$TMP/drive.sh" "$@"; }
   echo 3 > "$TMP/redis/idx.restore-loop"
   drive markers_redis_seed
   [ "$status" -eq 0 ]
-  STUB_LOADING=1 drive markers_redis_check
+  STUB_REPLY="LOADING Redis is loading the dataset in memory" drive markers_redis_check
   [ "$status" -ne 0 ]
   [[ "$output" == *"LOADING Redis is loading the dataset in memory"* ]] || { echo "$output"; false; }
   [[ "$output" != *"came back empty"* ]]
 }
 
+@test "FAILING FIXTURE: each error reply of Redis is an error, never an empty answer (BUSY NOSCRIPT EXECABORT MASTERDOWN CLUSTERDOWN)" {
+  for reply in "BUSY Redis is busy running a script" "NOSCRIPT No matching script" "EXECABORT Transaction discarded" \
+               "MASTERDOWN Link with MASTER is down" "CLUSTERDOWN The cluster is down"; do
+    STUB_REPLY="$reply" drive markers_redis_check
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"$reply"* ]] || { echo "$reply: $output"; false; }
+    [[ "$output" != *"came back empty"* ]]
+  done
+}
+
 @test "FAILING FIXTURE: a redis-cli error in the absence check is no proof of absence" {
-  STUB_LOADING=1 drive markers_redis_absent
+  STUB_REPLY="LOADING Redis is loading the dataset in memory" drive markers_redis_absent
   [ "$status" -ne 0 ]
   [[ "$output" == *"its absence is not proved"* ]] || { echo "$output"; false; }
 }

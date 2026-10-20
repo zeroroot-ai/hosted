@@ -321,14 +321,14 @@ for d in docs:
   # the pod has no priorityClassName until it is deleted once (the backup and
   # the chart have the same revision, so the StatefulSet does not replace it).
   # STUB_REDIS_PC_NEVER: a new pod has none either.
-  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath={.metadata.uid}")
-    if [ -e "$STATE/redis-pod-deleted" ]; then printf 'uid-2'; else printf 'uid-1'; fi; exit 0 ;;
-  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath={.spec.priorityClassName}")
-    if [ -n "${STUB_REDIS_PC_NEVER:-}" ]; then exit 0; fi
-    if [ -n "${STUB_REDIS_PC_EMPTY:-}" ] && [ ! -e "$STATE/redis-pod-deleted" ]; then exit 0; fi
-    printf 'gibson-platform-critical'; exit 0 ;;
-  "-n gibson delete pod/gibson-redis-stack-0 --wait=true") : > "$STATE/redis-pod-deleted"; exit 0 ;;
-  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath="*) printf 'rev1|StatefulSet|True'; exit 0 ;;
+  # One read of the pod: revision|owner|Ready|uid|priorityClassName.
+  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath="*)
+    uid=uid-1; pc=gibson-platform-critical
+    [ ! -e "$STATE/redis-pod-deleted" ] || uid=uid-2
+    if [ -n "${STUB_REDIS_PC_NEVER:-}" ]; then pc=
+    elif [ -n "${STUB_REDIS_PC_EMPTY:-}" ] && [ ! -e "$STATE/redis-pod-deleted" ]; then pc=; fi
+    printf '%s|StatefulSet|True|%s|%s' "${STUB_REDIS_POD_REV:-rev1}" "$uid" "$pc"; exit 0 ;;
+  "-n gibson delete pod/gibson-redis-stack-0 --ignore-not-found --wait=true --timeout="*"s") : > "$STATE/redis-pod-deleted"; exit 0 ;;
   "-n gibson get secret gibson-redis-stack -o json")
     printf '{"data":{"redis-password":"%s"}}' "$(printf '%s' hunter2 | base64)"; exit 0 ;;
   "-n gibson exec -i gibson-redis-stack-0 -c redis-stack -- sh -c "*) cat > /dev/null; echo PONG; exit 0 ;;

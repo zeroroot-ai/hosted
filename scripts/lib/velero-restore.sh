@@ -641,7 +641,7 @@ YAML
 # runs proves nothing: NOAUTH and WRONGPASS are answers too, so the probe
 # needs PONG from the password of the Secret.
 wait_redis_on_real_secret() {
-  local bound deadline sts pod revs want pw ping uid0 uid pc how
+  local bound deadline sts pod revs state prev pown pready uid pc want pw ping uid0 how left
   bound="$(restore_bound "$RESTORE_REDIS_TIMEOUT")"
   deadline=$(( $(date +%s) + bound ))
   sts="${NS}-redis-stack"; pod="${sts}-0"
@@ -649,23 +649,27 @@ wait_redis_on_real_secret() {
   how="replaced by the StatefulSet"
   while :; do
     revs="$(kubectl -n "$NS" get "statefulset/${sts}" -o jsonpath='{.status.updateRevision}' 2>/dev/null)" || revs=""
-    want="$(kubectl -n "$NS" get "pod/${pod}" \
-      -o jsonpath='{.metadata.labels.controller-revision-hash}|{.metadata.ownerReferences[0].kind}|{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" || want=""
-    uid="$(kubectl -n "$NS" get "pod/${pod}" -o jsonpath='{.metadata.uid}' 2>/dev/null)" || uid=""
+    # One read: the revision of the pod, its owner, Ready, its uid and its
+    # priority class. Five reads could see two different pods.
+    state="$(kubectl -n "$NS" get "pod/${pod}" \
+      -o jsonpath='{.metadata.labels.controller-revision-hash}|{.metadata.ownerReferences[0].kind}|{.status.conditions[?(@.type=="Ready")].status}|{.metadata.uid}|{.spec.priorityClassName}' 2>/dev/null)" || state=""
+    IFS='|' read -r prev pown pready uid pc <<<"$state"
+    want="${prev}|${pown}|${pready}"
     # Ready on the revision of the StatefulSet, and, after a delete, a new pod.
     if [ -n "$revs" ] && [ "$want" = "${revs}|StatefulSet|True" ] && [ -n "$uid" ] && [ "$uid" != "$uid0" ]; then
-      pc="$(kubectl -n "$NS" get "pod/${pod}" -o jsonpath='{.spec.priorityClassName}' 2>/dev/null)" || pc=""
       [ -z "$pc" ] || break
       # The pod has no priorityClassName: the resource modifier removed it and
       # the StatefulSet did not replace the pod, because the backup and the
       # chart have the same revision. Redis would run without its priority
       # until the next roll. Delete the pod once, so that the StatefulSet makes
-      # it from its own spec.
+      # it from its own spec. The delete is bound by the deadline, and a pod
+      # that the controller already replaced is not an error.
       if [ -z "$uid0" ]; then
         printf '  the restored Redis pod has no priorityClassName and the StatefulSet did not replace it: deleting it once\n'
         uid0="$uid"; how="deleted once, then made again by the StatefulSet"
-        kubectl -n "$NS" delete "pod/${pod}" --wait=true >/dev/null \
-          || die "could not delete the restored Redis pod ${NS}/${pod}, which runs without its priorityClassName"
+        left=$(( deadline - $(date +%s) )); [ "$left" -gt 0 ] || left=1
+        kubectl -n "$NS" delete "pod/${pod}" --ignore-not-found --wait=true --timeout="${left}s" >/dev/null \
+          || die "could not delete the restored Redis pod ${NS}/${pod} within ${left}s, which runs without its priorityClassName"
         continue
       fi
       die "the Redis pod ${NS}/${pod} that the StatefulSet made has no priorityClassName: its spec does not set one, so Redis runs without its priority"

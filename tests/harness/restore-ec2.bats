@@ -183,14 +183,14 @@ case "$args" in
   # the pod has no priorityClassName until it is deleted once (the backup and
   # the chart have the same revision, so the StatefulSet does not replace it).
   # STUB_REDIS_PC_NEVER: a new pod has none either.
-  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath={.metadata.uid}")
-    if [ -e "$STATE/redis-pod-deleted" ]; then printf 'uid-2'; else printf 'uid-1'; fi; exit 0 ;;
-  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath={.spec.priorityClassName}")
-    if [ -n "${STUB_REDIS_PC_NEVER:-}" ]; then exit 0; fi
-    if [ -n "${STUB_REDIS_PC_EMPTY:-}" ] && [ ! -e "$STATE/redis-pod-deleted" ]; then exit 0; fi
-    printf 'gibson-platform-critical'; exit 0 ;;
-  "-n gibson delete pod/gibson-redis-stack-0 --wait=true") : > "$STATE/redis-pod-deleted"; echo "delete redis pod" >> "$STATE/order.log"; exit 0 ;;
-  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath="*) printf '%s|StatefulSet|True' "${STUB_REDIS_POD_REV:-rev1}"; exit 0 ;;
+  # One read of the pod: revision|owner|Ready|uid|priorityClassName.
+  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath="*)
+    uid=uid-1; pc=gibson-platform-critical
+    [ ! -e "$STATE/redis-pod-deleted" ] || uid=uid-2
+    if [ -n "${STUB_REDIS_PC_NEVER:-}" ]; then pc=
+    elif [ -n "${STUB_REDIS_PC_EMPTY:-}" ] && [ ! -e "$STATE/redis-pod-deleted" ]; then pc=; fi
+    printf '%s|StatefulSet|True|%s|%s' "${STUB_REDIS_POD_REV:-rev1}" "$uid" "$pc"; exit 0 ;;
+  "-n gibson delete pod/gibson-redis-stack-0 --ignore-not-found --wait=true --timeout="*"s") echo "$args" > "$STATE/redis-delete.args"; : > "$STATE/redis-pod-deleted"; exit 0 ;;
   "-n gibson get secret gibson-redis-stack -o json")
     printf '{"data":{"redis-password":"%s"}}' "$(printf '%s' hunter2 | base64)"; exit 0 ;;
   "-n gibson exec -i gibson-redis-stack-0 -c redis-stack -- sh -c "*)
@@ -543,6 +543,8 @@ PY
   assert_output_has "with priorityClassName gibson-platform-critical, and answers PONG to its password (deleted once, then made again by the StatefulSet)"
   [ -e "$STATE/redis-pod-deleted" ]
   [[ "$output" != *"(replaced by the StatefulSet)"* ]]
+  # The delete is bound by the deadline and ignores a pod that is already gone.
+  grep -q -- '--ignore-not-found --wait=true --timeout=[0-9]*s' "$STATE/redis-delete.args"
 }
 
 @test "FAILING FIXTURE: a Redis pod that the StatefulSet made with no priorityClassName stops the restore (hosted#7)" {
