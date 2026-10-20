@@ -23,19 +23,20 @@ setup() {
   TMP="$(mktemp -d)"; export TMP
   mkdir -p "$TMP/bin"
   python3 - "$TEST" "$TMP/helpers.sh" <<'PY'
-import re, sys
+import os, re, sys
 text = open(sys.argv[1]).read()
+lib = open(os.path.join(os.path.dirname(sys.argv[1]), "../../scripts/lib/redis-cli.sh")).read()
 out = []
-m = re.search(r"^STDIN_LOST=\d+$", text, re.M)
+m = re.search(r"^STDIN_LOST=\d+$", lib, re.M)
 if not m:
-    sys.exit("no STDIN_LOST in the script")
+    sys.exit("no STDIN_LOST in scripts/lib/redis-cli.sh")
 out.append(m.group(0))
 m = re.search(r"^SESSION_PROBE_JS='.*?^\}\);'\n", text, re.M | re.S)
 if not m:
     sys.exit("no SESSION_PROBE_JS in the script")
 out.append(m.group(0))
 for name in ("redis_cli", "bao_token_status", "pods_of", "session_probe"):
-    m = re.search(r"^%s\(\) \{.*?^\}\n" % name, text, re.M | re.S)
+    m = re.search(r"^%s\(\) \{.*?^\}\n" % name, lib if name == "redis_cli" else text, re.M | re.S)
     if not m:
         sys.exit("no function %s in the script" % name)
     out.append(m.group(0))

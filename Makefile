@@ -1096,6 +1096,7 @@ check: check-acme-challenge
 check-drill-restore: ## A drill dispatch selects the restore half its input names, and a skipped restore cannot report green (hosted#443)
 	@printf "$(GREEN)▶$(NC) check-drill-restore...\n"
 	@bats tests/harness/drill-restore.bats
+	@bats tests/harness/restore-markers-redis.bats
 check: check-drill-restore
 
 .PHONY: check-edge-names

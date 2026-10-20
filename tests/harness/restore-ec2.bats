@@ -123,6 +123,7 @@ case "$args" in
   "-n velero rollout status deployment/velero --timeout=300s") exit 0 ;;
   "-n velero get backup.velero.io/$B") exit 0 ;;
   "-n velero get restore.velero.io/$B-openbao -o jsonpath={.status.phase}"|\
+  "-n velero get restore.velero.io/$B-redis -o jsonpath={.status.phase}"|\
   "-n velero get restore.velero.io/$B-builtins -o jsonpath={.status.phase}"|\
   "-n velero get restore.velero.io/$B-pods -o jsonpath={.status.phase}"|\
   "-n velero get restore.velero.io/$B-statefulsets -o jsonpath={.status.phase}"|\
@@ -143,7 +144,19 @@ case "$args" in
     printf 'tenant-acme\ttenant-acme-neo4j-0\tdata\tCompleted\t541016231\n'
     printf 'tenant-acme\ttenant-acme-neo4j-0\ttmp\tCompleted\t0\n'
     printf 'tenant-acme\ttenant-acme-neo4j-0\tscratch\tCompleted\t\n'
-    printf 'gibson\tgibson-redis-stack-0\tdata\tCompleted\t169356\n'
+    # The volumes of the release namespace (hosted#7): the daemon and the SPIRE
+    # server are derived, Redis must come back, and an empty one is skipped.
+    # STUB_REDIS_PVB_FAILED: the backup saved no Redis volume.
+    # STUB_PVB_UNCLASSIFIED: a volume that no class names.
+    printf 'gibson\tgibson-gibson-workloads-0\tdata\tCompleted\t6905\n'
+    printf 'gibson\tgibson-server-0\tspire-data\tCompleted\t3305\n'
+    printf 'gibson\tgibson-gibson-workloads-0\ttmp\tCompleted\t0\n'
+    # A failed PodVolumeBackup has no totalBytes. STUB_REDIS_PVB_ABSENT: the
+    # backup lists no Redis volume at all.
+    if [ -n "${STUB_REDIS_PVB_ABSENT:-}" ]; then :
+    elif [ -n "${STUB_REDIS_PVB_FAILED:-}" ]; then printf 'gibson\tgibson-redis-stack-0\tdata\tFailed\t\n'
+    else printf 'gibson\tgibson-redis-stack-0\tdata\tCompleted\t169356\n'; fi
+    [ -z "${STUB_PVB_UNCLASSIFIED:-}" ] || printf 'gibson\tgibson-newthing-0\tdata\tCompleted\t100\n'
     printf 'tenant-acme\tbelief-trainer-29123-24577\twork\tCompleted\t4096\n'
     printf 'tenant-acme\tbelief-trainer-29123-24577\tcache\tFailed\t1000\n'
     [ -z "${STUB_PVB_LOST:-}" ] || printf 'tenant-acme\ttenant-acme-neo4j-1\tdata\tFailed\t1000\n'
@@ -152,9 +165,25 @@ case "$args" in
   "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=$B-pods -o jsonpath={range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.phase}{\"\\n\"}{end}")
     [ -n "${STUB_TENANT_PVR_MISSING:-}" ] || printf 'tenant-acme/tenant-acme-neo4j-0/data Completed\n'
     printf 'tenant-backup-canary/backup-canary/data Completed\n'; exit 0 ;;
+  # The PodVolumeRestores of every Restore of the run, for the volumes of the
+  # release namespace that must come back. STUB_REDIS_PVR_MISSING: Redis has none.
+  "-n velero get podvolumerestores.velero.io -l velero.io/restore-name in ("*)
+    [ -n "${STUB_REDIS_PVR_MISSING:-}" ] || printf 'gibson/gibson-redis-stack-0/data Completed\n'
+    printf 'gibson/gibson-openbao-0/data Completed\n'; exit 0 ;;
+  "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=$B-redis -o jsonpath="*)
+    [ -n "${STUB_REDIS_NO_PVR:-}" ] || printf 'Completed\n'; exit 0 ;;
   "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=$B-openbao -o jsonpath="*|\
   "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=$B-pods -o jsonpath="*)
     printf 'Completed\n'; exit 0 ;;
+  # The Redis pod after the umbrella (hosted#7): the StatefulSet revision, the
+  # pod on it, the Secret, and PING with the password of the Secret.
+  # STUB_REDIS_PING: the answer to PING (default PONG).
+  "-n gibson get statefulset/gibson-redis-stack -o jsonpath={.status.updateRevision}") printf 'rev1'; exit 0 ;;
+  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath="*) printf '%s|StatefulSet|True' "${STUB_REDIS_POD_REV:-rev1}"; exit 0 ;;
+  "-n gibson get secret gibson-redis-stack -o json")
+    printf '{"data":{"redis-password":"%s"}}' "$(printf '%s' hunter2 | base64)"; exit 0 ;;
+  "-n gibson exec -i gibson-redis-stack-0 -c redis-stack -- sh -c "*)
+    cat > /dev/null; printf '%s\n' "${STUB_REDIS_PING:-PONG}"; exit 0 ;;
   "get clustersecretstore gibson-secrets -o jsonpath="*)
     echo "wait_eso" >> "$STATE/order.log"; printf 'True'; exit 0 ;;
   "get externalsecrets --all-namespaces -o jsonpath="*) printf 'gibson platform-postgres-bucket True\n'; exit 0 ;;
@@ -421,6 +450,99 @@ PY
   [ -z "$(line_of "apply Restore $BACKUP-statefulsets")" ]
 }
 
+@test "the volumes of the release namespace are declared: derived ones with their reason, Redis as must come back (hosted#7)" {
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  assert_output_has "derived by design: gibson/gibson-gibson-workloads-0/data (the daemon volume holds only config.yaml"
+  assert_output_has "derived by design: gibson/gibson-server-0/spire-data (the SPIRE server keeps its registrations in Postgres"
+  assert_output_has "must come back: gibson/gibson-redis-stack-0/data has a Completed PodVolumeRestore"
+  assert_output_has "not checked: gibson/gibson-gibson-workloads-0/tmp (empty)"
+}
+
+@test "FAILING FIXTURE: a Redis volume that the backup holds and no Restore moved stops the restore (hosted#7)" {
+  export STUB_REDIS_PVR_MISSING=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "no PodVolumeRestore completed for: gibson/gibson-redis-stack-0/data"
+}
+
+@test "FAILING FIXTURE: a Redis volume that the backup did not save stops the restore (hosted#7)" {
+  export STUB_REDIS_PVB_FAILED=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "did not save these volumes that must come back: gibson/gibson-redis-stack-0/data (Failed)"
+}
+
+@test "FAILING FIXTURE: a failed Redis PodVolumeBackup with no totalBytes is not an empty volume (hosted#7)" {
+  export STUB_REDIS_PVB_FAILED=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "did not save these volumes that must come back: gibson/gibson-redis-stack-0/data (Failed)"
+  [[ "$output" != *"not checked: gibson/gibson-redis-stack-0/data (empty)"* ]]
+}
+
+@test "FAILING FIXTURE: a backup with no Redis PodVolumeBackup at all is refused (hosted#7)" {
+  export STUB_REDIS_PVB_ABSENT=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "lists no PodVolumeBackup for: gibson/gibson-redis-stack-0/data"
+}
+
+@test "the Redis Restore runs after the secret store and before the umbrella, with the PriorityClass removed and no Secret made optional (hosted#7)" {
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+  o="$(line_of "apply Restore $BACKUP-openbao")"
+  r="$(line_of "apply Restore $BACKUP-redis")"
+  g="$(grep -n 'gibson created with recovery\|apply Application gibson$' "$STATE/order.log" | head -1 | cut -d: -f1 || true)"
+  [ -n "$o" ] && [ -n "$r" ] && [ "$o" -lt "$r" ]
+  [ -z "$g" ] || [ "$r" -lt "$g" ]
+  b="$(line_of "apply Restore $BACKUP-builtins")"
+  [ "$r" -lt "$b" ]
+  run python3 - "$STATE/applied" "$BACKUP" <<'PY'
+import os, sys, yaml
+d, b = sys.argv[1], sys.argv[2]
+r = yaml.safe_load(open(os.path.join(d, f"Restore-{b}-redis.yaml")))["spec"]
+assert r["includedNamespaces"] == ["gibson"], r
+assert r["includedResources"] == ["configmaps", "persistentvolumeclaims", "persistentvolumes", "pods"], r
+assert r["labelSelector"] == {"matchLabels": {"app.kubernetes.io/component": "redis"}}, r
+assert r["resourceModifier"]["name"] == "restore-redis-no-priorityclass", r
+mod = yaml.safe_load(open(os.path.join(d, "ConfigMap-restore-redis-no-priorityclass.yaml")))
+text = mod["data"]["modifier.yaml"]
+assert "operation: remove" in text and "/spec/priorityClassName" in text, text
+# The password is an env value. Making it optional would start Redis open.
+assert "optional" not in text and "secretKeyRef" not in text, text
+PY
+  [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
+}
+
+@test "FAILING FIXTURE: a Redis Restore that moves no volume data stops the restore (hosted#7)" {
+  export STUB_REDIS_NO_PVR=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "the Redis restore reported Completed and moved NO volume data"
+}
+
+@test "FAILING FIXTURE: Redis that does not answer PONG to the password of the Secret stops the restore (hosted#7)" {
+  export STUB_REDIS_PING=NOAUTH
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "Redis answers 'NOAUTH' to PING with the password of the Secret gibson/gibson-redis-stack, not PONG"
+}
+
+@test "FAILING FIXTURE: a Redis pod that the StatefulSet has not replaced stops the restore (the one restart on the real Secret) (hosted#7)" {
+  export STUB_REDIS_POD_REV=rev0 RESTORE_TIMEOUT=11
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "is not Ready on the revision rev1 of its StatefulSet"
+}
+
+@test "FAILING FIXTURE: a volume of the release namespace that no class names stops the restore (hosted#7)" {
+  export STUB_PVB_UNCLASSIFIED=1
+  run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
+  [ "$status" -ne 0 ]
+  assert_output_has "no class: gibson/gibson-newthing-0/data (phase=Completed, bytes=100)"
+}
+
 @test "FAILING FIXTURE: the tenant volume check selects by the labels in the backup archive, and names each volume it leaves out (hosted#793, review of hosted#798)" {
   run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
@@ -428,7 +550,7 @@ PY
   assert_output_has "not checked: tenant-acme/belief-trainer-29123-24577/work (not-selected-by-the-pods-Restore(phase=Completed,bytes=4096))"
   assert_output_has "not checked: tenant-acme/belief-trainer-29123-24577/cache (not-selected-by-the-pods-Restore(phase=Failed,bytes=1000))"
   assert_output_has "not checked: tenant-acme/tenant-acme-neo4j-0/tmp (empty)"
-  [[ "$output" != *"not checked: gibson/"* ]]
+  [[ "$output" != *"not checked: gibson/gibson-redis-stack-0"* ]]
   export STUB_PVB_EMPTY=1
   run "$BATS_TEST_TMPDIR/drive.sh" "$BACKUP"
   [ "$status" -ne 0 ]
