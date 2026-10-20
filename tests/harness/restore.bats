@@ -355,7 +355,8 @@ for d in docs:
   # operator labels it.
   "-n velero get pods -l name=velero --field-selector=status.phase=Running -o jsonpath={.items[0].metadata.name}") printf 'velero-7d9-abc'; exit 0 ;;
   "-n velero exec pod/velero-7d9-abc -c velero -- /velero backup describe ${BACKUP} --details -n velero")
-    printf 'Name:  %s\n\nResource List:\n  gibson.zeroroot.ai/v1alpha1/Tenant:\n    - primary\n  v1/Namespace:\n    - gibson\n    - tenant-primary\n    - velero\n' "$BACKUP"
+    printf 'Name:  %s\n\nResource List:\n  gibson.zeroroot.ai/v1alpha1/Tenant:\n    - primary\n  v1/Namespace:\n    - gibson\n    - tenant-primary\n    - velero\n%s' "$BACKUP" "${PLUGIN_NS_IN_BACKUP:+    - $PLUGIN_NS_IN_BACKUP
+}"
     exit 0 ;;
   "get namespace tenant-primary") echo 'Error from server (NotFound): namespaces "tenant-primary" not found' >&2; exit 1 ;;
   "get namespace tenant-primary -o jsonpath={.metadata.labels.gibson\.zeroroot\.ai/managed-by}") printf 'tenant-operator'; exit 0 ;;
@@ -756,6 +757,44 @@ for d in yaml.safe_load_all(open(sys.argv[1])):
 assert not bad, "; ".join(bad)
 print("every pod-restoring Restore names both volume kinds")
 VOLKINDS
+}
+
+@test "FAILING FIXTURE: no Restore creates a pod or a StatefulSet in a plugin namespace of the backup (hosted#8)" {
+  # The chart policy gibson-tenant-plugin-workloads lets only
+  # replicaset-controller create a Pod in tenant-<t>-plugins and lets no one
+  # create a StatefulSet. A Restore that does not exclude the namespace ends
+  # PartiallyFailed on a backup that holds a running catalog plugin.
+  arm_backup "$BACKUP" "$BACKUP_ID"
+  export PLUGIN_NS_IN_BACKUP="tenant-primary-plugins"
+  run recreate RESTORE_FROM="$BACKUP" CLUSTER=restore-bats
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"plugin namespaces left to the tenant-operator: tenant-primary-plugins"* ]]
+  python3 - "$STATE/applied-raw.yaml" <<'PLUGINNS'
+import sys, yaml
+seen = {}
+for d in yaml.safe_load_all(open(sys.argv[1])):
+    if not d or d.get("kind") != "Restore":
+        continue
+    spec = d.get("spec") or {}
+    name = d["metadata"]["name"].rsplit("-", 1)[-1]
+    inc = spec.get("includedNamespaces") or []
+    if "tenant-primary-plugins" in inc:
+        sys.exit("Restore %s includes the plugin namespace" % d["metadata"]["name"])
+    seen[name] = spec.get("excludedNamespaces") or []
+for need in ("builtins", "pods", "statefulsets"):
+    assert need in seen, "no %s Restore was applied" % need
+    assert "tenant-primary-plugins" in seen[need], (
+        "the %s Restore does not exclude the plugin namespace: %s" % (need, seen[need]))
+print("builtins, pods and statefulsets Restores exclude the plugin namespace")
+PLUGINNS
+}
+
+@test "a backup with no plugin namespace adds no plugin exclusion (hosted#8)" {
+  arm_backup "$BACKUP" "$BACKUP_ID"
+  run recreate RESTORE_FROM="$BACKUP" CLUSTER=restore-bats
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"plugin namespaces left to the tenant-operator: none"* ]]
+  ! grep -q 'plugins$' "$STATE/applied-raw.yaml"
 }
 
 @test "FAILING FIXTURE: a Restore carrying a Backup-only scoped filter is caught" {
