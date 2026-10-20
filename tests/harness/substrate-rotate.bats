@@ -26,8 +26,15 @@ cmd="$1"; shift
 U="${U:-platform}"
 slots="$(jq -c --arg u "$U" '.key_slots[$u]' "$STATE/key-slots.tfvars.json")"
 active="$(jq -r .active <<<"$slots")"
+# STUB_TF_REQUIRE_INIT: a command other than init fails until init ran, as
+# terraform does on a fresh runner (drill rotation run 1).
+# STUB_TF_OUTPUT_FAIL: terraform output fails.
+if [ -n "${STUB_TF_REQUIRE_INIT:-}" ] && [ "$cmd" != init ] && [ ! -e "$D/tf.inited" ]; then
+  echo "Error: Backend initialization required, please run \"terraform init\"" >&2; exit 1
+fi
+[ "$cmd" != output ] || [ -z "${STUB_TF_OUTPUT_FAIL:-}" ] || { echo "Error: Failed to load state" >&2; exit 1; }
 case "$cmd" in
-  init) exit 0 ;;
+  init) : > "$D/tf.inited"; exit 0 ;;
   plan) for a in "$@"; do case "$a" in -out=*) out="${a#-out=}" ;; esac; done
         jq -n --argjson s "$slots" --slurpfile k "$D/keys.json" '
           [($k[0] | keys[]) as $have | select(($s.keep | index($have)) == null)
@@ -204,7 +211,7 @@ SH
 
 rotate() {
   run env PATH="$D/bin:$PATH" SUBSTRATE_SH="$D/bin/substrate" K2C="$D/bin/k2c" SLEEP_SECS=0 RESTART_TIMEOUT=2 RESTART_PODS_POLL=0 \
-    WANT0="${WANT0:-}" WAIT_SECS="${WAIT_SECS:-0}" QUIET_SECS="${QUIET_SECS:-0}" U="${U:-platform}" TFRES="${TFRES:-}" APPLY_FAIL="${APPLY_FAIL:-}" \
+    STUB_TF_REQUIRE_INIT="${STUB_TF_REQUIRE_INIT:-}" STUB_TF_OUTPUT_FAIL="${STUB_TF_OUTPUT_FAIL:-}" WANT0="${WANT0:-}" WAIT_SECS="${WAIT_SECS:-0}" QUIET_SECS="${QUIET_SECS:-0}" U="${U:-platform}" TFRES="${TFRES:-}" APPLY_FAIL="${APPLY_FAIL:-}" \
     "$REPO/scripts/substrate-rotate.sh" "$STATE" "${E:-staging}" "${U:-platform}"
 }
 slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfvars.json"; }
@@ -301,6 +308,26 @@ slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfva
   rotate
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(slots)" = '{"active":"b","keep":["b"]}' ]
+}
+
+@test "FAILING FIXTURE: an open rotation on a runner with no initialized backend inits first and goes on (drill rotation run 1)" {
+  rotate
+  [ "$status" -eq 1 ]
+  # A fresh runner: nothing is initialized, and the next call is not an apply.
+  rm -f "$D/tf.inited"
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  STUB_TF_REQUIRE_INIT=1 rotate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(slots)" = '{"active":"b","keep":["b"]}' ]
+}
+
+@test "FAILING FIXTURE: a terraform error ends with exit 2 and never with the exit 1 of a wait (drill rotation run 1)" {
+  rotate
+  [ "$status" -eq 1 ]
+  STUB_TF_OUTPUT_FAIL=1 rotate
+  [ "$status" -eq 2 ] || { echo "status ${status}: $output"; false; }
+  # The rotation stays open: the old key is not deleted.
+  [ "$(slots)" = '{"active":"b","keep":["a","b"]}' ]
 }
 
 @test "FAILING FIXTURE: a plan that deletes anything else stops before the apply" {

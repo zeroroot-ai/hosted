@@ -44,7 +44,8 @@
 #                   after the switch. AWS updates the last-used time with a
 #                   delay, so this is longer than that delay.
 #        NS         the release namespace (default gibson)
-# Exit:  0 rotated · 1 stopped, run again later · 2 could not run
+# Exit:  0 rotated · 1 stopped, run again later · 2 could not run (also a
+#          failed command, terraform included)
 #        3 halted: a person must act first (the relay refuses the new SMTP
 #          key, or a consumer used the old key after the switch)
 set -euo pipefail
@@ -86,6 +87,22 @@ VARFILE="envs/$ENV.tfvars"
 [ -s "$SLOTS" ] || die "$SLOTS is missing: run make substrate ENV=$ENV first"
 for tool in terraform aws jq kubectl python3 openssl; do command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH"; done
 
+# THE ROOT IS INITIALIZED BEFORE ANY terraform CALL. A runner is fresh, and a
+# rotation that is already open goes straight to `terraform output` with no
+# apply before it. Without an init that call stops with "Backend
+# initialization required" (drill rotation run 1, each of platform, smtp and
+# dns). stage0_init reads the backend of the env: S3 for drill, the local
+# state file otherwise.
+stage0_init "$TF_DIR" "$ENV" "$STATE"
+
+# A command that fails without a decision of this script is "could not run"
+# (exit 2), never "stopped, run again later" (exit 1). set -e would pass the
+# exit code of the command on, and terraform exits 1 on an error, so a failed
+# terraform call read as a wait and the drill step stayed green. Only stop
+# exits 1 (drill rotation run 1, hosted#59 thread).
+set -E
+trap 'exit 2' ERR
+
 # The keyring members and the cluster Secret keys of each user.
 case "$USER_NAME" in
   platform) MEMBERS="BUCKET_ACCESS_KEY:platform_access_key_id BUCKET_SECRET_KEY:platform_secret_access_key"
@@ -115,7 +132,6 @@ slots_put() {  # $1 active, $2.. keep
 # apply ALLOWED_DELETE: plan and apply; refuse any delete other than ALLOWED_DELETE.
 apply() {
   local work; work="$(mktemp -d)"
-  stage0_init "$TF_DIR" "$ENV" "$STATE"
   tf plan -input=false -no-color -var-file="$VARFILE" -var-file="$SLOTS" -out="$work/plan.out" >/dev/null
   tf show -json "$work/plan.out" > "$work/plan.json"
   local deletes
