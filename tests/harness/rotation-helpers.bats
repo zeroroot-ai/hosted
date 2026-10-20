@@ -681,8 +681,8 @@ refusal_step() {
     sleep() { :; }
     miss() { echo "miss: $*"; return 1; }
     ok() { echo "ok: $*"; }
-    k2c() { return 0; }
-    velero_restart() { return 0; }
+    k2c() { echo "k2c ${1:-<keyring>}" >> "$STUB_DIR/calls"; return 0; }
+    velero_restart() { echo restart >> "$STUB_DIR/calls"; return 0; }
     . "$1"
     # The backup sees the reference time that the step set.
     velero_backup() { echo "reference=$VELERO_RESTARTED_AT" >&2; printf PartiallyFailed; }
@@ -705,6 +705,9 @@ refusal_step() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"miss: the start time of the Velero pod could not be read"* ]] || { echo "$output"; false; }
   [[ "$output" != *"reference="* ]]
+  # Velero ran on the random password. The miss puts the keyring password back
+  # (k2c with no argument) and restarts Velero after it.
+  [ "$(tr '\n' ' ' < "$TMP/calls")" = "k2c /nonexistent/velero.env restart k2c <keyring> restart " ] || { cat "$TMP/calls"; false; }
 }
 
 @test "FAILING FIXTURE: a storage location check with no reference time is not ready (hosted#68 review)" {

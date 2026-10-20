@@ -1054,8 +1054,11 @@ velero_restart() {
 velero_refusal_step() {
   local work="$1" phase
   k2c "$work/velero.env" && velero_restart || { miss "Velero did not restart with another password"; k2c; velero_restart; return 1; }
+  # Velero runs on the random password now. A miss here puts the keyring
+  # password back and restarts it, as the failure path above does, or each
+  # scheduled backup fails afterwards.
   VELERO_RESTARTED_AT="$(velero_pod_start)" \
-    || { miss "the start time of the Velero pod could not be read, so the storage location check has no reference time"; return 1; }
+    || { miss "the start time of the Velero pod could not be read, so the storage location check has no reference time"; k2c; velero_restart; return 1; }
   phase="$(velero_backup)"
   k2c && velero_restart || { miss "Velero did not restart with the keyring password"; return 1; }
   VELERO_RESTARTED_AT="$(velero_pod_start)" \
