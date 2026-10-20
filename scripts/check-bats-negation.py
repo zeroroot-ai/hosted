@@ -68,7 +68,10 @@ def mask(line: str) -> str:
         else:
             out.append(c)
         i += 1
-    return "".join(out)
+    masked = "".join(out)
+    # Inside [[ ... ]] a `!` and a `&&` are operators of the test, not of the
+    # shell: blank the inside, so they are not read as a statement.
+    return re.sub(r"\[\[.*?\]\]", lambda m: "[[" + " " * (len(m.group(0)) - 4) + "]]", masked)
 
 
 def heredoc_start(line: str):
@@ -83,11 +86,38 @@ def heredoc_start(line: str):
     return None
 
 
-# A handler after `||` that can fail the test: false, exit, return 1, or a
-# call that dies. `|| true` or `|| echo ...` lets the test go on, so the
+# A handler after `||` that can fail the test: the first word of one of its
+# commands is false, die or fail, or it is exit or return with no code or a
+# code that is not 0. `|| true` and `|| echo fail` let the test go on, so the
 # negation stays inert.
-FAILING_HANDLER = re.compile(r"\|\|(?=.*\b(?:false|exit\s+[1-9]\d*|return\s+[1-9]\d*|die|fail)\b)")
+CASE_HEAD = re.compile(r"^case\b.*?\bin\s+")
 CASE_LABEL = re.compile(r"^[^\s()]+\)\s*(?=!)")
+FAILING_WORDS = {"false", "die", "fail", "fatal"}
+
+
+def handler_fails(masked: str, pos: int) -> bool:
+    """True when the handler that starts at pos (just after `||`) can fail."""
+    rest = masked[pos:].lstrip()
+    if rest.startswith("{"):
+        depth, end = 0, len(rest)
+        for i, c in enumerate(rest):
+            depth += (c == "{") - (c == "}")
+            if depth == 0:
+                end = i
+                break
+        body = rest[1:end]
+    else:
+        m = re.search(r";|&&", rest)
+        body = rest[: m.start()] if m else rest
+    for cmd in re.split(r";|&&|\|\|", body):
+        words = cmd.split()
+        if not words:
+            continue
+        if words[0] in FAILING_WORDS:
+            return True
+        if words[0] in ("exit", "return") and (len(words) == 1 or words[1] != "0"):
+            return True
+    return False
 
 
 def bare_negation(line: str) -> bool:
@@ -104,11 +134,12 @@ def bare_negation(line: str) -> bool:
     for i, start in enumerate(bounds):
         end = bounds[i + 1] - 1 if i + 1 < len(bounds) else len(masked)
         seg = LEAD.sub("", masked[start:end].strip())
-        seg = CASE_LABEL.sub("", seg)
+        seg = CASE_LABEL.sub("", CASE_HEAD.sub("", seg))
         if not BARE.match(seg):
             continue
-        # The handler may run on past the next `;` ( `|| { echo x; false; }` ).
-        if "||" in seg and FAILING_HANDLER.search(masked[start:]):
+        # The handler of the first `||`, up to its own end.
+        at = masked.find("||", start)
+        if "||" in seg and at != -1 and handler_fails(masked, at + 2):
             continue
         if seg.count(")") > seg.count("("):
             continue  # the last command of ( ... ) or $( ... )
@@ -169,7 +200,7 @@ def expected_lines(path: pathlib.Path):
 def selftest() -> int:
     bads = sorted(FIXTURES.glob("bad-*.bats"))
     goods = sorted(FIXTURES.glob("good-*.bats"))
-    if len(bads) < 13 or not goods:
+    if len(bads) < 16 or not goods:
         print("check-bats-negation: selftest: the fixtures are missing", file=sys.stderr)
         return 2
     for f in bads + goods:
