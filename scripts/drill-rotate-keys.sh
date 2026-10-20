@@ -12,7 +12,7 @@
 # to it, each reader restarts, and the old key is deleted only after AWS
 # reports it unused since the switch. One rotation takes longer than one run:
 # the new key must be seen in use (WAIT_SECS), and the old key must then stay
-# unused for QUIET_SECS. So substrate-rotate.sh stops with exit 100 when it must
+# unused for QUIET_SECS. So substrate-rotate.sh stops with exit 10 when it must
 # wait, and a later run continues. The stage 0 files of drill live in AWS
 # (scripts/stage0-store.sh), so each run sees the state the last one left.
 #
