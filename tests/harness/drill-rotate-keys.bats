@@ -48,9 +48,18 @@ SH
 }
 
 @test "a rotation that waits is not a failure, and says that a later run continues" {
-  STUB_platform=1 run "$REPO_ROOT/scripts/drill-rotate-keys.sh" continue
+  STUB_platform=10 run "$REPO_ROOT/scripts/drill-rotate-keys.sh" continue
   [ "$status" -eq 0 ]
   assert_output_has "platform: the rotation waits; a later drill run continues it"
+}
+
+@test "FAILING FIXTURE: with-cluster.sh that ran nothing (exit 1) fails the step, never reads as a wait" {
+  # with-cluster.sh die() exits 1: no instance, two instances, no session
+  # plugin, an API that does not answer. Only exit 10 is a wait.
+  STUB_platform=1 run "$REPO_ROOT/scripts/drill-rotate-keys.sh" continue
+  [ "$status" -eq 1 ]
+  assert_output_has "the access key rotation failed for: platform"
+  [[ "$output" != *"the rotation waits"* ]]
 }
 
 @test "FAILING FIXTURE: a rotation that fails fails the step and names the user" {
