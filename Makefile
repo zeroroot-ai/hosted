@@ -1281,12 +1281,24 @@ check-overlay-belief-trainer: ## Every cloud overlay pins the belief trainer cop
 	@bats tests/harness/belief-trainer-image.bats
 
 .PHONY: check-verbs
-check-verbs: require-charts charts-vendored ## The bringup verbs fail closed: no ENV, a RESTORE_FROM that is not a backup, a used Postgres archive, a keyring member missing or unquoted, a substrate line that does not answer
-	@printf "$(GREEN)▶$(NC) check-verbs...\n"
+# check-verbs runs in two targets of about five minutes each, one job each in
+# ci.yml (the verbs file took 9 minutes 55 seconds of a 12 minute limit). The
+# split follows the time of each file in the run of hosted#76, and
+# scripts/check-ci-lanes.py keeps both jobs in the gate. A new bats file goes
+# in the shorter one.
+.PHONY: check-verbs-a check-verbs-b
+check-verbs: check-verbs-a check-verbs-b ## The bringup verbs fail closed: no ENV, a RESTORE_FROM that is not a backup, a used Postgres archive, a keyring member missing or unquoted, a substrate line that does not answer
+
+check-verbs-a: require-charts charts-vendored ## The first half of check-verbs: the restore and recreate verbs
+	@printf "$(GREEN)▶$(NC) check-verbs-a...\n"
+	@bats tests/harness/restore-ec2.bats
+	@bats tests/harness/restore.bats
 	@bats tests/harness/recreate.bats
 	@bats tests/harness/instance-type.bats
-	@bats tests/harness/restore.bats
-	@bats tests/harness/restore-ec2.bats
+	@bats tests/harness/zitadel-console.bats
+
+check-verbs-b: require-charts charts-vendored ## The second half of check-verbs: preflight, rotation, the probes and the rest
+	@printf "$(GREEN)▶$(NC) check-verbs-b...\n"
 	@bats tests/harness/preflight.bats
 	@bats tests/harness/keyring-credential.bats
 	@bats tests/harness/with-cluster.bats
@@ -1306,7 +1318,6 @@ check-verbs: require-charts charts-vendored ## The bringup verbs fail closed: no
 	@bats tests/harness/coredns-platform-hosts.bats
 	@bats tests/harness/ssm-forward.bats
 	@bats tests/harness/ec2-cluster-access.bats
-	@bats tests/harness/zitadel-console.bats
 
 # Air-gap manifest freshness (deploy#1171): airgap/{images.txt,images.yaml} in charts
 # are generated from `helm template` over every ci/ profile. Deliberately NOT in

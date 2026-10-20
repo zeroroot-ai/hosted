@@ -1,3 +1,4 @@
+# expect: no env value of ci-required reads needs.verbs-b.result
 name: ci
 on:
   pull_request:
@@ -10,18 +11,24 @@ jobs:
     timeout-minutes: 12
     steps:
       - run: make -o check-verbs check
-  verbs:
+  verbs-a:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
-      - run: make check-verbs
+      - run: make check-verbs-a
+  verbs-b:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - run: make check-verbs-b
   ci-required:
-    needs: [checks, verbs]
+    needs: [checks, verbs-a, verbs-b]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     env:
       CHECKS_RESULT: ${{ needs.checks.result }}
+      VERBS_A_RESULT: ${{ needs.verbs-a.result }}
     steps:
       - run: |
-          [ "${CHECKS_RESULT}" = success ]
+          [ "${CHECKS_RESULT}" = success ] && [ "${VERBS_A_RESULT}" = success ]

@@ -15,8 +15,8 @@
 # THE GATE RUNS IN TWO PARALLEL JOBS. The merge gate budget is ten minutes.
 # `make check` took 14 minutes 46 seconds on main, 8 of them in check-verbs, in
 # a job limit of 15. The run of 14:13 UTC on main and the run of hosted#70 were
-# cancelled by that limit. `checks` runs everything but check-verbs, `verbs`
-# runs check-verbs, and `ci-required` reports the one verdict. The three run on
+# cancelled by that limit. `checks` runs everything but check-verbs, `verbs-a`
+# and `verbs-b` run its two halves, and `ci-required` reports the one verdict. The jobs run on
 # pull_request, merge_group and push to main. scripts/check-ci-lanes.py keeps
 # the split.
 # ----------------------------------------------------------------------------
@@ -59,7 +59,7 @@ jobs:
 
       - uses: ./.github/actions/ci-setup
 
-      # Every guard of make check but check-verbs, which the `verbs` job runs.
+      # Every guard of make check but check-verbs, which the two verbs jobs run.
       # -o makes make treat check-verbs as made.
       - name: make check, without check-verbs
         run: CHARTS_ROOT="$GITHUB_WORKSPACE/charts" make -o check-verbs check
@@ -76,15 +76,25 @@ jobs:
           git fetch origin "$BASE_REF"
           make check-promotion-pr BASE="origin/${BASE_REF}"
 
-  verbs:
-    name: verbs
+  verbs-a:
+    name: verbs-a
     runs-on: ubuntu-latest
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
       - uses: ./.github/actions/ci-setup
-      - name: make check-verbs
-        run: CHARTS_ROOT="$GITHUB_WORKSPACE/charts" make check-verbs
+      - name: make check-verbs-a
+        run: CHARTS_ROOT="$GITHUB_WORKSPACE/charts" make check-verbs-a
+
+  verbs-b:
+    name: verbs-b
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+      - uses: ./.github/actions/ci-setup
+      - name: make check-verbs-b
+        run: CHARTS_ROOT="$GITHUB_WORKSPACE/charts" make check-verbs-b
 
   # The ruleset requires the context `ci-required`. Keep this name in step with
   # rulesets/repo/hosted.json in zeroroot-ai/.github, or main blocks on a check
@@ -93,16 +103,18 @@ jobs:
   # job (a job timeout, a concurrency cancel) is not a pass.
   ci-required:
     name: ci-required
-    needs: [checks, verbs]
+    needs: [checks, verbs-a, verbs-b]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     timeout-minutes: 2
     env:
       CHECKS_RESULT: ${{ needs.checks.result }}
-      VERBS_RESULT: ${{ needs.verbs.result }}
+      VERBS_A_RESULT: ${{ needs.verbs-a.result }}
+      VERBS_B_RESULT: ${{ needs.verbs-b.result }}
     steps:
       - name: Every job succeeded
         run: |
           echo "checks: ${CHECKS_RESULT}"
-          echo "verbs: ${VERBS_RESULT}"
-          [ "${CHECKS_RESULT}" = success ] && [ "${VERBS_RESULT}" = success ]
+          echo "verbs-a: ${VERBS_A_RESULT}"
+          echo "verbs-b: ${VERBS_B_RESULT}"
+          [ "${CHECKS_RESULT}" = success ] && [ "${VERBS_A_RESULT}" = success ] && [ "${VERBS_B_RESULT}" = success ]
