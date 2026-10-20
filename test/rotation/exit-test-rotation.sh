@@ -88,30 +88,10 @@ mask() { [ -z "${GITHUB_ACTIONS:-}" ] || printf '::add-mask::%s\n' "$1"; }
 # new_password: 43 letters and digits, the shape of the OpenBao seed kind `pw`.
 new_password() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 43; }
 
-# STDIN_LOST: the exit code of an in-pod reader that got no secret on stdin.
-# The stdin of `kubectl exec -i` can arrive empty with the exec exit 0 (drill
-# runs 39171920065 and 39175834377). An empty secret is then no credential,
-# and the service refuses it: redis-cli answers NOAUTH, OpenBao answers 403,
-# the dashboard refuses the session. A refusal check would read that as a
-# pass. So each reader below exits STDIN_LOST on an empty read, and the
-# caller sends the secret again, at most 4 times (audit of the restore path,
-# 2026-10-19).
-STDIN_LOST=97
-
-# redis_cli POD PASSWORD ARGS...: run redis-cli in POD. The password goes on
-# stdin, never on an argv that a process list or a log could show.
-redis_cli() {
-  local pod="$1" pw="$2" out rc; shift 2
-  for _ in 1 2 3 4; do
-    rc=0
-    out="$(printf '%s\n' "$pw" | kubectl -n "$NS" exec -i "$pod" -c redis-stack -- \
-      sh -c 'IFS= read -r p; [ -n "$p" ] || exit 97; REDISCLI_AUTH="$p" exec redis-cli --no-auth-warning "$@"' redis-cli "$@" 2>&1)" || rc=$?
-    [ "$rc" -eq "$STDIN_LOST" ] || { printf '%s\n' "$out"; return "$rc"; }
-    sleep 1
-  done
-  printf 'the password did not reach redis-cli on stdin in 4 tries\n'
-  return "$STDIN_LOST"
-}
+# STDIN_LOST and redis_cli: scripts/lib/redis-cli.sh. A reader in the pod
+# that got no secret on stdin exits STDIN_LOST, and the caller sends the
+# secret again. The same reader serves the restore (hosted#7).
+. "$(dirname "${BASH_SOURCE[0]}")/../../scripts/lib/redis-cli.sh"
 
 # --- redis-password ----------------------------------------------------------
 # Source: the OpenBao key gibson-redis-password. Path: ESO, and the CronJob

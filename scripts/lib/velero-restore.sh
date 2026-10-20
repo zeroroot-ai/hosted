@@ -69,6 +69,7 @@
 RESTORE_APP_TIMEOUT=600
 RESTORE_SYNC_TIMEOUT=600
 RESTORE_STORE_TIMEOUT=600
+RESTORE_REDIS_TIMEOUT=900
 RESTORE_ESO_TIMEOUT=600
 RESTORE_CLASSES_TIMEOUT=600
 RESTORE_DATA_TIMEOUT=840
@@ -77,6 +78,10 @@ RESTORE_TENANTS_TIMEOUT=600
 RESTORE_LABELS_TIMEOUT=2400
 
 restore_bound() { printf '%s' "${RESTORE_TIMEOUT:-$1}"; }
+
+# redis_cli: the password goes on stdin (scripts/lib/redis-cli.sh).
+# shellcheck source=redis-cli.sh
+. "$(dirname "${BASH_SOURCE[0]}")/redis-cli.sh"
 
 # resolve_named_backup — the named backup, proven to exist BEFORE anything is
 # destroyed.
@@ -541,6 +546,126 @@ YAML
   printf '  ✓ the secret store volume is back (%s PodVolumeRestore completed)\n' "$moved"
 }
 
+# THE REDIS VOLUME COMES BACK BEFORE THE UMBRELLA, LIKE THE SECRET STORE
+# (hosted#7). Redis holds the documents of every tenant and the Timeline tail,
+# and the platform backup is their only copy (ADR-0075, ADR-0163). Argo makes
+# the Redis pod first once the umbrella exists, and Velero moves data only
+# into a pod that it creates, so this Restore runs before. Redis is not a
+# protected component of gibson-platform-identity-pods, and that policy is not
+# installed yet, so velero-server may create the pod.
+#
+# Two facts shape the Restore:
+#   - The pod names a PriorityClass that the chart makes at sync wave -20.
+#     The class does not exist yet, so the API server would refuse the pod.
+#     The resource modifier removes spec.priorityClassName from the restored
+#     pod. The StatefulSet replaces the pod with its own spec later, and that
+#     is the one restart on the real Secret (wait_redis_on_real_secret).
+#   - The pod has no Secret volume. The password is an env value of the init
+#     container init-acl and of redis-stack. A missing Secret blocks those two
+#     containers and no other, and the restore-wait init container of Velero
+#     comes first, so the data arrives while the Secret is missing. The
+#     modifier does NOT make that env optional: init-acl would then write an
+#     ACL file with an empty password, and Redis would start open.
+REDIS_RESTORE_MODIFIER="restore-redis-no-priorityclass"
+
+redis_modifier() {
+  cat <<YAML
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ${REDIS_RESTORE_MODIFIER}
+  namespace: ${VELERO_NS}
+data:
+  modifier.yaml: |
+    version: v1
+    resourceModifierRules:
+      - conditions:
+          groupResource: pods
+          namespaces: ["${NS}"]
+          resourceNameRegex: "^${NS}-redis-stack-[0-9]+$"
+        patches:
+          - operation: remove
+            path: "/spec/priorityClassName"
+YAML
+}
+
+restore_redis() {
+  local name="${RESTORE_FROM}-redis" moved
+  log "restore 1b/3: the Redis volume, before the umbrella makes its StatefulSet"
+  redis_modifier | kubectl apply -f - >/dev/null \
+    || die "could not create the resource modifier ${VELERO_NS}/${REDIS_RESTORE_MODIFIER}. Without it the restored Redis pod names a PriorityClass that no object in the cluster can make yet"
+  kubectl apply -f - >/dev/null <<YAML
+apiVersion: velero.io/v1
+kind: Restore
+metadata:
+  name: ${name}
+  namespace: ${VELERO_NS}
+spec:
+  backupName: ${RESTORE_FROM}
+  includedNamespaces: ["${NS}"]
+  resourceModifier:
+    kind: ConfigMap
+    name: ${REDIS_RESTORE_MODIFIER}
+  # The legacy filter pair, as in restore 1: a Restore has no scoped filters.
+  # The two volume kinds are in the list so that Velero makes a
+  # PodVolumeRestore, and the label keeps every other object out. The
+  # ConfigMap is the one that the pod mounts as a volume: a pod with a missing
+  # ConfigMap volume never starts, and its data restore never runs.
+  includedResources:
+    - configmaps
+    - persistentvolumeclaims
+    - persistentvolumes
+    - pods
+  labelSelector:
+    matchLabels:
+      app.kubernetes.io/component: redis
+  existingResourcePolicy: none
+YAML
+  wait_restore "$name" "$RESTORE_REDIS_TIMEOUT"
+  moved="$(volume_restores_completed "$name")"
+  if [ "${moved:-0}" -lt 1 ]; then
+    restore_diag "$name"
+  fi
+  [ "${moved:-0}" -ge 1 ] \
+    || die "the Redis restore reported Completed and moved NO volume data (0 PodVolumeRestores). Completed is not proof that data came back: the selector may match no pod, or the backup holds no Redis volume (hosted#7)"
+  printf '  ✓ the Redis volume is back (%s PodVolumeRestore completed)\n' "$moved"
+}
+
+# wait_redis_on_real_secret — after the umbrella and External Secrets, Redis
+# runs with the real Secret, and the restored data is in it (hosted#7).
+#
+# The restored pod could not start without the Secret. Then the StatefulSet
+# adopted it, and it replaces the pod once with the chart's own spec. This
+# waits for the end of that: the pod belongs to the StatefulSet, has its
+# update revision, and is Ready. Then it proves the password. A pod that only
+# runs proves nothing: NOAUTH and WRONGPASS are answers too, so the probe
+# needs PONG from the password of the Secret.
+wait_redis_on_real_secret() {
+  local bound deadline sts pod revs want pw ping
+  bound="$(restore_bound "$RESTORE_REDIS_TIMEOUT")"
+  deadline=$(( $(date +%s) + bound ))
+  sts="${NS}-redis-stack"; pod="${sts}-0"
+  while :; do
+    revs="$(kubectl -n "$NS" get "statefulset/${sts}" -o jsonpath='{.status.updateRevision}' 2>/dev/null)" || revs=""
+    want="$(kubectl -n "$NS" get "pod/${pod}" \
+      -o jsonpath='{.metadata.labels.controller-revision-hash}|{.metadata.ownerReferences[0].kind}|{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null)" || want=""
+    if [ -n "$revs" ] && [ "$want" = "${revs}|StatefulSet|True" ]; then break; fi
+    printf '  waiting for %s: revision %s, pod %s          \r' "$pod" "${revs:-<none>}" "${want:-<none>}"
+    [ "$(date +%s)" -lt "$deadline" ] || {
+      printf '\n' >&2
+      die "Redis pod ${NS}/${pod} is not Ready on the revision ${revs:-<none>} of its StatefulSet within ${bound}s (pod: ${want:-<none>}). The restored pod could not start until External Secrets wrote the password Secret, and the StatefulSet replaces it once after that"
+    }
+    sleep 10
+  done
+  pw="$(redis_password)" || pw=""
+  [ -n "$pw" ] || die "the Secret ${NS}/${sts} holds no Redis password, so Redis cannot be proved"
+  ping="$(redis_cli "$pod" "$pw" PING)" || ping="${ping:-failed}"
+  pw=""
+  [ "$ping" = PONG ] \
+    || die "Redis answers '${ping}' to PING with the password of the Secret ${NS}/${sts}, not PONG. The restored data is in a Redis that refuses its own Secret"
+  printf '  ✓ Redis runs on the real Secret and answers PONG to its password (restarted once by the StatefulSet)\n'
+}
+
 # wait_eso — every Secret is out of the restored store before ANY other
 # restore runs.
 #
@@ -845,6 +970,10 @@ wait_tenant_namespace_labels() {
   done
 }
 
+# The volumes that must come back, as pod/volume. A backup that lists none of
+# one of them is refused (release_volumes_accounted).
+release_must_volumes() { printf '%s' "${NS}-redis-stack-0/data"; }
+
 # release_volume_class <pod/volume> — the class of one volume of the release
 # namespace that the backup holds. It sets REL_CLASS and REL_WHY. Every volume
 # with data has a class here, so a new volume is never ignored in silence
@@ -884,29 +1013,52 @@ release_volume_class() {
 # release_volumes_accounted "<pod/volume phase bytes>…" — each volume with data
 # in the release namespace has a class, and each class is met.
 release_volumes_accounted() {
-  local list="$1" v phase size got must="" lost="" unknown="" missing=""
+  local list="$1" v phase size got must="" lost="" unknown="" missing="" listed="" want_bytes
   while read -r v phase size; do
     [ -n "$v" ] || continue
-    if ! [[ "$size" =~ ^[0-9]+$ ]] || [ "$size" -eq 0 ]; then
-      printf '  - not checked: %s/%s (empty)\n' "$NS" "$v"; continue
-    fi
+    listed="${listed} ${v} "
     release_volume_class "$v"
+    want_bytes=0
+    [[ "$size" =~ ^[0-9]+$ ]] && [ "$size" -gt 0 ] && want_bytes=1
     case "$REL_CLASS" in
-      unknown) unknown="${unknown}${NS}/${v} (phase=${phase}, bytes=${size}) " ;;
-      derived) printf '  - derived by design: %s/%s (%s)\n' "$NS" "$v" "$REL_WHY" ;;
-      restore1) printf '  - restored by restore 1: %s/%s (%s)\n' "$NS" "$v" "$REL_WHY" ;;
       must)
-        [ "$phase" = Completed ] || lost="${lost}${NS}/${v} (${phase}) "
-        must="${must:+${must} }${NS}/${v}" ;;
+        # The class is read first. A failed PodVolumeBackup has no
+        # totalBytes, so the size says nothing about it. Only a Completed one
+        # with 0 bytes is an empty volume.
+        if [ "$phase" != Completed ]; then
+          lost="${lost}${NS}/${v} (${phase}) "
+        elif [ "$want_bytes" -eq 0 ]; then
+          printf '  - not checked: %s/%s (empty)\n' "$NS" "$v"
+        else
+          must="${must:+${must} }${NS}/${v}"
+        fi ;;
+      *)
+        if [ "$want_bytes" -eq 0 ]; then
+          printf '  - not checked: %s/%s (empty)\n' "$NS" "$v"
+          continue
+        fi
+        case "$REL_CLASS" in
+          unknown) unknown="${unknown}${NS}/${v} (phase=${phase}, bytes=${size}) " ;;
+          derived) printf '  - derived by design: %s/%s (%s)\n' "$NS" "$v" "$REL_WHY" ;;
+          restore1) printf '  - restored by restore 1: %s/%s (%s)\n' "$NS" "$v" "$REL_WHY" ;;
+        esac ;;
     esac
   done <<< "$list"
+  # A backup that lists no PodVolumeBackup for a volume that must come back
+  # holds nothing of it. The empty list of a missing volume must not pass.
+  for v in $(release_must_volumes); do
+    case "$listed" in *" ${v} "*) ;; *) missing="${missing}${NS}/${v} " ;; esac
+  done
+  [ -z "$missing" ] \
+    || die "backup ${RESTORE_FROM} lists no PodVolumeBackup for: ${missing}These volumes must come back, so a backup without them cannot restore them (hosted#7)"
   [ -z "$unknown" ] \
     || die "the backup ${RESTORE_FROM} holds volumes of the release namespace with no class: ${unknown}Name each one in release_volume_class as derived, restore1 or must (hosted#7). A volume that no class names is a volume that nobody decided about"
   [ -z "$lost" ] \
     || die "backup ${RESTORE_FROM} did not save these volumes that must come back: ${lost}The backup does not hold them"
   [ -n "$must" ] || return 0
+  missing=""
   got="$(kubectl -n "$VELERO_NS" get podvolumerestores.velero.io \
-    -l "velero.io/restore-name in (${RESTORE_FROM}-openbao,${RESTORE_FROM}-builtins,${RESTORE_FROM}-pods,${RESTORE_FROM}-statefulsets)" \
+    -l "velero.io/restore-name in (${RESTORE_FROM}-openbao,${RESTORE_FROM}-redis,${RESTORE_FROM}-builtins,${RESTORE_FROM}-pods,${RESTORE_FROM}-statefulsets)" \
     -o jsonpath='{range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.phase}{"\n"}{end}')" \
     || die "could not list the PodVolumeRestores of ${RESTORE_FROM}"
   for v in $must; do
@@ -942,7 +1094,7 @@ release_volumes_accounted() {
 # the pods Restore excludes that namespace (hosted#796), so each volume there
 # has a class that says how it gets its data, or that it needs none (hosted#7).
 tenant_volumes_restored() {
-  local pvbs verdict want lost got missing
+  local pvbs verdict want lost got missing rel
   [ -s "$WORK/backup.tar.gz" ] \
     || die "the archive of ${RESTORE_FROM} is not at ${WORK}/backup.tar.gz, so the pods of the backup and their labels are not known"
   pvbs="$(kubectl -n "$VELERO_NS" get podvolumebackups.velero.io -l velero.io/backup-name="$RESTORE_FROM" \
@@ -985,7 +1137,7 @@ for line in sys.stdin:
         print("SKIP %s empty" % name)
 ' "$WORK/backup.tar.gz" "$NS")" \
     || die "could not read the pods of ${RESTORE_FROM} from its archive"
-  release_volumes_accounted "$(printf '%s\n' "$verdict" | awk '$1 == "REL" {print $2, $3, $4}')"
+  rel="$(printf '%s\n' "$verdict" | awk '$1 == "REL" {print $2, $3, $4}')"
   verdict="$(printf '%s\n' "$verdict" | awk '$1 != "REL"')"
   printf '%s\n' "$verdict" | while read -r tag v why; do
     [ "$tag" = SKIP ] || continue
@@ -1007,12 +1159,14 @@ for line in sys.stdin:
     restore_diag "$1"
     die "restore ${1} moved no data for: ${missing}The backup holds bytes for each one, and no PodVolumeRestore of this Restore completed for it. The pod was there before the Restore: a StatefulSet restored first makes it at once on an empty volume"
   fi
+  release_volumes_accounted "$rel"
 }
 
 restore_data() {
   local builtins="${RESTORE_FROM}-builtins" pods="${RESTORE_FROM}-pods" statefulsets="${RESTORE_FROM}-statefulsets"
   local tenants="${RESTORE_FROM}-tenants" moved
   wait_priority_classes
+  wait_redis_on_real_secret
   log "restore 2/3: namespaces, claims and volumes, from backup ${RESTORE_FROM}"
   precreate_tenant_namespaces
   kubectl apply -f - >/dev/null <<YAML

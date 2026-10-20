@@ -310,7 +310,17 @@ for d in docs:
   # The tenant volume check of the pods Restore: the backup canary is the one
   # tenant volume with data here, and the pods Restore moved it.
   "-n velero get podvolumebackups.velero.io -l velero.io/backup-name=${BACKUP} -o jsonpath={range .items[*]}{.spec.pod.namespace}{\"\\t\"}{.spec.pod.name}{\"\\t\"}{.spec.volume}{\"\\t\"}{.status.phase}{\"\\t\"}{.status.progress.totalBytes}{\"\\n\"}{end}")
-    printf 'tenant-backup-canary\tbackup-canary\tdata\tCompleted\t65\n'; exit 0 ;;
+    printf 'tenant-backup-canary\tbackup-canary\tdata\tCompleted\t65\n'
+    printf 'gibson\tgibson-redis-stack-0\tdata\tCompleted\t169356\n'; exit 0 ;;
+  # The PodVolumeRestores of every Restore of the run (volumes that must come back).
+  "-n velero get podvolumerestores.velero.io -l velero.io/restore-name in ("*)
+    printf 'gibson/gibson-redis-stack-0/data Completed\n'; exit 0 ;;
+  # Redis on the real Secret after the umbrella (hosted#7).
+  "-n gibson get statefulset/gibson-redis-stack -o jsonpath={.status.updateRevision}") printf 'rev1'; exit 0 ;;
+  "-n gibson get pod/gibson-redis-stack-0 -o jsonpath="*) printf 'rev1|StatefulSet|True'; exit 0 ;;
+  "-n gibson get secret gibson-redis-stack -o json")
+    printf '{"data":{"redis-password":"%s"}}' "$(printf '%s' hunter2 | base64)"; exit 0 ;;
+  "-n gibson exec -i gibson-redis-stack-0 -c redis-stack -- sh -c "*) cat > /dev/null; echo PONG; exit 0 ;;
   "-n velero get podvolumerestores.velero.io -l velero.io/restore-name=${BACKUP}-pods -o jsonpath={range .items[*]}{.spec.pod.namespace}/{.spec.pod.name}/{.spec.volume} {.status.phase}{\"\\n\"}{end}")
     printf 'tenant-backup-canary/backup-canary/data Completed\n'; exit 0 ;;
   # The PodVolumeRestores that hold a Restore open: the ones with no phase at
@@ -508,6 +518,7 @@ refute_cluster_touched() {
   run recreate RESTORE_FROM="$BACKUP" CLUSTER=restore-bats
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(restores)" = "Restore/${BACKUP}-openbao
+Restore/${BACKUP}-redis
 Restore/${BACKUP}-builtins
 Restore/${BACKUP}-pods
 Restore/${BACKUP}-statefulsets
@@ -592,7 +603,8 @@ sys.exit(0 if order.index('Restore/$BACKUP-openbao') < order.index('Application/
     STUB_PC_MISSING=1 RESTORE_TIMEOUT=1
   [ "$status" -ne 0 ]
   [[ "$output" == *"PriorityClass gibson-platform gibson-platform-critical tenant-neo4j did not appear"* ]]
-  [ "$(restores)" = "Restore/${BACKUP}-openbao" ]
+  [ "$(restores)" = "Restore/${BACKUP}-openbao
+Restore/${BACKUP}-redis" ]
 }
 
 @test "no Restore the verb builds carries priorityclasses: they are chart-owned and Velero cannot create them" {
@@ -621,7 +633,8 @@ sys.exit(0 if seen == 5 else "expected 5 Restores, saw %d" % seen)
   [[ "$output" == *"External Secrets did not sync"* ]]
   [[ "$output" == *"CreateContainerConfigError"* ]]
   # The secret store restore ran. The two that would land pods did NOT.
-  [ "$(restores)" = "Restore/${BACKUP}-openbao" ]
+  [ "$(restores)" = "Restore/${BACKUP}-openbao
+Restore/${BACKUP}-redis" ]
 }
 
 @test "FAILING FIXTURE: a Restore that never finishes names the pods that held it open" {
@@ -729,7 +742,7 @@ print("OK  %d Restore(s), every field declared by the shipped Velero CRD" % seen
   [ "$status" -eq 0 ]
   run restore_fields_ok
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"5 Restore(s)"* ]]
+  [[ "$output" == *"6 Restore(s)"* ]]
 }
 
 @test "a Restore that narrows to pods also names both volume kinds, or it moves no data" {
@@ -932,6 +945,7 @@ sys.exit("no -tenants Restore was applied")
   [[ "$output" == *"replicas/updated/available=2/1/1"* ]]
   # The secret store and the built-ins restored; the tenant records did NOT.
   [ "$(restores)" = "Restore/${BACKUP}-openbao
+Restore/${BACKUP}-redis
 Restore/${BACKUP}-builtins
 Restore/${BACKUP}-pods
 Restore/${BACKUP}-statefulsets" ]

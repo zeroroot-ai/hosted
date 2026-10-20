@@ -867,6 +867,7 @@ wait_apps
 
 if [ -n "$RESTORE_FROM" ]; then
   restore_secret_store
+  restore_redis
 fi
 
 

@@ -168,8 +168,9 @@ if [ -n "$RESTORE_FROM" ]; then
     || die "the Velero server never became ready, so nothing can read backup '${RESTORE_FROM}'"
 
   restore_secret_store
+  restore_redis
 
-  log "restore: the secret store is home, so the platform may now be created"
+  log "restore: the secret store and Redis are home, so the platform may now be created"
   # The gibson Application FIRST, with the recovery values, so no sync of
   # the chart runs with bootstrap.initdb. The app-of-apps then adopts it and
   # keeps the parameters (the one path it ignores, D91).

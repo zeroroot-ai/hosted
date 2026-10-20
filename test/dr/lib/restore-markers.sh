@@ -14,6 +14,12 @@
 #   the platform database (CNPG)   a row in restore_loop_marker
 #   the secret store (Velero)      the master transit key of the tenant keys:
 #                                  an HMAC of a marker under it
+#   the tenant Redis (Velero)      a RedisJSON document and a stream entry in
+#                                  the logical DB of the tenant. They are the
+#                                  two classes of key that must survive: the
+#                                  documents of a tenant (missions) and the
+#                                  Timeline tail (ADR-0163). The master index
+#                                  in DB 0 must come back for the DB to be found
 #
 # The tenant key of each tenant is HMAC-SHA256(master transit key, tenant id),
 # made by the tenant-operator (gibson operators/tenant/internal/clients/vault
@@ -95,6 +101,37 @@ bao_field() {
   die "bao returned no output in 4 attempts for a command that always prints one. The answer was lost"
 }
 
+# --- the tenant Redis ------------------------------------------------------
+
+# shellcheck source=../../../scripts/lib/redis-cli.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../../scripts/lib/redis-cli.sh"
+
+REDIS_MASTER_INDEX="gibson:tenant:index"
+REDIS_MARKER_DOC="gibson:restore-loop:mission"
+REDIS_MARKER_STREAM="gibson:restore-loop:timeline"
+
+# redis_do <db> <args...> — one redis-cli call in the Redis pod, with the
+# password of the Secret on stdin. db is the logical DB, or 0.
+redis_do() {
+  local db="$1" pw out rc=0; shift
+  pw="$(redis_password)"
+  [ -n "$pw" ] || die "the Secret ${NS}/${NS}-redis-stack holds no Redis password"
+  out="$(redis_cli "${NS}-redis-stack-0" "$pw" -n "$db" "$@")" || rc=$?
+  pw=""
+  [ "$rc" -eq 0 ] || die "redis-cli $1 failed (exit ${rc}): ${out:0:200}"
+  printf '%s' "$out"
+}
+
+# redis_tenant_db — the logical DB of the tenant, from the master index in DB
+# 0. The index comes back with the volume, so an empty answer after a restore
+# means the volume did not.
+redis_tenant_db() {
+  local idx
+  idx="$(redis_do 0 HGET "$REDIS_MASTER_INDEX" "$TENANT")"
+  [[ "$idx" =~ ^[0-9]+$ ]] || return 1
+  printf '%s' "$idx"
+}
+
 # --- the platform database -------------------------------------------------
 
 # psql <statement> — run one statement in the CNPG primary. Postgres is the
@@ -134,6 +171,46 @@ wait_for() {
   done
 }
 
+# markers_redis_seed / _check / _absent: the tenant Redis records. The three
+# are called by markers_seed, markers_check and markers_absent below, and
+# tests/harness/restore-markers-redis.bats runs them on their own.
+markers_redis_seed() {
+  local db
+  # The tenant Redis. Redis writes its append-only file each second, so the
+  # marker is given time to reach the volume before the backup reads it.
+  db="$(redis_tenant_db)" \
+    || die "the master index ${REDIS_MASTER_INDEX} in Redis DB 0 holds no logical DB for the tenant ${TENANT}: the tenant has no Redis DB to lose. Fields: $(redis_do 0 HKEYS "$REDIS_MASTER_INDEX" | tr '\n' ' ')"
+  redis_do "$db" JSON.SET "$REDIS_MARKER_DOC" '$' "{\"id\":\"${GRAPH_MARKER}\"}" >/dev/null
+  redis_do "$db" XADD "$REDIS_MARKER_STREAM" '*' marker "$GRAPH_MARKER" >/dev/null
+  [ "$(redis_do "$db" JSON.GET "$REDIS_MARKER_DOC" '$.id')" = "[\"${GRAPH_MARKER}\"]" ] \
+    || die "the tenant Redis DB ${db} does not hold the document it was just given"
+  redis_do "$db" XRANGE "$REDIS_MARKER_STREAM" - + | grep -qxF "$GRAPH_MARKER" \
+    || die "the tenant Redis DB ${db} does not hold the stream entry it was just given"
+  sleep 3
+  note "redis document and stream entry written to DB ${db} and read back"
+}
+
+markers_redis_check() {
+  local db
+  # The tenant Redis. An empty Redis has no master index, so a restore that
+  # left the volume empty fails here, at the lookup of the tenant DB.
+  db="$(redis_tenant_db)" \
+    || die "the restored Redis has no logical DB for the tenant ${TENANT} in its master index ${REDIS_MASTER_INDEX}: the Redis volume came back empty"
+  [ "$(redis_do "$db" JSON.GET "$REDIS_MARKER_DOC" '$.id')" = "[\"${GRAPH_MARKER}\"]" ] \
+    || die "the restored Redis DB ${db} does not hold the document written before the teardown (a mission doc class)"
+  redis_do "$db" XRANGE "$REDIS_MARKER_STREAM" - + | grep -qxF "$GRAPH_MARKER" \
+    || die "the restored Redis DB ${db} does not hold the stream entry written before the teardown (the Timeline tail class)"
+  printf '\033[1;32m     ✓ the tenant Redis DB %s holds the document and the stream entry\033[0m\n' "$db"
+}
+
+markers_redis_absent() {
+  local db
+  if db="$(redis_tenant_db)"; then
+    die "the master index of Redis names a DB for the tenant ${TENANT} after a wipe and a nameless recreate: the Redis volume was restored without being asked"
+  fi
+  printf '\033[1;32m     ✓ the Redis master index holds no DB of the tenant\033[0m\n'
+}
+
 markers_seed() {
   kubectl apply -f - <<YAML
 apiVersion: gibson.zeroroot.ai/v1alpha1
@@ -169,6 +246,8 @@ YAML
   [ "$PG_READ" = "$GRAPH_MARKER" ] \
     || die "the platform database does not hold the row it was just given (read back: '${PG_READ}')"
   note "postgres row written and read back"
+
+  markers_redis_seed
 
   # The tenant keys. The master transit key lives ONLY in the secret store's
   # own volume, so an HMAC under it is the sharpest probe of whether that
@@ -222,6 +301,8 @@ markers_check() {
       bootstrap.recovery half of the restore: an empty answer means the Cluster ran initdb."
   printf '\033[1;32m     ✓ the platform database row reads back: %s\033[0m\n' "$RESTORED_PG"
 
+  markers_redis_check
+
 }
 
 markers_absent() {
@@ -247,5 +328,7 @@ markers_absent() {
     die "the platform database still holds the marker table after a wipe and a nameless recreate: Postgres recovered from the archive without being asked"
   fi
   printf '\033[1;32m     ✓ the platform database is empty of the marker table\033[0m\n'
+
+  markers_redis_absent
 
 }
