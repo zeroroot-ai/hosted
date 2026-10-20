@@ -58,6 +58,14 @@ spec:
           (charts gibson-operators reloader.rollouts.extraDeployments names
           this Deployment).
         */}}
+        {{- /*
+          Velero copies pod volumes as files (defaultVolumesToFsBackup). The
+          SPIFFE CSI volume holds the socket of the SPIRE agent of the node,
+          never data, and it restores into nothing: a restored pod gets a new
+          one from the driver. The tmp volume is scratch. Both stay out of the
+          backup, as in each pod of the core chart (hosted#83).
+        */}}
+        backup.velero.io/backup-volumes-excludes: "spire-agent-socket,tmp"
         secret.reloader.stakater.com/reload: {{ .Values.postgres.passwordSecretName | quote }}
     spec:
       {{- /* Dedicated ServiceAccount (serviceaccount.yaml). This is a

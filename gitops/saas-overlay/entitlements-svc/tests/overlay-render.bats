@@ -128,3 +128,39 @@ PY
     [[ "$output" == *"value: \"spiffe://${td}/platform/daemon\""* ]] || { echo "$env has no daemon ID in ${td}"; return 1; }
   done
 }
+
+@test "saas overlay: the SPIFFE CSI volume stays out of the Velero backup (drill run 39448187284, hosted#83)" {
+  render_saas
+  # The exact count: this chart renders one pod with one such volume. A render
+  # that loses it fails, and so does a new one that needs a decision.
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$TMP/saas.yaml" --expect 1
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"ok 1 SPIFFE CSI volume"* ]]
+}
+
+@test "saas overlay: FAILING FIXTURE: a pod that mounts the SPIFFE CSI volume and does not exclude it fails the check" {
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$CHART_DIR/../testdata/csi-no-exclude.yaml"
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"volume spire-agent-socket is not in backup.velero.io/backup-volumes-excludes"* ]]
+}
+
+@test "saas overlay: FAILING FIXTURE: a wrong count of SPIFFE CSI volumes fails the check" {
+  render_saas
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$TMP/saas.yaml" --expect 2
+  [ "$status" -eq 1 ]
+  [[ "$output" == *"1 SPIFFE CSI volume(s) found, 2 expected"* ]]
+}
+
+@test "saas overlay: FAILING FIXTURE: a Job, a CronJob and a Pod with the SPIFFE CSI volume and no exclude each fail the check" {
+  for kind in job cronjob pod; do
+    run python3 "$CHART_DIR/../check-csi-excludes.py" "$CHART_DIR/../testdata/csi-${kind}-no-exclude.yaml"
+    [ "$status" -eq 1 ] || { echo "$kind: status ${status}: $output"; false; }
+    [[ "$output" == *"volume spire-agent-socket is not in backup.velero.io/backup-volumes-excludes"* ]]
+  done
+}
+
+@test "saas overlay: FAILING FIXTURE: a missing input is exit 2 with a named error, never a finding" {
+  run python3 "$CHART_DIR/../check-csi-excludes.py" "$TMP/does-not-exist.yaml"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"check-csi-excludes: cannot read"* ]]
+}

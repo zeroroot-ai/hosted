@@ -81,6 +81,14 @@ spec:
           delivery, or the sign-in fails. Reloader watches the named Secrets
           and rolls this Deployment when one changes (deploy#1144).
         */}}
+        {{- /*
+          Velero copies pod volumes as files (defaultVolumesToFsBackup). The
+          SPIFFE CSI volume holds the socket of the SPIRE agent of the node,
+          never data, and it restores into nothing: a restored pod gets a new
+          one from the driver. The tmp volume is scratch. Both stay out of the
+          backup, as in each pod of the core chart (hosted#83).
+        */}}
+        backup.velero.io/backup-volumes-excludes: "spire-agent-socket,tmp"
         secret.reloader.stakater.com/reload: {{ printf "%s,%s,%s" .Values.stripe.secretName .Values.oidc.secretName .Values.postgres.passwordSecretName | quote }}
     spec:
       serviceAccountName: {{ include "billing-webhook.serviceAccountName" . }}
