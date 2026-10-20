@@ -254,7 +254,8 @@ def main() -> None:
         f"OK — plan is clean: {creates} to add, {updates} to change, {deletes} to "
         f"destroy, {accepted_text}. {buckets} S3 bucket(s) present, none in the "
         f"replace set. {noops + updates + deletes} existing resource(s) in the "
-        f"plan, so a replacement was possible and did not happen."
+        f"plan, so a replacement was possible"
+        f"{'.' if accepted else ' and did not happen.'}"
     )
 
 

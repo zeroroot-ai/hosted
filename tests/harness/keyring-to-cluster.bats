@@ -345,7 +345,7 @@ for d in yaml.safe_load_all(open(sys.argv[1])):
     bash "$SCRIPT" "$SUBSTRATE"
   [ "$status" -eq 0 ]
   [[ "$output" == *"no GITHUB_APP"* ]]
-  ! grep -q 'zeroroot-ai-creds' "$STATE/applied.yaml"
+  ! grep -q 'zeroroot-ai-creds' "$STATE/applied.yaml" || { echo "a line that must not be there matched"; false; }
 }
 
 @test "the set time of a vendor value lands as an annotation of the keyring Secret (ADR-0171)" {

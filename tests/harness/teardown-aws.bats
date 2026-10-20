@@ -234,7 +234,7 @@ predestroys() { count_in "$STATE/eks.log" 'eks-pre-destroy.sh'; }
   grep -q 'eks-post-destroy-verify.sh' "$STATE/eks.log"
   # Retention is the bucket lifecycle rule and nothing else (ADR-0083): a
   # wipe makes no s3 call of its own.
-  ! grep -q ' s3 ' "$STATE/aws.log"
+  ! grep -q ' s3 ' "$STATE/aws.log" || { echo "a line that must not be there matched"; false; }
   [[ "$output" == *"Nothing was kept"* ]]
 }
 
@@ -355,7 +355,7 @@ predestroys() { count_in "$STATE/eks.log" 'eks-pre-destroy.sh'; }
   export STUB_ZONE_CONTENT=own
   run_teardown wipe
   [ "$status" -eq 0 ]
-  ! grep -q 'change-resource-record-sets' "$STATE/aws.log"
+  ! grep -q 'change-resource-record-sets' "$STATE/aws.log" || { echo "a line that must not be there matched"; false; }
   [[ "$output" == *"nothing but its own NS and SOA"* ]]
 }
 
@@ -369,7 +369,7 @@ predestroys() { count_in "$STATE/eks.log" 'eks-pre-destroy.sh'; }
   [ "$status" -ne 0 ]
   [[ "$output" == *"refusing to sweep records"* ]]
   [[ "$output" == *"APEX zone"* ]]
-  ! grep -q 'change-resource-record-sets' "$STATE/aws.log"
+  ! grep -q 'change-resource-record-sets' "$STATE/aws.log" || { echo "a line that must not be there matched"; false; }
 }
 
 # A substrate with no zone at all (kind) has no sub-zone to sweep and must not
@@ -378,7 +378,7 @@ predestroys() { count_in "$STATE/eks.log" 'eks-pre-destroy.sh'; }
   sed -i '/^ZONE_ID=/d;/^ZONE_NAME=/d' "$SUBSTRATE"
   run_teardown wipe
   [ "$status" -eq 0 ]
-  ! grep -q 'change-resource-record-sets' "$STATE/aws.log"
+  ! grep -q 'change-resource-record-sets' "$STATE/aws.log" || { echo "a line that must not be there matched"; false; }
   [[ "$output" == *"no ZONE_ID/ZONE_NAME"* ]]
 }
 

@@ -304,9 +304,9 @@ PY
 @test "a fresh recreate creates no Restore and no modifier, and waits for every Application" {
   run "$BATS_TEST_TMPDIR/drive.sh" ""
   [ "$status" -eq 0 ] || { echo "$output" >&2; return 1; }
-  ! grep -q '^apply Restore' "$STATE/order.log"
-  ! grep -q '^apply ConfigMap' "$STATE/order.log"
-  ! grep -q '^apply-file' "$STATE/order.log"
+  ! grep -q '^apply Restore' "$STATE/order.log" || { echo "a fresh recreate applied a Restore"; false; }
+  ! grep -q '^apply ConfigMap' "$STATE/order.log" || { echo "a fresh recreate applied a ConfigMap"; false; }
+  ! grep -q '^apply-file' "$STATE/order.log" || { echo "a fresh recreate applied a file"; false; }
   [ -n "$(line_of wait_apps)" ]
   assert_output_has "every store bootstrapped EMPTY"
 }
@@ -920,7 +920,7 @@ SH
   grep -q '"op":"test","path":"/spec/sources/0/helm/parameters/0/name","value":"platformPostgres.recovery.backupID"' "$STATE/patch.txt"
   grep -q '"op":"test","path":"/spec/sources/0/helm/parameters/0/name","value":"platformPostgres.recovery.serverName"' "$STATE/patch.txt"
   [ "$(grep -o '"op":"remove","path":"/spec/sources/0/helm/parameters/0"' "$STATE/patch.txt" | wc -l)" -eq 2 ]
-  ! grep -q 'backup.serverName' "$STATE/patch.txt"
+  ! grep -q 'backup.serverName' "$STATE/patch.txt" || { echo "a line that must not be there matched"; false; }
   assert_output_has "the recovery parameters left a running Cluster"
 }
 

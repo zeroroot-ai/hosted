@@ -366,7 +366,7 @@ set_dns_credential() {
   [[ "$output" != *"5 smtp"* ]]
   [[ "$output" != *"6 zone"* ]]
   # Bucket write/read/delete ran (2 bucket passed), lifecycle did not.
-  ! grep -q get-bucket-lifecycle-configuration "$CALLS"
+  ! grep -q get-bucket-lifecycle-configuration "$CALLS" || { echo "a line that must not be there matched"; false; }
 }
 
 @test "platform credential allowed to delete: exit 1, the delete is the miss" {
@@ -536,7 +536,7 @@ set_dns_credential() {
 @test "preflight prints nothing it cannot account for" {
   run_preflight
   [ "$status" -eq 0 ]
-  ! grep -qx 'None' <<<"$output"
+  ! grep -qx 'None' <<<"$output" || { echo "preflight printed a bare None"; false; }
   [[ "$output" == *"preflight PASS"* ]]
 }
 

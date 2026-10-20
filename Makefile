@@ -707,6 +707,13 @@ check-kubectl-spdy: ## A workflow job that runs kubectl exec sets KUBECTL_REMOTE
 	@python3 scripts/check-kubectl-spdy.py
 check: check-kubectl-spdy
 
+.PHONY: check-bats-negation
+check-bats-negation: ## No bats test asserts with a bare `! command`, which never fails the test (hosted#12)
+	@printf "$(GREEN)▶$(NC) check-bats-negation...\n"
+	@python3 scripts/check-bats-negation.py --selftest
+	@python3 scripts/check-bats-negation.py
+check: check-bats-negation
+
 .PHONY: check-exit-tests-off-pr
 check-exit-tests-off-pr: ## Exit tests never run on a pull request (ADR-0080)
 	@printf "$(GREEN)▶$(NC) check-exit-tests-off-pr...\n"
