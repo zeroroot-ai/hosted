@@ -19,7 +19,9 @@ with no AWS credential, and the rules below read the JSON statements:
   2. ssm:GetParameters names exactly one resource, an SSM parameter ARN, with
      no "*" and no "?" in it.
   3. No statement uses NotAction or NotResource.
-  4. In a target root, every aws_iam_role_policy has `policy =
+  4. A target root has no module block. The guard reads only the .tf files of the
+     root, so a module could make a role policy that it never judges.
+  5. In a target root, every aws_iam_role_policy has `policy =
      local.instance_role_policy`, and no root has a policy attachment, a
      managed_policy_arns attribute or an inline_policy block. So no second
      policy escapes the render.
@@ -96,6 +98,8 @@ def _blocks(code: str, kind: str) -> list[tuple[str, str]]:
 def policy_resource_findings(tf_text: str, name: str) -> list[str]:
     code = "\n".join(line.split("#", 1)[0] for line in tf_text.splitlines())
     out = []
+    if re.search(r'^\s*module\s+"[^"]+"\s*\{', code, re.M):
+        out.append(f"{name}: has a module block, and the guard does not render modules, so a role policy in it would escape")
     for kind in ("aws_iam_role_policy_attachment", "aws_iam_policy_attachment"):
         if re.search(r'resource\s+"%s"' % kind, code):
             out.append(f"{name}: has a policy attachment ({kind})")
@@ -145,7 +149,7 @@ def selftest() -> int:
             return 2
     tgood = sorted(FIXTURES.glob("good-*.tf"))
     tbads = sorted(FIXTURES.glob("bad-*.tf"))
-    if not tgood or len(tbads) < 4:
+    if not tgood or len(tbads) < 5:
         print("check-target-role-policy: selftest: the Terraform fixtures are missing", file=sys.stderr)
         return 2
     for g in tgood:
