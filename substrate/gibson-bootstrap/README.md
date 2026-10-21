@@ -225,6 +225,12 @@ write permission (`.github/workflows/rotate-credentials.yml`). A step that fails
 after the cluster may hold the new keyring writes the keyring back too, and the
 job still fails: the environment must hold what the cluster holds.
 
+If the write-back fails, or the runner dies, after the cluster got the new keyring,
+read the keyring back from the cluster Secret `bringup-keyring` in the release
+namespace, set `BRINGUP_KEYRING` by hand
+(`gh secret set BRINGUP_KEYRING --env <env> -R zeroroot-ai/hosted`), and then
+run the workflow again.
+
 ## Rotation
 
 Each rotation runs in `.github/workflows/rotate-credentials.yml`. That workflow
