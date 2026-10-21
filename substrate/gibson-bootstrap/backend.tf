@@ -1,22 +1,21 @@
 # ----------------------------------------------------------------------------
-# State of stage 0 itself: LOCAL, outside the checkout.
+# State of stage 0 itself: the durable bucket it creates (ADR-0083, amendment
+# of 2026-10-21).
 #
-# The durable bucket cannot hold the state of the workspace that creates it.
-# So stage 0 keeps a local state file, and substrate.sh puts it next to the
-# keyring under SUBSTRATE_DIR/<env>/ (default /bulk/substrate/<env>/):
+#   bucket   zeroroot-ai-<env>-durable-<account>
+#   key      tfstate/stage0/terraform.tfstate, with S3 native lock files
 #
-#   terraform init -reconfigure -backend-config="path=<SUBSTRATE_DIR>/<env>/terraform.tfstate"
-#
-# Not in the checkout, because a git worktree is deleted when its branch
-# merges, and a state file in it goes with it. The state holds the platform
-# and SMTP access keys (see README.md § Secrets in state), so it lives with
-# the keyring, under the same directory mode, on the machine of a person who
-# is allowed to hold the keyring.
-#
-# One ENV chooses the var-file and the state path, in substrate.sh. There is
-# no second pin to keep in step.
+# The bucket name carries the account id, so scripts/stage0-store.sh
+# (stage0_init) passes it with -backend-config. The first apply of a new
+# environment has no bucket yet: it uses a local state file, and substrate.sh
+# runs `terraform init -migrate-state` once the apply made the bucket. The
+# state holds the access keys of the stage 0 users, so the bucket policy lets
+# only the rotation role and the operator role read this prefix (bucket.tf).
 # ----------------------------------------------------------------------------
 
 terraform {
-  backend "local" {}
+  backend "s3" {
+    region  = "us-east-1"
+    encrypt = true
+  }
 }

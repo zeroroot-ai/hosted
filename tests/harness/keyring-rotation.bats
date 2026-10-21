@@ -9,6 +9,7 @@
 ROOT="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
 
 setup() {
+  export GITHUB_ACTIONS=true
   K="$BATS_TEST_TMPDIR/keyring.env"
   "$ROOT/scripts/keyring.sh" generate "$K" >/dev/null
 }
@@ -100,4 +101,15 @@ get() { "$ROOT/scripts/keyring.sh" get "$K" "$1"; }
   [ "$status" -eq 0 ]
   run "$ROOT/scripts/keyring.sh" disk-public-keys "$K"
   [ "$output" = "$new_key" ]
+}
+
+@test "FAILING FIXTURE: rotate and retire refuse to run outside a workflow, and change nothing" {
+  before="$(sha256sum < "$K")"
+  GITHUB_ACTIONS="" run "$ROOT/scripts/keyring.sh" rotate "$K" OPENBAO_SEAL_KEY
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"runs in a GitHub Actions workflow only"* ]]
+  GITHUB_ACTIONS="" run "$ROOT/scripts/keyring.sh" retire "$K" OPENBAO_SEAL_KEY
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"runs in a GitHub Actions workflow only"* ]]
+  [ "$(sha256sum < "$K")" = "$before" ]
 }

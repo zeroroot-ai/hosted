@@ -5,8 +5,8 @@
 # The one entry point for this workspace. `make substrate ENV=<env>` calls it
 # with the environment's state directory and name, and it:
 #
-#   1. inits this workspace with a LOCAL state file under <state-dir>
-#      (backend.tf says why local, and why outside the checkout),
+#   1. inits this workspace on its state in the durable bucket, under
+#      tfstate/stage0/ (backend.tf, scripts/stage0-store.sh),
 #   2. plans envs/<env>.tfvars and REFUSES a plan that deletes anything.
 #      Stage 0 outlives every cluster; no path through it destroys,
 #   3. applies the plan: the durable bucket, the platform and SMTP
@@ -19,7 +19,8 @@
 #
 # Files under <state-dir> (SUBSTRATE_DIR/<env>, default /bulk/substrate/<env>):
 #
-#   terraform.tfstate   this workspace's state. Holds the access keys
+#   terraform.tfstate   only for the first apply of a new environment, until
+#                       the bucket exists. The state holds the access keys
 #   key-slots.tfvars.json  the active access key slot of each substrate
 #                       user (ADR-0171). substrate.sh writes the default once;
 #                       scripts/substrate-rotate.sh changes it
@@ -76,21 +77,19 @@ say "active rule set ${active_set}"
 # ---------------------------------------------------------------------------
 # Terraform: init on the env's local state, plan, refuse deletes, apply.
 # ---------------------------------------------------------------------------
-# Where the stage 0 files live: the workstation, or AWS for an env with
-# keyring_in_aws (drill, scripts/stage0-store.sh, ADR-0083).
+# The stage 0 state, the key slots and the rotation record live in the
+# durable bucket under tfstate/stage0/ (scripts/stage0-store.sh, ADR-0083). A
+# new environment has no bucket yet: its first apply uses a local state file,
+# and stage0_migrate moves it into the bucket after the apply.
 # shellcheck source=../../scripts/stage0-store.sh
 . "$REPO/scripts/stage0-store.sh"
-if stage0_remote "$ENV"; then
-  step "terraform init (state in the prod state bucket, substrate/$ENV/)"
-  stage0_pull "$ENV" "$STATE"
-else
-  step "terraform init (state $STATE/terraform.tfstate)"
-fi
+step "terraform init (state in s3://zeroroot-ai-$ENV-durable-<account>/tfstate/stage0/)"
+stage0_pull "$ENV" "$STATE"
 stage0_init "$HERE" "$ENV" "$STATE"
 say "initialized"
 
 # The access key slots (variables.tf key_slots). Written once with the
-# default, then changed only by scripts/substrate-rotate.sh.
+# default, then changed only by scripts/substrate-rotate.sh in its workflow.
 SLOTS="$STATE/key-slots.tfvars.json"
 if [ ! -f "$SLOTS" ]; then
   printf '%s\n' '{"key_slots": {"platform": {"active": "a", "keep": ["a"]}, "smtp": {"active": "a", "keep": ["a"]}, "dns": {"active": "a", "keep": ["a"]}, "setec-disk-builder": {"active": "a", "keep": ["a"]}}}' > "$SLOTS"
@@ -130,6 +129,7 @@ fi
 step "terraform apply"
 tf apply -input=false -no-color "$WORK/plan.out" | grep -E '^(Apply complete|aws_[a-z0-9_]+\.[a-z0-9_\[\]"]+: (Creating|Creation complete|Modifying|Modifications complete))' || true
 say "applied"
+stage0_migrate "$HERE" "$ENV" "$STATE"
 
 out()      { tf output -raw "$1"; }
 out_list() { tf output -json "$1" | python3 -c 'import json, sys; print(",".join(json.load(sys.stdin)))'; }
@@ -236,9 +236,10 @@ fingerprints="$("$KEYRING" fingerprints "$STATE/keyring.env")"
 chmod 0644 "$WORK/substrate.env"
 mv "$WORK/substrate.env" "$STATE/substrate.env"
 say "wrote $STATE/substrate.env"
-if stage0_remote "$ENV"; then
-  stage0_push "$ENV" "$STATE"
-  say "kept the keyring, substrate.env and the key slots of $ENV in AWS ($(out keyring_secret))"
+stage0_push "$ENV" "$STATE"
+say "kept the key slots of $ENV in the durable bucket"
+if stage0_keyring_remote "$ENV"; then
+  say "kept the keyring and substrate.env of $ENV in AWS ($(out keyring_secret))"
 fi
 
 printf '    bucket   %s/%s\n' "$BUCKET_ENDPOINT" "$BUCKET_NAME"

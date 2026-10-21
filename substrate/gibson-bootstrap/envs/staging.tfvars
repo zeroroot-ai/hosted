@@ -41,3 +41,7 @@ audit_lock_mode = "GOVERNANCE"
 # that role runs the teardown and the bringup of staging, beside the CI
 # bringup role.
 edge_cert_principal_role_names = ["eks-bringup", "OrganizationAccountAccessRole"]
+
+# The key rotation role (rotation-role.tf): the access keys of this env rotate in
+# .github/workflows/rotate-credentials.yml.
+rotation_role_enabled = true

@@ -34,7 +34,9 @@ make preflight ENV=staging
 `make substrate` calls `substrate.sh <SUBSTRATE_DIR>/<env> <env>` and nothing
 else runs this workspace. The script:
 
-1. inits Terraform on a local state file under `SUBSTRATE_DIR/<env>/`,
+1. inits Terraform on the state in the durable bucket, under `tfstate/stage0/`
+   (a new environment has no bucket yet, so its first apply uses a local state
+   file, and the script then runs `terraform init -migrate-state` once),
 2. plans `envs/<env>.tfvars` and refuses a plan that deletes anything,
 3. applies the plan,
 4. writes the keyring once, from three Terraform outputs plus three
@@ -52,7 +54,7 @@ worktree and every cluster. Never put it under `/tmp`.
 
 | File under `SUBSTRATE_DIR/<env>/` | Mode | Holds |
 |---|---|---|
-| `terraform.tfstate` | 0600 | the state of this workspace, including both access keys |
+| `terraform.tfstate` | 0600 | only the first apply of a new environment, until the bucket exists |
 | `keyring.env` | 0600 | the bringup keyring: seal key, Velero password, bucket credential, SMTP password |
 | `substrate.env` | 0644 | endpoints, names, the keyring fingerprints. No secrets |
 
@@ -168,69 +170,77 @@ fails the build on any `aws_route53_zone` in `eks/gibson`.
 
 ## State of this workspace, and secrets in it
 
-The durable bucket cannot hold the state of the workspace that creates it, so
-this workspace keeps a local state file. It lives under `SUBSTRATE_DIR/<env>/`
-and not in the checkout, because a git worktree is deleted when its branch
-merges and a state file in it goes with it.
+The state of this workspace lives in the durable bucket it creates
+(ADR-0083, amendment of 2026-10-21):
 
-The state holds two IAM access keys in clear text: the platform credential
-and the SMTP credential. That is acceptable only because the file lives next
-to the keyring that holds the same two values, under the same directory mode,
-on the machine of a person who is allowed to hold the keyring. Treat the
-state file as the keyring. Do not copy it anywhere the keyring may not go.
+| Object | Holds |
+|---|---|
+| `tfstate/stage0/terraform.tfstate` | the state, with S3 native lock files (`use_lockfile`) |
+| `tfstate/stage0/key-slots.tfvars.json` | the active access key slot of each user |
+| `tfstate/stage0/key-rotation.json` | the time of the last switch of each user |
 
-The state of stage 1 (`eks/gibson`) holds no such thing. It lives under
-`tfstate/` in the durable bucket with SSE-S3, versioning and no public
-access.
+The state holds the IAM access keys in clear text. So the bucket policy
+(`bucket.tf`, `DenyStage0StateToEveryoneElse`) denies this prefix to every
+principal except the key rotation role (`rotation-role.tf`) and the roles in
+`stage0_state_principal_role_names` (the operator role of the workstation, and
+for drill the bringup role). `bucket.tf` also sets `prevent_destroy` on the
+bucket, because the bucket holds its own state.
 
-One `ENV` selects both the var-file and the state path, in `substrate.sh`.
-There is no second pin to keep in step, and no CLI workspace.
+## The key rotation role
+
+`rotation-role.tf` makes `zeroroot-ai-<env>-key-rotation` where
+`rotation_role_enabled = true` (staging and prod). Only the workflow
+`.github/workflows/rotate-credentials.yml` can assume it, off `main`, in the
+GitHub environment of the env, through OIDC. It can write the access keys of the
+four stage 0 users, read the stage 0 resources so `terraform plan` can refresh,
+and read and write `tfstate/stage0/`. It cannot change any other resource.
 
 ## The keyring reaches GitHub
 
-The keyring lives in GitHub Environment secrets, which always retain a copy,
-and may live on the laptop of a developer who is allowed to hold it
-(`CONTEXT.md` "Bringup keyring"). The GitHub side is deploy#1745. When it
-lands, the step is one command per environment, run by the person who holds
-the keyring:
+`BRINGUP_KEYRING` is a GitHub environment secret, and `SUBSTRATE_ENV_FILE` is an
+environment variable. The first load is one command per environment, by the
+person who holds the keyring:
 
 ```bash
 gh secret set BRINGUP_KEYRING --env staging -R zeroroot-ai/hosted < /bulk/substrate/staging/keyring.env
+gh variable set SUBSTRATE_ENV_FILE --env staging -R zeroroot-ai/hosted < /bulk/substrate/staging/substrate.env
 ```
 
-`substrate.env` holds no secret and is committed by deploy#1745 or passed as
-a workflow input. Do not run the command above from this README until
-deploy#1745 names the secret.
+After that, a rotation writes both through a GitHub App
+(`.github/workflows/rotate-credentials.yml`).
 
 ## Rotation
 
-The keyring has 12 members since hosted#528 deleted `CNPG_BACKUP_KEY`. The set
-fingerprint in a `substrate.env` written before that change covers 13 lines,
-so `keyring.sh verify` fails on it. Run `make substrate ENV=<env>` one time on
-each environment. It keeps the keyring and writes the fingerprints again. Then
-load the new `substrate.env` with `gh variable set SUBSTRATE_ENV_FILE`. An
-extra `CNPG_BACKUP_KEY` line in a kept keyring does no harm.
+Each rotation runs in `.github/workflows/rotate-credentials.yml`, and nowhere
+else. `keyring.sh rotate`, `keyring.sh retire` and `substrate-rotate.sh` refuse to
+run unless `GITHUB_ACTIONS` is true. The workflow is `workflow_dispatch` only.
+The GitHub environment of the env gates each run with its required reviewers.
 
-The access keys of the three substrate IAM users (the bucket credential, the
-SES SMTP credential and the DNS credential) rotate in place, with no new
-keyring and no recreate (ADR-0171, row `substrate-cloud-credentials`):
+| Credential | Dispatch | ADR-0171 row |
+|---|---|---|
+| `platform`, `smtp`, `dns`, `setec-disk-builder` | `step: rotate`. A run that finds an open rotation continues it. | 12 |
+| `OPENBAO_SEAL_KEY`, `VELERO_REPO_PASSWORD`, `SETEC_DISK_SIGNING_SEED` | `step: rotate`, then `step: retire` after the cluster runs on the new value | 11 |
 
-```
-make substrate-rotate ENV=<env> CREDENTIAL=<platform|smtp|dns>
-```
-
-Each user has two key slots (`key_slots`, `<state-dir>/key-slots.tfvars.json`).
+An access key has two slots (`key_slots`, `tfstate/stage0/key-slots.tfvars.json`).
 `scripts/substrate-rotate.sh` adds the free slot, makes it active, writes the
 new key into the keyring and `substrate.env`, pushes the keyring to the
 cluster, restarts each workload that reads the Secret keys of that user, waits
 until AWS reports the new key in use, waits until the old key has stayed
 unused for four hours after the switch, and then deletes the old key. A run
-that stops (the new key not used yet, the quiet time not over, or a consumer
-that still uses the old key) says so; run the same command again to continue.
-After the rotation, update the GitHub Environment secret of the keyring.
+that stops (the new key not used yet, the quiet time not over) exits 10.
+The workflow writes the new keyring and `substrate.env` back to the
+environment, and a later dispatch continues the rotation. A rotation that
+exits with any other code writes nothing back.
 
-The seal key and the Velero repository password rotate with
-`keyring.sh rotate` and `retire` (the header of `scripts/keyring.sh`).
+`VELERO_REPO_PASSWORD` rotate needs the input `velero_prefix`. A new password
+starts a new kopia repository at a new prefix, so merge the overlay change of
+`bucket.prefix` first. The step refuses unless the overlay names that prefix.
+
+The keyring has 12 members since hosted#528 deleted `CNPG_BACKUP_KEY`. The set
+fingerprint in a `substrate.env` written before that change covers 13 lines,
+so `keyring.sh verify` fails on it. Run `make substrate ENV=<env>` one time on
+each environment, then load the new `substrate.env` with
+`gh variable set SUBSTRATE_ENV_FILE`.
 
 ## Prod
 

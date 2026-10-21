@@ -1,31 +1,35 @@
-#!/usr/bin/env bash
 # ---------------------------------------------------------------------------
 # stage0-store.sh — where the stage 0 files of an environment live (ADR-0083,
-# amendment of 2026-10-13).
+# amendment of 2026-10-21).
 #
-# Staging and prod keep stage 0 on the operator workstation, under
-# <state-dir> (SUBSTRATE_DIR/<env>): the Terraform state, the access key
-# slots, the rotation record, the keyring and substrate.env.
+# The Terraform state of stage 0, the access key slots and the rotation record
+# of EVERY environment live in the durable bucket of the environment, under
+# the prefix tfstate/stage0/:
 #
-# An environment whose envs/<env>.tfvars sets `keyring_in_aws = true` (drill
-# only) keeps them in AWS, so a runner with the bringup role can run stage 0
-# and rotate the access keys:
+#   tfstate/stage0/terraform.tfstate     the state, with S3 native lock files
+#   tfstate/stage0/key-slots.tfvars.json the active access key slot of each user
+#   tfstate/stage0/key-rotation.json     the time of the last switch of each user
 #
-#   the state            s3://zeroroot-ai-prod-tfstate-<account>-us-east-1/
-#                        substrate/<env>/terraform.tfstate, with the lock
-#                        table zeroroot-ai-prod-tf-locks and the KMS key
-#                        alias/zeroroot-ai-prod-tf-bootstrap (the same as
-#                        substrate/apex-zone)
-#   the slots, the record   the same prefix, key-slots.tfvars.json and
-#                        key-rotation.json
-#   keyring, substrate.env  the Secrets Manager secret zeroroot-ai/<env>/keyring
-#                        (keyring-secret.tf), as {"keyring", "substrate_env"}
+# So the credential rotation workflow (.github/workflows/rotate-credentials.yml)
+# and a workstation see the same state. The bucket is
+# zeroroot-ai-<env>-durable-<account>. The role of the workflow can write
+# only under that prefix (substrate/gibson-bootstrap/rotation-role.tf).
+#
+# The keyring and substrate.env have two homes:
+#
+#   staging, prod   the GitHub environment secret BRINGUP_KEYRING and the
+#                   environment variable SUBSTRATE_ENV_FILE. The workflow reads
+#                   them, and writes the new ones back through a GitHub App.
+#   drill           the Secrets Manager secret zeroroot-ai/drill/keyring (an
+#                   envs/drill.tfvars with keyring_in_aws = true), because the
+#                   drill workflow token cannot write an environment secret.
 #
 # Functions (source this file; the caller defines die):
-#   stage0_remote <env>                       true when the env keeps stage 0 in AWS
-#   stage0_init <tf-dir> <env> <state-dir>    terraform init on the right backend
-#   stage0_pull <env> <state-dir>             AWS -> <state-dir> (remote only)
-#   stage0_push <env> <state-dir>             <state-dir> -> AWS (remote only)
+#   stage0_keyring_remote <env>               true when the keyring is in Secrets Manager
+#   stage0_bucket <env>                       the durable bucket of the env
+#   stage0_init <tf-dir> <env> <state-dir>    terraform init on the S3 backend
+#   stage0_pull <env> <state-dir>             AWS -> <state-dir>
+#   stage0_push <env> <state-dir>             <state-dir> -> AWS
 #
 # As a command, for a runner: stage0-store.sh pull <env> <state-dir>
 #
@@ -35,40 +39,57 @@
 
 STAGE0_TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../substrate/gibson-bootstrap" && pwd)"
 STAGE0_REGION="us-east-1"
+STAGE0_PREFIX="tfstate/stage0"
 
-stage0_remote() {
+stage0_keyring_remote() {
   grep -qE '^keyring_in_aws[[:space:]]*=[[:space:]]*true' "$STAGE0_TF_DIR/envs/$1.tfvars" 2>/dev/null
 }
 
-_stage0_bucket() {
+stage0_bucket() {
   local acct
   acct="$(aws sts get-caller-identity --query Account --output text)" || return 1
-  printf 'zeroroot-ai-prod-tfstate-%s-%s' "$acct" "$STAGE0_REGION"
+  printf 'zeroroot-ai-%s-durable-%s' "$1" "$acct"
 }
 
 # stage0_init <tf-dir> <env> <state-dir>
+# The state is in the durable bucket. A new environment has no bucket yet, so
+# its first apply uses a local state file under <state-dir>, and substrate.sh
+# moves it into the bucket when the apply made the bucket (stage0_migrate).
 stage0_init() {
   local tf="$1" env="$2" state="$3" bucket
-  if stage0_remote "$env"; then
-    bucket="$(_stage0_bucket)" || die "could not read the AWS account, so the stage 0 state bucket of ${env} has no name"
-    # The one backend block of the root is local. An override file selects
-    # S3 for this env only. It is git-ignored, and stage0_init of a local env
-    # removes it.
-    printf 'terraform {\n  backend "s3" {}\n}\n' > "$tf/backend_override.tf"
+  bucket="$(stage0_bucket "$env")" || die "could not read the AWS account, so the stage 0 state bucket of ${env} has no name"
+  if aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
+    rm -f "$state/.stage0-bootstrap" "$tf/backend_override.tf"
     terraform -chdir="$tf" init -reconfigure -input=false -no-color \
       -backend-config="bucket=${bucket}" \
-      -backend-config="key=substrate/${env}/terraform.tfstate" \
+      -backend-config="key=${STAGE0_PREFIX}/terraform.tfstate" \
       -backend-config="region=${STAGE0_REGION}" \
-      -backend-config="dynamodb_table=zeroroot-ai-prod-tf-locks" \
-      -backend-config="kms_key_id=alias/zeroroot-ai-prod-tf-bootstrap" \
+      -backend-config="use_lockfile=true" \
       -backend-config="encrypt=true" >/dev/null \
-      || die "terraform init of stage 0 failed against s3://${bucket}/substrate/${env}/"
+      || die "terraform init of stage 0 failed against s3://${bucket}/${STAGE0_PREFIX}/. If the state is still on a workstation, run the one-time terraform init -migrate-state (substrate/gibson-bootstrap/README.md)"
   else
-    rm -f "$tf/backend_override.tf"
-    terraform -chdir="$tf" init -reconfigure -input=false -no-color \
-      -backend-config="path=${state}/terraform.tfstate" >/dev/null \
+    ( umask 077; mkdir -p "$state"; : > "$state/.stage0-bootstrap" )
+    printf 'terraform {\n  backend "local" {\n    path = "%s/terraform.tfstate"\n  }\n}\n' "$state" > "$tf/backend_override.tf"
+    terraform -chdir="$tf" init -reconfigure -input=false -no-color >/dev/null \
       || die "terraform init of stage 0 failed on ${state}/terraform.tfstate"
   fi
+}
+
+# stage0_migrate <tf-dir> <env> <state-dir>: after the apply that made the
+# durable bucket, move the local state into it. Nothing to do otherwise.
+stage0_migrate() {
+  local tf="$1" env="$2" state="$3"
+  [ -e "$state/.stage0-bootstrap" ] || return 0
+  rm -f "$state/.stage0-bootstrap"
+  stage0_init "$tf" "$env" "$state"
+  [ ! -e "$state/.stage0-bootstrap" ] || die "the durable bucket of ${env} does not exist after the apply, so the state stays in ${state}/terraform.tfstate"
+  terraform -chdir="$tf" init -migrate-state -force-copy -input=false -no-color \
+    -backend-config="bucket=$(stage0_bucket "$env")" \
+    -backend-config="key=${STAGE0_PREFIX}/terraform.tfstate" \
+    -backend-config="region=${STAGE0_REGION}" \
+    -backend-config="use_lockfile=true" \
+    -backend-config="encrypt=true" >/dev/null \
+    || die "could not move the stage 0 state of ${env} into the durable bucket"
 }
 
 # _stage0_s3_get <bucket> <key> <file>: copy one object down. A missing object
@@ -76,7 +97,7 @@ stage0_init() {
 _stage0_s3_get() {
   local err
   err="$(aws s3api head-object --bucket "$1" --key "$2" 2>&1 >/dev/null)" || {
-    case "$err" in *"Not Found"*|*404*) rm -f "$3"; return 0 ;; esac
+    case "$err" in *"Not Found"*|*404*|*NoSuchBucket*) return 0 ;; esac
     die "could not read s3://$1/$2: ${err}"
   }
   ( umask 077; aws s3 cp --only-show-errors "s3://$1/$2" "$3" ) || die "could not copy s3://$1/$2"
@@ -85,11 +106,10 @@ _stage0_s3_get() {
 # stage0_pull <env> <state-dir>
 stage0_pull() {
   local env="$1" state="$2" bucket f
-  stage0_remote "$env" || return 0
   # A caller that pulled already (substrate-rotate.sh, which then runs
   # substrate.sh) has newer files than AWS until it pushes. Pull once.
   [ "${STAGE0_PULLED:-}" != "$state" ] || return 0
-  bucket="$(_stage0_bucket)" || die "could not read the AWS account"
+  bucket="$(stage0_bucket "$env")" || die "could not read the AWS account"
   ( umask 077; mkdir -p "$state" )
   # A keyring changed on this runner since the last pull or push holds a
   # value that AWS does not: a pull would overwrite it and write the old value
@@ -100,8 +120,9 @@ stage0_pull() {
     die "${state}/keyring.env changed since it was read from or written to AWS; a pull would overwrite it with the copy in zeroroot-ai/${env}/keyring. Push it, or remove it, first"
   fi
   for f in key-slots.tfvars.json key-rotation.json; do
-    _stage0_s3_get "$bucket" "substrate/${env}/${f}" "${state}/${f}"
+    _stage0_s3_get "$bucket" "${STAGE0_PREFIX}/${f}" "${state}/${f}"
   done
+  stage0_keyring_remote "$env" || { export STAGE0_PULLED="$state"; return 0; }
   if ! ( umask 077
       aws secretsmanager get-secret-value --secret-id "zeroroot-ai/${env}/keyring" \
         --query SecretString --output text > "${state}/.keyring-secret.json" 2> "${state}/.keyring-secret.err" ); then
@@ -135,13 +156,13 @@ PY
 # stage0_push <env> <state-dir>
 stage0_push() {
   local env="$1" state="$2" bucket f
-  stage0_remote "$env" || return 0
-  bucket="$(_stage0_bucket)" || die "could not read the AWS account"
+  bucket="$(stage0_bucket "$env")" || die "could not read the AWS account"
   for f in key-slots.tfvars.json key-rotation.json; do
     [ -f "${state}/${f}" ] || continue
-    aws s3 cp --only-show-errors --sse aws:kms --sse-kms-key-id alias/zeroroot-ai-prod-tf-bootstrap \
-      "${state}/${f}" "s3://${bucket}/substrate/${env}/${f}" || die "could not write s3://${bucket}/substrate/${env}/${f}"
+    aws s3 cp --only-show-errors "${state}/${f}" "s3://${bucket}/${STAGE0_PREFIX}/${f}" \
+      || die "could not write s3://${bucket}/${STAGE0_PREFIX}/${f}"
   done
+  stage0_keyring_remote "$env" || return 0
   [ -s "${state}/keyring.env" ] && [ -s "${state}/substrate.env" ] \
     || die "${state} holds no keyring.env or substrate.env to keep"
   ( umask 077
@@ -162,7 +183,7 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   die() { printf '! [stage0-store] %s\n' "$*" >&2; exit 2; }
   case "${1:-}" in
     pull) [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: stage0-store.sh pull <env> <state-dir>"
-          stage0_remote "$2" || die "ENV=$2 keeps stage 0 on the workstation, not in AWS"
+          stage0_keyring_remote "$2" || die "ENV=$2 keeps its keyring in the GitHub environment, not in AWS"
           stage0_pull "$2" "$3"
           [ -s "$3/keyring.env" ] && [ -s "$3/substrate.env" ] \
             || die "the keyring secret zeroroot-ai/$2/keyring holds no keyring yet. Run make substrate ENV=$2 once from the workstation"

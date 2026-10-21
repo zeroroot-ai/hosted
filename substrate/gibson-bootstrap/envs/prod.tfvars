@@ -31,3 +31,7 @@ audit_lock_mode = "COMPLIANCE"
 # Terraform reads TF_VAR_* with no extra wiring. Both variables default to "",
 # which is what an environment whose Argo needs no credential wants, so
 # forgetting them fails loudly at preflight rather than silently here.
+
+# The key rotation role (rotation-role.tf): the access keys of this env rotate in
+# .github/workflows/rotate-credentials.yml.
+rotation_role_enabled = true

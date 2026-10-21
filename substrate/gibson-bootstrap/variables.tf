@@ -211,3 +211,21 @@ variable "keyring_principal_role_names" {
   type        = list(string)
   default     = ["eks-bringup", "OrganizationAccountAccessRole"]
 }
+
+variable "rotation_role_enabled" {
+  description = "Make the key rotation role of this environment (rotation-role.tf). True for staging and prod: their access keys rotate in .github/workflows/rotate-credentials.yml. Drill rotates in drill.yml, as the bringup role."
+  type        = bool
+  default     = false
+}
+
+variable "github_repository" {
+  description = "The repository whose rotate-credentials.yml workflow may assume the key rotation role."
+  type        = string
+  default     = "zeroroot-ai/hosted"
+}
+
+variable "stage0_state_principal_role_names" {
+  description = "The IAM roles besides the rotation role that read and write tfstate/stage0/ of the durable bucket: the operator role that runs stage 0 from the workstation. Drill adds the bringup role, which rotates its keys in drill.yml."
+  type        = list(string)
+  default     = ["OrganizationAccountAccessRole"]
+}

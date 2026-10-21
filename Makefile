@@ -161,9 +161,9 @@ require-env:
 	  *) printf "$(RED)!$(NC) ENV is required and has no default. Run: make $(MAKECMDGOALS) ENV=<env>\n"; exit 2 ;; \
 	esac
 
-substrate-rotate: require-env ## Rotate the access key of one substrate IAM user at stage 0: ENV=<staging|drill|prod> CREDENTIAL=<platform|smtp|dns|setec-disk-builder> (ADR-0171). Run again to continue a stopped rotation
+substrate-rotate: require-env ## Rotate the access key of one substrate IAM user. Runs in .github/workflows/rotate-credentials.yml only (ADR-0083, ADR-0171 row 12): ENV=<staging|prod|drill> CREDENTIAL=<platform|smtp|dns|setec-disk-builder>
 	@test -n "$(CREDENTIAL)" || { printf "$(RED)!$(NC) CREDENTIAL is required: platform, smtp, dns or setec-disk-builder\n"; exit 2; }
-	@scripts/with-cluster.sh "$(ENV)" scripts/substrate-rotate.sh "$(SUBSTRATE_DIR)/$(ENV)" "$(ENV)" "$(CREDENTIAL)"
+	@scripts/substrate-rotate.sh "$(SUBSTRATE_DIR)/$(ENV)" "$(ENV)" "$(CREDENTIAL)"
 
 substrate: require-env ## Stage 0 for ENV: the durable bucket, SMTP relay, DNS sub-zone and keyring. Writes substrate.env (ADR-0083)
 	@test -n "$(SUBSTRATE_UP_$(ENV))" || { printf "$(RED)!$(NC) ENV=$(ENV) has no stage 0 in this repo (kind, staging, drill, prod)\n"; exit 2; }
@@ -992,9 +992,10 @@ check-install-terraform: ## The one Terraform installer fails closed: a corrupte
 	@bats tests/harness/install-terraform.bats
 
 .PHONY: check-stage0-store
-check-stage0-store: ## drill keeps stage 0 in AWS and rotates its access keys in the drill; staging and prod keep stage 0 on the workstation (ADR-0083, row 24)
+check-stage0-store: ## stage 0 state, key slots and rotation record live in the durable bucket; only drill keeps its keyring in AWS (ADR-0083, row 24)
 	@printf "$(GREEN)▶$(NC) check-stage0-store...\n"
 	@bats tests/harness/stage0-store.bats
+	@bats tests/harness/rotate-credential.bats
 	@bats tests/harness/drill-rotate-keys.bats
 	@bats tests/harness/restart-pods.bats
 	@bats tests/harness/stdin-secrets.bats
