@@ -44,11 +44,14 @@ setup() {
 
   cat > "$D/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
-# kubectl -n <ns> get secret <name> -o json
-[ "$1" = -n ] && [ "$3" = get ] && [ "$4" = secret ] || { echo "kubectl stub: undeclared call: $*" >&2; exit 1; }
-f="$D/cluster/$2.$5.json"
-[ -f "$f" ] || { echo "Error from server (NotFound)" >&2; exit 1; }
-cat "$f"
+# Answers only: kubectl -n <ns> get secret <name> -o json
+case "$*" in
+  "-n "*" get secret "*" -o json")
+    f="$D/cluster/$2.$5.json"
+    [ -f "$f" ] || { echo "Error from server (NotFound)" >&2; exit 1; }
+    cat "$f" ;;
+  *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
+esac
 SH
   printf '#!/usr/bin/env bash\nshift\nexec "$@"\n' > "$D/bin/with-cluster"
   chmod +x "$D/bin/"*
