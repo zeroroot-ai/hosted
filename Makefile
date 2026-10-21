@@ -163,7 +163,7 @@ require-env:
 
 substrate-rotate: require-env ## Rotate the access key of one substrate IAM user. Runs in .github/workflows/rotate-credentials.yml only (ADR-0083, ADR-0171 row 12): ENV=<staging|prod|drill> CREDENTIAL=<platform|smtp|dns|setec-disk-builder>
 	@test -n "$(CREDENTIAL)" || { printf "$(RED)!$(NC) CREDENTIAL is required: platform, smtp, dns or setec-disk-builder\n"; exit 2; }
-	@scripts/substrate-rotate.sh "$(SUBSTRATE_DIR)/$(ENV)" "$(ENV)" "$(CREDENTIAL)"
+	@scripts/with-cluster.sh "$(ENV)" scripts/substrate-rotate.sh "$(SUBSTRATE_DIR)/$(ENV)" "$(ENV)" "$(CREDENTIAL)"
 
 substrate: require-env ## Stage 0 for ENV: the durable bucket, SMTP relay, DNS sub-zone and keyring. Writes substrate.env (ADR-0083)
 	@test -n "$(SUBSTRATE_UP_$(ENV))" || { printf "$(RED)!$(NC) ENV=$(ENV) has no stage 0 in this repo (kind, staging, drill, prod)\n"; exit 2; }

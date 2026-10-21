@@ -105,3 +105,11 @@ get() { "$REPO/scripts/keyring.sh" get "$STATE/keyring.env" "$1"; }
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   grep -q "restart velero deployment/velero" "$D/log"
 }
+
+@test "the workflow reaches the cluster as the other workflows do, with no kubeconfig secret" {
+  wf="$REPO/.github/workflows/rotate-credentials.yml"
+  run grep -E '^[^#]*secrets\.KUBECONFIG' "$wf"
+  [ "$status" -eq 1 ]
+  grep -qE '^[^#]*scripts/with-cluster\.sh staging' "$wf"
+  grep -qE '^[^#]*make eks-kubeconfig ENV=prod' "$wf"
+}

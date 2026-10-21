@@ -193,7 +193,10 @@ bucket, because the bucket holds its own state.
 `.github/workflows/rotate-credentials.yml` can assume it, off `main`, in the
 GitHub environment of the env, through OIDC. It can write the access keys of the
 four stage 0 users, read the stage 0 resources so `terraform plan` can refresh,
-and read and write `tfstate/stage0/`. It cannot change any other resource.
+and read and write `tfstate/stage0/`. It reaches the cluster as the other
+workflows do: an SSM command and port forward to the one instance tagged
+`Name=zeroroot-ai-<env>` for staging, and `eks:DescribeCluster` for prod. It
+cannot change any other resource.
 
 ## The keyring reaches GitHub
 

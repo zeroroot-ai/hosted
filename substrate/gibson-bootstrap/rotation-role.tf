@@ -15,7 +15,14 @@
 #   2. Read each stage 0 resource, so `terraform plan` can refresh the state.
 #      It reads the configuration of the buckets and never an object, except
 #      under tfstate/stage0/.
-#   3. Read and write the Terraform state, the key slots and the rotation
+#   3. Reach the cluster the way the other workflows do (scripts/with-cluster.sh):
+#      find the instance by its Name tag, run a shell command on it to read the
+#      kubeconfig, and open a port forward to the API. This is more than a key
+#      write: a command on the node. It is limited to the one instance tagged
+#      Name=zeroroot-ai-<env>, and the rotation needs the cluster to restart
+#      the readers of each credential. Prod is EKS: the role reads the cluster
+#      description for `aws eks update-kubeconfig`.
+#   4. Read and write the Terraform state, the key slots and the rotation
 #      record under tfstate/stage0/ of the durable bucket (scripts/
 #      stage0-store.sh). The bucket policy denies every other principal that
 #      prefix (bucket.tf).
@@ -110,6 +117,54 @@ data "aws_iam_policy_document" "rotation" {
     effect    = "Allow"
     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
     resources = ["${aws_s3_bucket.durable.arn}/${local.state_prefix}/*"]
+  }
+
+  # 3. The cluster. EC2 describe calls have no resource scope.
+  statement {
+    sid       = "FindTheInstance"
+    effect    = "Allow"
+    actions   = ["ec2:DescribeInstances", "ssm:DescribeInstanceInformation", "ssm:GetCommandInvocation"]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "RunACommandOnTheNodeDocuments"
+    effect    = "Allow"
+    actions   = ["ssm:SendCommand"]
+    resources = ["arn:aws:ssm:${var.aws_region}::document/AWS-RunShellScript"]
+  }
+
+  statement {
+    sid       = "RunACommandOnTheNode"
+    effect    = "Allow"
+    actions   = ["ssm:SendCommand", "ssm:StartSession"]
+    resources = ["arn:aws:ec2:${var.aws_region}:${var.aws_account_id}:instance/*"]
+    condition {
+      test     = "StringEquals"
+      variable = "ssm:resourceTag/Name"
+      values   = ["zeroroot-ai-${var.environment}"]
+    }
+  }
+
+  statement {
+    sid       = "ForwardTheApiPort"
+    effect    = "Allow"
+    actions   = ["ssm:StartSession"]
+    resources = ["arn:aws:ssm:${var.aws_region}::document/AWS-StartPortForwardingSession"]
+  }
+
+  statement {
+    sid       = "EndItsOwnSession"
+    effect    = "Allow"
+    actions   = ["ssm:TerminateSession", "ssm:ResumeSession"]
+    resources = ["arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:session/$${aws:userid}-*"]
+  }
+
+  statement {
+    sid       = "DescribeTheEksCluster"
+    effect    = "Allow"
+    actions   = ["eks:DescribeCluster"]
+    resources = ["arn:aws:eks:${var.aws_region}:${var.aws_account_id}:cluster/zeroroot-ai-${var.environment}"]
   }
 
   # 2. The read of each stage 0 resource, for the refresh of `terraform plan`.
