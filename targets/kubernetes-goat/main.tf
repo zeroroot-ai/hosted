@@ -90,8 +90,6 @@ resource "aws_vpc_security_group_egress_rule" "all" {
 
 data "aws_caller_identity" "current" {}
 
-data "aws_partition" "current" {}
-
 data "aws_iam_policy_document" "assume_ec2" {
   statement {
     actions = ["sts:AssumeRole"]
@@ -108,32 +106,46 @@ resource "aws_iam_role" "goat" {
   assume_role_policy = data.aws_iam_policy_document.assume_ec2.json
 }
 
-data "aws_iam_policy_document" "goat" {
-  statement {
-    sid    = "SessionManager"
-    effect = "Allow"
-    actions = [
-      "ssm:UpdateInstanceInformation",
-      "ssmmessages:CreateControlChannel",
-      "ssmmessages:CreateDataChannel",
-      "ssmmessages:OpenControlChannel",
-      "ssmmessages:OpenDataChannel",
+# The policy is one JSON value built from variables only, so that
+# scripts/check-target-role-policy.py can evaluate it with `terraform console`
+# with no AWS credential, and judge the policy that the role will carry.
+locals {
+  instance_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "SessionManager"
+        Effect = "Allow"
+        Action = [
+          "ssm:UpdateInstanceInformation",
+          "ssmmessages:CreateControlChannel",
+          "ssmmessages:CreateDataChannel",
+          "ssmmessages:OpenControlChannel",
+          "ssmmessages:OpenDataChannel",
+        ]
+        Resource = ["*"]
+      },
+      {
+        Sid      = "ReadTheDeployToken"
+        Effect   = "Allow"
+        Action   = ["ssm:GetParameters"]
+        Resource = ["arn:aws:ssm:${var.aws_region}:${var.aws_account_id}:parameter${var.deploy_token_parameter_name}"]
+      },
     ]
-    resources = ["*"]
-  }
-
-  statement {
-    sid       = "ReadTheDeployToken"
-    effect    = "Allow"
-    actions   = ["ssm:GetParameters"]
-    resources = ["arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.deploy_token_parameter_name}"]
-  }
+  })
 }
 
 resource "aws_iam_role_policy" "goat" {
   name   = "goat-node"
   role   = aws_iam_role.goat.id
-  policy = data.aws_iam_policy_document.goat.json
+  policy = local.instance_role_policy
+
+  lifecycle {
+    precondition {
+      condition     = data.aws_caller_identity.current.account_id == var.aws_account_id
+      error_message = "The AWS session is in account ${data.aws_caller_identity.current.account_id}, but the tfvars name ${var.aws_account_id}."
+    }
+  }
 }
 
 resource "aws_iam_instance_profile" "goat" {

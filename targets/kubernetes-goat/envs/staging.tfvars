@@ -9,6 +9,7 @@ workspace_name = "zeroroot-ai-staging"
 target_name    = "zeroroot-ai-staging-goat"
 cost_center    = "platform-staging"
 aws_region     = "us-east-1"
+aws_account_id = "447184491447"
 
 # The staging platform this target joins. The VPC, the subnet and the platform
 # node's security group (the only source allowed to reach the target's API on
