@@ -225,6 +225,8 @@ write permission (`.github/workflows/rotate-credentials.yml`). A step that fails
 after the cluster may hold the new keyring writes the keyring back too, and the
 job still fails: the environment must hold what the cluster holds.
 
+If the write-back fails, or the runner dies, after the cluster got the new keyring, run the workflow `rotate-credentials` with `step recover`, then run it again for the rotation.
+
 ## Rotation
 
 Each rotation runs in `.github/workflows/rotate-credentials.yml`. That workflow

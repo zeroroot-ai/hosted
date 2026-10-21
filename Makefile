@@ -1006,6 +1006,7 @@ check-stage0-store: ## stage 0 state, key slots and rotation record live in the 
 	@printf "$(GREEN)▶$(NC) check-stage0-store...\n"
 	@bats tests/harness/stage0-store.bats
 	@bats tests/harness/rotate-credential.bats
+	@bats tests/harness/recover-keyring.bats
 	@bats tests/harness/drill-rotate-keys.bats
 	@bats tests/harness/restart-pods.bats
 	@bats tests/harness/stdin-secrets.bats
