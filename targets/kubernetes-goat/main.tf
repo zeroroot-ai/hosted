@@ -69,20 +69,26 @@ resource "aws_vpc_security_group_egress_rule" "all" {
 }
 
 # ----------------------------------------------------------------------------
-# The instance role. AmazonSSMManagedInstanceCore and nothing else.
+# The instance role. The two things the node does, and nothing else.
 #
-# This instance must be able to do nothing in AWS. It holds no bucket access,
-# no secret access and no write of any kind, because every workload on it is
-# meant to be broken into.
+# Every workload on this node is meant to be broken into, and a break-out
+# reaches the instance role. So the role holds only these actions:
 #
-# THE RECONCILE READS ITS DEPLOY TOKEN THROUGH THIS ONE POLICY, by design.
-# AmazonSSMManagedInstanceCore grants ssm:GetParameters — the PLURAL form — on
-# every parameter, and the SecureString is encrypted with the AWS managed
-# alias/aws/ssm key, whose own key policy grants kms:Decrypt to any principal
-# in this account calling through SSM. So the plural call decrypts and the
-# singular ssm:GetParameter does not, which is why the reconcile script calls
-# get-parameters. No inline policy is added to make the singular form work.
+#   1. What the SSM agent needs for a Session Manager shell and port forward:
+#      ssm:UpdateInstanceInformation and the four ssmmessages channel actions.
+#      The managed policy AmazonSSMManagedInstanceCore is NOT attached: it
+#      reads every SSM parameter of the account.
+#   2. ssm:GetParameters on the ONE parameter that holds the deploy token of
+#      the reconcile (var.deploy_token_parameter_name), and no other. The
+#      reconcile calls get-parameters, the plural form, which is the action
+#      granted here. The SecureString uses the AWS managed alias/aws/ssm key,
+#      whose key policy lets a principal of this account decrypt through SSM,
+#      so the role carries no kms action.
+#
+# The role has no bucket, secret, registry or write action of any kind.
 # ----------------------------------------------------------------------------
+
+data "aws_caller_identity" "current" {}
 
 data "aws_partition" "current" {}
 
@@ -102,9 +108,32 @@ resource "aws_iam_role" "goat" {
   assume_role_policy = data.aws_iam_policy_document.assume_ec2.json
 }
 
-resource "aws_iam_role_policy_attachment" "ssm" {
-  role       = aws_iam_role.goat.name
-  policy_arn = "arn:${data.aws_partition.current.partition}:iam::aws:policy/AmazonSSMManagedInstanceCore"
+data "aws_iam_policy_document" "goat" {
+  statement {
+    sid    = "SessionManager"
+    effect = "Allow"
+    actions = [
+      "ssm:UpdateInstanceInformation",
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]
+    resources = ["*"]
+  }
+
+  statement {
+    sid       = "ReadTheDeployToken"
+    effect    = "Allow"
+    actions   = ["ssm:GetParameters"]
+    resources = ["arn:${data.aws_partition.current.partition}:ssm:${var.aws_region}:${data.aws_caller_identity.current.account_id}:parameter${var.deploy_token_parameter_name}"]
+  }
+}
+
+resource "aws_iam_role_policy" "goat" {
+  name   = "goat-node"
+  role   = aws_iam_role.goat.id
+  policy = data.aws_iam_policy_document.goat.json
 }
 
 resource "aws_iam_instance_profile" "goat" {
@@ -143,8 +172,9 @@ resource "aws_instance" "goat" {
   associate_public_ip_address = true
 
   # IMDSv2 only, hop limit 1. A pod on this node cannot reach the metadata
-  # service at all, which is exactly right: the role would give it nothing,
-  # and the goat's metadata scenario serves its own fake endpoint.
+  # service at all. The role holds only the SSM agent actions and one
+  # parameter read (above), and the goat's metadata scenario serves its own
+  # fake endpoint.
   metadata_options {
     http_endpoint               = "enabled"
     http_tokens                 = "required"

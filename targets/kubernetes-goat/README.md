@@ -31,7 +31,7 @@ The two machines share one VPC and one subnet, and nothing else:
 | State key | `tfstate/ec2-gibson/terraform.tfstate` | `tfstate/targets/kubernetes-goat/terraform.tfstate` |
 | Inbound from the internet | 443, the edge | **none, on any port** |
 | Inbound from the other | — | 6443, by security-group reference |
-| Instance role | SSM only | SSM only |
+| Instance role | SSM only | the SSM agent actions and one parameter read |
 | `/dev/kvm` for setec sandboxes | yes (ADR-0083) | **no**, on purpose |
 | Elastic IP, DNS, certificate | yes | none |
 
@@ -41,7 +41,7 @@ The two machines share one VPC and one subnet, and nothing else:
 |---|---|
 | Security group | One ingress rule: 6443 from the platform node's security group, by reference and never an address range. Nothing from the internet, on any port. |
 | Security group rules | The one ingress above, and egress everywhere so the node pulls k3s, helm, the scenario images and the repository. |
-| IAM role and instance profile | `AmazonSSMManagedInstanceCore` and nothing else. This instance can do nothing in AWS. |
+| IAM role and instance profile | The SSM agent actions (`ssm:UpdateInstanceInformation` and four `ssmmessages` channel actions) and `ssm:GetParameters` on the one deploy token parameter. No managed policy, no other parameter, no KMS action. |
 | Instance | `t3.medium`, Amazon Linux 2023, a 30 GB encrypted gp3 root volume, IMDSv2 required with a hop limit of 1. |
 
 It builds **no** VPC, subnet, internet gateway, route table, Elastic IP, DNS
@@ -149,12 +149,12 @@ aws ssm put-parameter \
 `--type SecureString` with no `--key-id` uses the AWS managed `alias/aws/ssm`
 key. That is deliberate and load-bearing: the key policy of that key grants
 `kms:Decrypt` to any principal in the account calling through SSM, so the
-instance decrypts the parameter with `AmazonSSMManagedInstanceCore` alone and
-needs no inline KMS policy. **A customer managed key breaks the fix loop**,
+instance decrypts the parameter with `ssm:GetParameters` alone and needs no
+KMS action. **A customer managed key breaks the fix loop**,
 because the role carries no `kms:Decrypt`.
 
 The reconcile calls `ssm get-parameters`, the **plural** form.
-`AmazonSSMManagedInstanceCore` grants `ssm:GetParameters` and not
+The role grants `ssm:GetParameters` on this one parameter and not
 `ssm:GetParameter`, so the singular call fails with `AccessDenied` on a role
 that is correct.
 

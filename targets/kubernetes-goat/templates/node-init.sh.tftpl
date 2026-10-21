@@ -173,12 +173,11 @@ log() { printf '%s goat-reconcile: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*"; 
 
 # -- the credential, read fresh on every run and never written to disk --------
 #
-# get-parameterS, PLURAL. AmazonSSMManagedInstanceCore grants ssm:GetParameters
-# and NOT ssm:GetParameter, and this role carries that policy and nothing else.
-# The singular call fails with AccessDenied. The SecureString is encrypted with
-# the AWS managed alias/aws/ssm key, whose key policy grants kms:Decrypt to any
-# principal in the account calling through SSM, so the plural call decrypts
-# without an inline KMS policy on this role.
+# get-parameterS, PLURAL. The instance role grants ssm:GetParameters on this one
+# parameter and no other action on it (main.tf). The singular call fails with
+# AccessDenied. The SecureString is encrypted with the AWS managed alias/aws/ssm
+# key, whose key policy lets a principal of the account decrypt through SSM, so
+# the plural call decrypts without a KMS action on the role.
 cred="$(aws ssm get-parameters \
   --region "$AWS_REGION" \
   --names "$TOKEN_PARAM" \
