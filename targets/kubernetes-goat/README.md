@@ -128,7 +128,7 @@ allows.
 
 ## The manual steps, which Terraform does not do
 
-Two, both by hand, both before the first apply. Terraform never holds the token.
+Two, both by hand, both before the first recreate that applies this root. Terraform never holds the token.
 
 **1. The GitLab deploy token.** In
 `https://gitlab.com/zero-root/kubernetes-goat` → Settings → Repository → Deploy
@@ -164,13 +164,20 @@ would fail every `plan` until the parameter exists.
 
 ## Running it
 
-The apply is run by hand here. There is no bringup verb and no exit test, because
-the target is not part of the estate the platform's gates read.
+`make recreate ENV=staging` applies this root. `scripts/recreate-ec2.sh` calls
+`targets_apply` (`scripts/lib/targets.sh`) after stage 1 phase 1 and before Argo
+CD, because phase 1 makes the VPC, the subnet and the node security group that
+this root finds by their Name tags. The platform node and the goat node boot
+side by side. The recreate stops before the apply when the SSM parameter of step
+2 above does not exist.
 
-The destroy is NOT by hand. `make teardown ENV=staging` destroys this root
-first (`scripts/lib/targets.sh`), because stage 1 cannot delete its subnet and
-its security group while the target is in them. Apply the target again after a
-recreate.
+`make teardown ENV=staging` destroys this root first, because stage 1 cannot
+delete its subnet and its security group while the target is in them. A
+`make recreate` brings it back with no other step. The environments that have no
+`envs/<env>.tfvars` here (drill, prod) get no target.
+
+To plan this root alone, for example to read a change before a recreate, run
+these commands.
 
 ```bash
 export AWS_PROFILE=zeroroot-prod
@@ -182,8 +189,7 @@ terraform init -reconfigure -input=false \
   -backend-config="region=us-east-1" \
   -backend-config="use_lockfile=true"
 
-terraform plan  -var-file=envs/staging.tfvars
-terraform apply -var-file=envs/staging.tfvars
+terraform plan -var-file=envs/staging.tfvars
 ```
 
 The state key is `tfstate/targets/kubernetes-goat/terraform.tfstate`. It shares the staging
