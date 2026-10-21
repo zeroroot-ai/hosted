@@ -59,6 +59,10 @@ jobs:
 
       - uses: ./.github/actions/ci-setup
 
+      # check-target-role-policy renders a Terraform local with `terraform console`.
+      - name: Install Terraform
+        uses: ./.github/actions/install-terraform
+
       # Every guard of make check but check-verbs, which the two verbs jobs run.
       # -o makes make treat check-verbs as made.
       - name: make check, without check-verbs

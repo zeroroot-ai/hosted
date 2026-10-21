@@ -1,6 +1,6 @@
-# ======================================================================
+# ===============================================================
 # enterprise/deploy/Makefile — the bringup verbs and the inner loop
-# ======================================================================
+# ===============================================================
 # Primary targets (ADR-0083, the three verbs):
 #   make substrate ENV=kind  — stage 0: bucket, relay, zone, keyring
 #   make preflight ENV=kind  — prove every line of substrate.env live
@@ -8,7 +8,7 @@
 #   make teardown ENV=kind MODE=wipe|preserve — destroy stage 1
 #   make smoke               — shippability gate: Envoy edge TLS handshake
 #   make restart-<svc>       — rebuild + kind-load + rollout one service
-# ======================================================================
+# ===============================================================
 
 CLUSTER       ?= gibson
 NAMESPACE     ?= gibson
@@ -92,7 +92,7 @@ help: ## Show available targets
 	@echo "  NAMESPACE        $(NAMESPACE)"
 	@echo "  ARGOCD_VERSION   $(ARGOCD_VERSION)"
 
-# ======================================================================
+# ===============================================================
 # Bringup verbs (ADR-0083): substrate, preflight, teardown, recreate.
 # Each verb is also a GitHub workflow with the same name and inputs
 # (.github/workflows/preflight.yml, teardown.yml, recreate.yml). The old
@@ -113,7 +113,7 @@ help: ## Show available targets
 # substrate.env, and on kind the MinIO and CoreDNS data, on AWS the local
 # Terraform state of stage 0) OUTSIDE the checkout: it must outlive a
 # reboot, a deleted worktree and every cluster. Never under /tmp.
-# ======================================================================
+# ===============================================================
 # Tombstone: the variable was named KIND_SUBSTRATE_DIR for one day and two
 # workflows kept passing it after the rename, so the override was silently
 # ignored and stage 0 fell back to /bulk on a CI runner (exit-test-vanilla
@@ -181,7 +181,7 @@ require-mode:
 	  *) printf "$(RED)!$(NC) MODE is required and has no default. Run: make teardown ENV=<env> MODE=wipe or MODE=preserve\n"; exit 2 ;; \
 	esac
 
-# ======================================================================
+# ===============================================================
 # teardown — destroy stage 1 for ENV (ADR-0083, deploy#1738):
 #   preserve  backup, backup-verify with the keyring, destroy, print the
 #             backup name a later recreate must carry
@@ -202,7 +202,7 @@ require-mode:
 # eks-post-destroy-verify.sh (zero billable resources, fail-closed,
 # ADR-0070). The preserve half of both rows is the SAME code,
 # scripts/lib/preserve-backup.sh.
-# ======================================================================
+# ===============================================================
 TEARDOWN_DOWN_kind    := scripts/teardown-kind.sh $(SUBSTRATE_ENV_kind)
 # Staging's stage 1 is one EC2 instance running k3s (ADR-0095, hosted#159),
 # so its recreate and teardown are the plain-cluster pair. Production stays
@@ -217,7 +217,7 @@ teardown: require-env require-mode ## Destroy stage 1 for ENV. MODE=wipe|preserv
 	@$(MAKE) --no-print-directory preflight ENV=$(ENV)
 	@MODE="$(MODE)" CLUSTER="$(CLUSTER)" NS="$(NAMESPACE)" $(TEARDOWN_DOWN_$(ENV))
 
-# ======================================================================
+# ===============================================================
 # recreate — stand ENV up from stage 0 (ADR-0083, deploy#1737).
 #
 # RESTORE_FROM=<name> is optional and is the ONLY way a recreate restores
@@ -245,7 +245,7 @@ teardown: require-env require-mode ## Destroy stage 1 for ENV. MODE=wipe|preserv
 # keyring, and stage 2 is Argo CD syncing the gitops overlay the env names.
 # The restore half of both rows is the SAME code,
 # scripts/lib/velero-restore.sh.
-# ======================================================================
+# ===============================================================
 RECREATE_UP_kind    := scripts/recreate-kind.sh $(SUBSTRATE_ENV_kind)
 RECREATE_UP_staging := scripts/recreate-ec2.sh $(SUBSTRATE_ENV_staging) staging
 RECREATE_UP_drill   := scripts/recreate-ec2.sh $(SUBSTRATE_ENV_drill) drill
@@ -258,7 +258,7 @@ recreate: require-env ## Stand ENV up from nothing: preflight, stage 1, stage 2 
 	@$(MAKE) --no-print-directory preflight ENV=$(ENV)
 	@CLUSTER="$(CLUSTER)" NS="$(NAMESPACE)" OVERLAY="$(OVERLAY)" RESTORE_FROM="$(RESTORE_FROM)" INSTANCE_TYPE="$(INSTANCE_TYPE)" NODE_COUNT="$(NODE_COUNT)" $(RECREATE_UP_$(ENV))
 
-# ======================================================================
+# ===============================================================
 # EKS workspace helpers: eks-init, eks-plan, and the verification targets
 # eks-kubeconfig / eks-converge / eks-smoke (promote-staging.yml uses the
 # last two). The eks-up / eks-down / eks-bringup / verify-teardown targets
@@ -267,7 +267,7 @@ recreate: require-env ## Stand ENV up from nothing: preflight, stage 1, stage 2 
 # and scripts/teardown-aws.sh (deploy#1746), which drive the tested building
 # blocks in bootstrap/eks/gibson/scripts/ (eks-pre-destroy.sh,
 # eks-post-destroy-verify.sh, eks-sweep-admission-webhooks.sh).
-# ======================================================================
+# ===============================================================
 # ENV has no default (hosted#404). Each eks-* target depends on require-env
 # and stops when ENV is not set.
 #
@@ -359,7 +359,7 @@ with-cluster: require-env ## Run CMD against an existing EC2 cluster over SSM: E
 	@test -n "$(CMD)" || { printf "$(RED)!$(NC) CMD is required. Run: make with-cluster ENV=$(ENV) CMD='kubectl get nodes'\n"; exit 2; }
 	@scripts/with-cluster.sh "$(ENV)" bash -c '$(CMD)'
 
-# ======================================================================
+# ===============================================================
 # purge-tenant-backup — delete the last backup of a deleted tenant before it
 # expires (ADR-0075, hosted#439). The one purge script is in charts
 # (charts#419, scripts/purge-tenant-backup.sh). It holds every refusal and the
@@ -372,7 +372,7 @@ with-cluster: require-env ## Run CMD against an existing EC2 cluster over SSM: E
 #   staging/drill  scripts/with-cluster.sh, the SSM forward (ADR-0095)
 #   prod           the EKS kubeconfig that eks-kubeconfig writes
 # The runbook is bootstrap/eks/gibson/runbooks/RUNBOOK-purge-tenant-backup.md.
-# ======================================================================
+# ===============================================================
 PURGE_WITH_kind    := env KUBECTL="kubectl --context kind-$(CLUSTER)"
 PURGE_WITH_staging := scripts/with-cluster.sh staging
 PURGE_WITH_drill   := scripts/with-cluster.sh drill
@@ -385,7 +385,7 @@ purge-tenant-backup: require-env require-charts ## Delete the last backup of a d
 	@test "$(ENV)" != prod || $(MAKE) --no-print-directory eks-kubeconfig ENV=prod
 	@TENANT_UID="$$TENANT_UID" $(PURGE_WITH_$(ENV)) "$(CHARTS_ROOT)/scripts/purge-tenant-backup.sh" "$$TENANT"
 
-# ======================================================================
+# ===============================================================
 # zitadel-console — the Platform owner opens the Zitadel console through a
 # private path (ADR-0093, hosted#437). The public edge has no route for the
 # console or the Zitadel admin APIs (charts#398). The verb opens two
@@ -393,7 +393,7 @@ purge-tenant-backup: require-env require-charts ## Delete the last backup of a d
 # holds the path open until Ctrl-C. staging and drill reach the API over SSM
 # (with-cluster.sh), prod through the EKS kubeconfig. The steps are the runbook
 # runbooks/zitadel-console.md in zeroroot-ai/docs.
-# ======================================================================
+# ===============================================================
 CONSOLE_WITH_staging := scripts/with-cluster.sh staging
 CONSOLE_WITH_drill   := scripts/with-cluster.sh drill
 CONSOLE_WITH_prod    := env KUBECONFIG=$(EKS_KUBECONFIG)
@@ -430,7 +430,7 @@ smoke: ## Verify dashboard → Envoy edge TLS handshake (zeroroot-ai/deploy#123)
 	@printf "$(GREEN)▶$(NC) Envoy edge TLS smoke (dashboard pod → the app host)...\n"
 	@./scripts/smoke-envoy-edge.sh
 
-# ======================================================================
+# ===============================================================
 # wait-root — poll until every ArgoCD Application in the argocd namespace
 # reaches Sync=Synced and Health=Healthy. Used standalone against the kind
 # cluster and by eks-converge. scripts/recreate-kind.sh carries the same
@@ -478,9 +478,9 @@ wait-root:
 	done
 	@printf "$(GREEN)▶$(NC) All ArgoCD Applications are Synced+Healthy.\n"
 
-# ======================================================================
+# ===============================================================
 # Live deployment-profile verification (deploy#1137)
-# ======================================================================
+# ===============================================================
 # Asserts a standing cluster actually runs the profile it claims: images,
 # entitlements seam, dashboard profile, signup front door, and that the edge
 # serves rather than 500ing on an incoherent combination.
@@ -496,9 +496,9 @@ wait-root:
 verify-profile: ## Assert the live cluster runs PROFILE=self-hosted|saas (deploy#1137)
 	@./scripts/verify-profile.sh $(PROFILE)
 
-# ======================================================================
+# ===============================================================
 # Live surface + seam verification (deploy#1041 / deploy#1039)
-# ======================================================================
+# ===============================================================
 # These extend verify-profile from "is the profile coherent" to "does the
 # profile's user-visible surface actually serve". Both need a live cluster and
 # both FAIL CLOSED: no cluster, wrong deployment profile, or a missing workload
@@ -526,9 +526,9 @@ verify-harness: ## Prove the live verification suites fail closed (offline, depl
 	@bats tests/harness/apex-zone-id.bats
 	@printf "$(GREEN)  ✓$(NC) [verify-harness] both suites fail closed.\n"
 
-# ======================================================================
+# ===============================================================
 # kind Stripe webhook tunnel (deploy#1135)
-# ======================================================================
+# ===============================================================
 # kind has no public ingress, so Stripe cannot POST to the edge. The SaaS
 # profile the kind cluster runs needs those deliveries — the receiver projects
 # subscription_status into tenant_quotas, which is where the entitlements
@@ -545,9 +545,9 @@ verify-harness: ## Prove the live verification suites fail closed (offline, depl
 stripe-listen: ## kind Stripe webhook tunnel — reconciles the signing secret, then forwards (deploy#1135)
 	@./scripts/stripe-listen.sh $(ARGS)
 
-# ======================================================================
+# ===============================================================
 # Gate 3: signup-to-working e2e smoke (deploy#88)
-# ======================================================================
+# ===============================================================
 # Proves the cluster is not just "all pods Ready" but actually serves a
 # working signup-to-tenant-provisioning flow without needing Playwright.
 #
@@ -738,6 +738,13 @@ check-rotation-writeback: ## The keyring write-back of rotate-credentials.yml ru
 	@python3 scripts/check-rotation-writeback.py --selftest
 	@python3 scripts/check-rotation-writeback.py
 check: check-rotation-writeback
+
+.PHONY: check-target-role-policy
+check-target-role-policy: ## The rendered instance role policy of a target node holds only the allowlisted actions, and no second policy escapes the render
+	@printf "$(GREEN)▶$(NC) check-target-role-policy...\n"
+	@python3 scripts/check-target-role-policy.py --selftest
+	@python3 scripts/check-target-role-policy.py
+check: check-target-role-policy
 
 .PHONY: check-bats-negation
 check-bats-negation: ## No bats test asserts with a bare `! command`, which never fails the test (hosted#12)

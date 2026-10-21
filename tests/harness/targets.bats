@@ -165,28 +165,3 @@ EOF2
   [ "$p1" -lt "$t" ]
   [ "$t" -lt "$p2" ]
 }
-
-# The role of a target node holds only what the node needs. A break-out reaches
-# it, so no target attaches the managed SSM policy, grants a KMS action, or
-# reads a parameter by a wildcard.
-role_too_wide() { # <main.tf>: prints each line that makes the role wider than it may be
-  grep -nE '^[^#]*(AmazonSSMManagedInstanceCore|"kms:|ssm:GetParameter"|ssm:GetParametersByPath|parameter/?\*|parameter\$\{[^}]*\}\*)' "$1"
-}
-
-@test "no target role attaches the managed SSM policy, grants KMS, or reads a parameter by wildcard" {
-  for f in "$REPO_ROOT"/targets/*/main.tf; do
-    run role_too_wide "$f"
-    [ "$status" -eq 1 ] || { echo "$f: $output"; false; }
-  done
-}
-
-@test "FAILING FIXTURE: a role that attaches the managed policy or grants a wide read is refused" {
-  printf 'policy_arn = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"\n' > "$WORK/bad1.tf"
-  printf 'actions = ["kms:Decrypt"]\n' > "$WORK/bad2.tf"
-  printf 'resources = ["arn:aws:ssm:us-east-1:1:parameter/*"]\n' > "$WORK/bad3.tf"
-  printf 'actions = ["ssm:GetParameter"]\n' > "$WORK/bad4.tf"
-  for f in "$WORK"/bad*.tf; do
-    run role_too_wide "$f"
-    [ "$status" -eq 0 ] || { echo "$f was accepted"; false; }
-  done
-}

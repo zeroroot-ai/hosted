@@ -24,6 +24,16 @@ variable "cost_center" {
   type        = string
 }
 
+variable "aws_account_id" {
+  description = "The account this target runs in. It names the one SSM parameter the instance role may read, and a precondition compares it with the session."
+  type        = string
+
+  validation {
+    condition     = can(regex("^[0-9]{12}$", var.aws_account_id))
+    error_message = "aws_account_id must be a 12-digit account id."
+  }
+}
+
 variable "aws_region" {
   description = "The region this target runs in."
   type        = string
