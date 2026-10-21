@@ -63,20 +63,6 @@ _stage0_head() {
   return 2
 }
 
-# stage0_old_state <env> <state-dir>: prints where a stage 0 state of this env
-# exists outside tfstate/stage0/, one place a line: the local file of the state
-# directory, and for drill the old key in the prod state bucket.
-stage0_old_state() {
-  local env="$1" state="$2" acct rc
-  [ -s "${state}/terraform.tfstate" ] && printf '%s\n' "${state}/terraform.tfstate"
-  if [ "$env" = drill ]; then
-    acct="$(aws sts get-caller-identity --query Account --output text)" || return 0
-    _stage0_head "zeroroot-ai-prod-tfstate-${acct}-${STAGE0_REGION}" "substrate/drill/terraform.tfstate" 2>/dev/null && \
-      printf 's3://zeroroot-ai-prod-tfstate-%s-%s/substrate/drill/terraform.tfstate\n' "$acct" "$STAGE0_REGION"
-  fi
-  return 0
-}
-
 # stage0_init <tf-dir> <env> <state-dir>
 # The state is in the durable bucket. A new environment has no bucket yet, so
 # its first apply uses a local state file under <state-dir>, and substrate.sh
@@ -86,17 +72,15 @@ stage0_init() {
   bucket="$(stage0_bucket "$env")" || die "could not read the AWS account, so the stage 0 state bucket of ${env} has no name"
   if aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
     rm -f "$state/.stage0-bootstrap" "$tf/backend_override.tf"
-    # An empty state key is a fresh start, and a plan from nothing would try to
-    # create every resource again. So when the key is empty and a state exists
-    # in the old place, refuse, and print the one-time migration.
-    local rc=0 old
+    # The durable bucket exists, so stage 0 has been applied, so its state must
+    # be at this key. An empty key means a plan from nothing, which would try to
+    # create every resource again. This holds on any machine: it does not depend
+    # on what files a machine has. The state moves once, with the command below.
+    local rc=0
     _stage0_head "$bucket" "${STAGE0_PREFIX}/terraform.tfstate" || rc=$?
     case "$rc" in
       0) ;;
-      1) old="$(stage0_old_state "$env" "$state")"
-         if [ -n "$old" ]; then
-           die "the stage 0 state of ${env} is not at s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate, and a state exists at: $(printf '%s' "$old" | tr '\n' ' '). A plan now would start from nothing and try to create every resource again. Run the one-time migration first: scripts/stage0-store.sh migrate ${env} ${state}"
-         fi ;;
+      1) die "the durable bucket ${bucket} exists, and the stage 0 state of ${env} is not at s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate. A plan now would start from nothing and try to create every resource again. Move the existing state there once, on the machine that holds it: scripts/stage0-store.sh migrate ${env} ${state}" ;;
       *) die "could not read s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate, so this run cannot tell an empty state from a state it may not read" ;;
     esac
     terraform -chdir="$tf" init -reconfigure -input=false -no-color \
@@ -234,6 +218,18 @@ stage0_migrate_old() {
     local acct; acct="$(aws sts get-caller-identity --query Account --output text)" || die "could not read the AWS account"
     aws s3 cp --only-show-errors "s3://zeroroot-ai-prod-tfstate-${acct}-${STAGE0_REGION}/substrate/drill/terraform.tfstate" "${state}/terraform.tfstate" \
       || die "could not read the old state of drill"
+  fi
+  # Drill also keeps its key slots and rotation record in the old location.
+  if [ "$env" = drill ]; then
+    local oacct ob; oacct="$(aws sts get-caller-identity --query Account --output text)" || die "could not read the AWS account"
+    ob="zeroroot-ai-prod-tfstate-${oacct}-${STAGE0_REGION}"
+    for f in key-slots.tfvars.json key-rotation.json; do
+      [ -f "${state}/${f}" ] && continue
+      if _stage0_head "$ob" "substrate/drill/${f}"; then
+        aws s3 cp --only-show-errors "s3://${ob}/substrate/drill/${f}" "${state}/${f}" \
+          || die "could not read the old ${f} of drill"
+      fi
+    done
   fi
   [ -s "${state}/terraform.tfstate" ] || die "${state}/terraform.tfstate does not exist, so there is no state to migrate"
   printf 'terraform {\n  backend "local" {\n    path = "%s/terraform.tfstate"\n  }\n}\n' "$state" > "$tf/backend_override.tf"

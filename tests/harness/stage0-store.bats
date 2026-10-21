@@ -75,33 +75,40 @@ lib() { bash -c 'die() { echo "DIE: $*" >&2; exit 2; }; . "$1"; shift; "$@"' _ "
   [ "$status" -eq 0 ]
   grep -q 'backend "local"' "$TF/backend_override.tf"
   [ -e "$BATS_TEST_TMPDIR/state/.stage0-bootstrap" ]
+  remote_state staging
   run lib stage0_init "$TF" staging "$BATS_TEST_TMPDIR/state"
   [ "$status" -eq 0 ]
   [ ! -e "$TF/backend_override.tf" ]
   [ ! -e "$BATS_TEST_TMPDIR/state/.stage0-bootstrap" ]
 }
 
-@test "FAILING FIXTURE: an empty state key with a local state in the state directory is refused, and the migrate command is named" {
-  mkdir -p "$BATS_TEST_TMPDIR/state"; echo '{"version":4}' > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
+@test "FAILING FIXTURE: an empty state key is refused on any machine, with or without a local state, and the migrate command is named" {
+  # No local state at all: a runner, a second workstation.
   run lib stage0_init "$TF" staging "$BATS_TEST_TMPDIR/state"
   [ "$status" -ne 0 ]
   [[ "$output" == *"start from nothing"* ]]
   [[ "$output" == *"scripts/stage0-store.sh migrate staging $BATS_TEST_TMPDIR/state"* ]]
   [ ! -e "$REC/terraform.args" ]
-}
-
-@test "FAILING FIXTURE: an empty state key with the old drill state in the prod state bucket is refused" {
-  mkdir -p "$REC/obj/zeroroot-ai-prod-tfstate-447184491447-us-east-1/substrate/drill"
-  : > "$REC/obj/zeroroot-ai-prod-tfstate-447184491447-us-east-1/substrate/drill/terraform.tfstate"
-  run lib stage0_init "$TF" drill "$BATS_TEST_TMPDIR/state"
-  [ "$status" -ne 0 ]
-  [[ "$output" == *"migrate drill"* ]]
-}
-
-@test "an empty state key with no old state anywhere is a fresh start and inits" {
+  # A local state does not change the answer.
+  mkdir -p "$BATS_TEST_TMPDIR/state"; echo '{"version":4}' > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
   run lib stage0_init "$TF" staging "$BATS_TEST_TMPDIR/state"
-  [ "$status" -eq 0 ] || { echo "$output"; false; }
-  grep -qx -- '-backend-config=key=tfstate/stage0/terraform.tfstate' "$REC/terraform.args"
+  [ "$status" -ne 0 ]
+  [ ! -e "$REC/terraform.args" ]
+}
+
+@test "FAILING FIXTURE: an unreadable state key is refused, not read as empty" {
+  cat > "$BIN/aws" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "sts get-caller-identity --query Account --output text") echo 447184491447; exit 0 ;;
+  "s3api head-bucket --bucket "*) exit 0 ;;
+  "s3api head-object --bucket "*) echo "An error occurred (403) when calling the HeadObject operation: Forbidden" >&2; exit 254 ;;
+esac
+exit 1
+SH
+  run lib stage0_init "$TF" staging "$BATS_TEST_TMPDIR/state"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"cannot tell an empty state"* ]]
 }
 
 @test "a state at the new key inits even when a local file exists" {
@@ -109,6 +116,25 @@ lib() { bash -c 'die() { echo "DIE: $*" >&2; exit 2; }; . "$1"; shift; "$@"' _ "
   mkdir -p "$BATS_TEST_TMPDIR/state"; echo '{"version":4}' > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
   run lib stage0_init "$TF" staging "$BATS_TEST_TMPDIR/state"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "the migrate command of drill also copies the key slots and the rotation record from substrate/drill/" {
+  ob=zeroroot-ai-prod-tfstate-447184491447-us-east-1
+  mkdir -p "$REC/obj/$ob/substrate/drill"
+  for f in terraform.tfstate key-slots.tfvars.json key-rotation.json; do : > "$REC/obj/$ob/substrate/drill/$f"; done
+  run "$REPO_ROOT/scripts/stage0-store.sh" migrate drill "$BATS_TEST_TMPDIR/state"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -qx -- '-migrate-state' "$REC/terraform.args"
+  grep -q "key-slots.tfvars.json" "$REC/uploads"
+  grep -q "key-rotation.json" "$REC/uploads"
+}
+
+@test "FAILING FIXTURE: the migrate command of drill with no old slot files uploads none" {
+  ob=zeroroot-ai-prod-tfstate-447184491447-us-east-1
+  mkdir -p "$REC/obj/$ob/substrate/drill"; : > "$REC/obj/$ob/substrate/drill/terraform.tfstate"
+  run "$REPO_ROOT/scripts/stage0-store.sh" migrate drill "$BATS_TEST_TMPDIR/state"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$REC/uploads" ]
 }
 
 @test "the migrate command moves a local state to the new key, and the slot files with it" {

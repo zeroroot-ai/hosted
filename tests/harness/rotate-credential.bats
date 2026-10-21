@@ -134,9 +134,3 @@ get() { "$REPO/scripts/keyring.sh" get "$STATE/keyring.env" "$1"; }
   [ "$status" -eq 2 ]
   [ ! -e "$STATE/.cluster-keyring-pushed" ]
 }
-
-@test "the workflow writes the keyring back on any exit after the marker, and the job still fails" {
-  wf="$REPO/.github/workflows/rotate-credentials.yml"
-  grep -q "pushed=true" "$wf"
-  [ "$(grep -c "steps.rotate.outputs.pushed == 'true'" "$wf")" -ge 3 ]
-}

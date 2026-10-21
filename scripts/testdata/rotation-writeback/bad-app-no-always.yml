@@ -1,0 +1,76 @@
+name: fixture
+'on':
+  workflow_dispatch: {}
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Rotate
+      id: rotate
+      env:
+        WAIT_SECS: '900'
+        SLEEP_SECS: '30'
+        SECRET_WAIT_SECS: '600'
+      run: "set -uo pipefail\nstate=\"${SUBSTRATE_DIR}/${ENV}\"\n# Stage 0 needs the\
+        \ public ids of the Argo CD GitHub App (substrate.env).\nsget() { grep -E\
+        \ \"^$1=\" \"$state/substrate.env\" | head -n1 | cut -d= -f2- || true; }\n\
+        TF_VAR_argocd_github_app_id=\"$(sget GITHUB_APP_ID)\"\nTF_VAR_argocd_github_app_installation_id=\"\
+        $(sget GITHUB_APP_INSTALLATION_ID)\"\nexport TF_VAR_argocd_github_app_id TF_VAR_argocd_github_app_installation_id\n\
+        # The cluster path of the other workflows: an SSM forward for staging\n# (scripts/with-cluster.sh\
+        \ passes the exit code of the command on),\n# the EKS kubeconfig for prod.\n\
+        case \"$ENV\" in\n  staging) scripts/with-cluster.sh staging scripts/rotate-credential.sh\
+        \ \"$state\" \"$ENV\" \"$CREDENTIAL\" \"$STEP\"; rc=$? ;;\n  prod)    make\
+        \ eks-kubeconfig ENV=prod \\\n             && KUBECONFIG=\"/tmp/eks-prod.kubeconfig\"\
+        \ scripts/rotate-credential.sh \"$state\" \"$ENV\" \"$CREDENTIAL\" \"$STEP\"\
+        ; rc=$? ;;\n  *)       echo \"::error::ENV=$ENV has no cluster path\"; rc=2\
+        \ ;;\nesac\necho \"rc=$rc\" >> \"$GITHUB_OUTPUT\"\nexit 0\n"
+    - name: Decide the write-back
+      id: decide
+      if: ${{ always() }}
+      run: "set -uo pipefail\nstate=\"${SUBSTRATE_DIR:-}/${ENV}\"\nif [ -n \"${SUBSTRATE_DIR:-}\"\
+        \ ] && [ -e \"$state/.cluster-keyring-pushed\" ] && [ -s \"$state/keyring.env\"\
+        \ ]; then\n  echo \"write=true\" >> \"$GITHUB_OUTPUT\"\n  while IFS= read\
+        \ -r line; do\n    case \"$line\" in ''|'#'*) continue ;; esac\n    v=\"${line#*=}\"\
+        \n    if [ -n \"$v\" ]; then echo \"::add-mask::$v\"; fi\n  done < \"$state/keyring.env\"\
+        \nelse\n  echo \"write=false\" >> \"$GITHUB_OUTPUT\"\nfi\n"
+    - name: Make the GitHub App token
+      id: app
+      if: ${{ steps.decide.outputs.write == 'true' }}
+      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
+      with:
+        app-id: ${{ vars.KEYRING_APP_ID }}
+        private-key: ${{ secrets.KEYRING_APP_PRIVATE_KEY }}
+        owner: ${{ github.repository_owner }}
+        repositories: ${{ github.event.repository.name }}
+        permission-environments: write
+    - name: Write the keyring and substrate.env back to the environment
+      if: ${{ always() && steps.decide.outputs.write == 'true' }}
+      env:
+        GH_TOKEN: ${{ steps.app.outputs.token }}
+      run: "set -euo pipefail\nstate=\"${SUBSTRATE_DIR}/${ENV}\"\n[ -e \"$state/.cluster-keyring-pushed\"\
+        \ ] || { echo \"No marker on disk: nothing to write back.\"; exit 0; }\nif\
+        \ [ \"$(sha256sum < \"$state/keyring.env\" | cut -d' ' -f1)\" != \"$(cat \"\
+        $state/.read-keyring.sha256\")\" ]; then\n  gh secret set BRINGUP_KEYRING\
+        \ --env \"$ENV\" --repo \"$GITHUB_REPOSITORY\" < \"$state/keyring.env\"\n\
+        \  echo \"BRINGUP_KEYRING of ${ENV} holds the new keyring.\"\nelse\n  echo\
+        \ \"The keyring did not change.\"\nfi\nif [ \"$(sha256sum < \"$state/substrate.env\"\
+        \ | cut -d' ' -f1)\" != \"$(cat \"$state/.read-substrate.sha256\")\" ]; then\n\
+        \  gh variable set SUBSTRATE_ENV_FILE --env \"$ENV\" --repo \"$GITHUB_REPOSITORY\"\
+        \ < \"$state/substrate.env\"\n  echo \"SUBSTRATE_ENV_FILE of ${ENV} holds\
+        \ the new substrate.env.\"\nelse\n  echo \"substrate.env did not change.\"\
+        \nfi\n"
+    - name: Result
+      if: ${{ always() }}
+      env:
+        RC: ${{ steps.rotate.outputs.rc }}
+      run: "case \"$RC\" in\n  0)  echo \"The rotation step is done.\" ;;\n  10) echo\
+        \ \"::notice::The rotation waits for AWS to show the old key unused. Dispatch\
+        \ this workflow again later with the same inputs.\" ;;\n  3)  echo \"::error::The\
+        \ rotation halted: a person must act first. Read the log of the Rotate step.\"\
+        ; exit 1 ;;\n  *)  if [ -n \"${SUBSTRATE_DIR:-}\" ] && [ -e \"${SUBSTRATE_DIR}/${ENV}/.cluster-keyring-pushed\"\
+        \ ]; then\n        echo \"::error::The rotation step failed with exit ${RC:-none}\
+        \ after the cluster may have received the new keyring. The environment now\
+        \ holds that keyring. Read the log of the Rotate step before the next run.\"\
+        \n      else\n        echo \"::error::The rotation step failed with exit ${RC:-none}.\
+        \ The environment keyring is unchanged. Read the log of the Rotate step.\"\
+        \n      fi\n      exit 1 ;;\nesac\n"

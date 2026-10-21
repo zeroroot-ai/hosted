@@ -68,6 +68,7 @@ SH
 B=zeroroot-ai-${E:-staging}-durable-447184491447
 case "$*" in
   "sts get-caller-identity --query Account --output text") echo 447184491447; exit 0 ;;
+  "s3api head-bucket --bucket $B") exit 0 ;;
   # Only the stage 0 prefix of the durable bucket and the keyring secret of drill are declared.
   "s3api head-object --bucket $B --key tfstate/stage0/"*)
     k="${*: -1}"; [ -f "$D/s3/$(basename "$k")" ] && exit 0
@@ -213,6 +214,7 @@ rotate() {
   # The files that the run reads from the durable bucket: what the test set up
   # in the state directory, unless the test put its own in the bucket.
   mkdir -p "$D/s3"
+  : > "$D/s3/terraform.tfstate"
   for f in key-slots.tfvars.json key-rotation.json; do
     [ -f "$STATE/$f" ] && cp "$STATE/$f" "$D/s3/$f" || true
   done

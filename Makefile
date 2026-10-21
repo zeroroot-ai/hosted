@@ -732,6 +732,13 @@ check-velero-kinds: ## kubectl names a Backup or Restore with its group, because
 	@python3 scripts/check-velero-kinds-qualified.py
 check: check-velero-kinds
 
+.PHONY: check-rotation-writeback
+check-rotation-writeback: ## The keyring write-back of rotate-credentials.yml runs on any end of the job and reads its marker from the disk
+	@printf "$(GREEN)▶$(NC) check-rotation-writeback...\n"
+	@python3 scripts/check-rotation-writeback.py --selftest
+	@python3 scripts/check-rotation-writeback.py
+check: check-rotation-writeback
+
 .PHONY: check-bats-negation
 check-bats-negation: ## No bats test asserts with a bare `! command`, which never fails the test (hosted#12)
 	@printf "$(GREEN)▶$(NC) check-bats-negation...\n"
