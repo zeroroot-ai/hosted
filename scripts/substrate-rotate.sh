@@ -5,8 +5,11 @@
 # Stage 0 keeps two access key slots on each IAM user (key_slots in
 # substrate/gibson-bootstrap/variables.tf, the state file
 # <state-dir>/key-slots.tfvars.json). One rotation, run at stage 0 on the
-# operator workstation, or for drill in the drill workflow (ADR-0083), through
-# `make substrate-rotate ENV=<env> CREDENTIAL=<platform|smtp|dns|setec-disk-builder>`:
+# runner of a workflow (ADR-0083, amendment of 2026-10-21):
+# .github/workflows/rotate-credentials.yml for staging and prod, and
+# .github/workflows/drill.yml for drill. The role of the first workflow can
+# change only the access keys of these users (substrate/gibson-bootstrap/
+# rotation-role.tf). The call is:
 #
 #   1. Add the free slot and make it active: terraform applies a new key and
 #      deletes nothing. The outputs now give the new key.
@@ -53,6 +56,8 @@ set -euo pipefail
 
 STATE="${1:-}"; ENV="${2:-}"; USER_NAME="${3:-}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/keyring-pushed.sh
+. "$REPO/scripts/lib/keyring-pushed.sh"
 TF_DIR="$REPO/substrate/gibson-bootstrap"
 KEYRING="$REPO/scripts/keyring.sh"
 # Overridable for tests/harness/substrate-rotate.bats only.
@@ -77,15 +82,13 @@ say()  { printf '  ✓ [substrate-rotate] %s\n' "$*"; }
 
 [ -n "$STATE" ] && [ -n "$ENV" ] && [ -n "$USER_NAME" ] || die "usage: substrate-rotate.sh <state-dir> <env> <platform|smtp|dns|setec-disk-builder>"
 case "$ENV" in staging|prod|drill) ;; *) die "ENV=$ENV has no AWS stage 0" ;; esac
-# Where the stage 0 files live: the workstation, or AWS for drill
-# (scripts/stage0-store.sh, ADR-0083). For drill the run reads them first,
-# and keeps every change in AWS when it ends, stopped or done.
+# The stage 0 files live in the durable bucket (scripts/stage0-store.sh). The
+# run reads them first, and keeps every change in AWS when it ends, stopped
+# or done.
 # shellcheck source=stage0-store.sh
 . "$REPO/scripts/stage0-store.sh"
-if stage0_remote "$ENV"; then
-  stage0_pull "$ENV" "$STATE"
-  trap 'stage0_push "$ENV" "$STATE"' EXIT
-fi
+stage0_pull "$ENV" "$STATE"
+trap 'stage0_push "$ENV" "$STATE"' EXIT
 SLOTS="$STATE/key-slots.tfvars.json"
 # The time of the last switch of each user. Not a Terraform variable.
 SWITCHED="$STATE/key-rotation.json"
@@ -224,6 +227,9 @@ secret_value() { kubectl -n "$1" get secret "$2" -o json 2>/dev/null | jq -r --a
 
 # 3. The cluster: the producer of the keyring Secrets, and a restart of each
 #    workload whose pods read one of the Secret keys of this user.
+# From here the cluster may hold the new key. The marker tells the workflow to
+# write the keyring back on any exit (scripts/lib/keyring-pushed.sh).
+: > "$STATE/$PUSHED_MARKER"
 "$K2C" "$STATE/substrate.env" >/dev/null
 for sk in $SECRET_KEYS; do
   ns="${sk%%/*}"; rest="${sk#*/}"; sec="${rest%%/*}"; key="${rest#*/}"

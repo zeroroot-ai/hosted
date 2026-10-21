@@ -37,3 +37,6 @@ audit_lock_mode = "GOVERNANCE"
 # stage 0 state in the prod state bucket (ADR-0083 amendment of 2026-10-13):
 # the drill rotates its own access keys (scripts/substrate-rotate.sh).
 keyring_in_aws = true
+
+# Drill rotates its keys in drill.yml as the bringup role, which then reads tfstate/stage0/.
+stage0_state_principal_role_names = ["OrganizationAccountAccessRole", "eks-bringup"]

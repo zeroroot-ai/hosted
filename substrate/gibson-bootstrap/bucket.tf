@@ -38,6 +38,11 @@ resource "aws_s3_bucket" "durable" {
   }
 
   lifecycle {
+    # The bucket holds the state of this workspace (backend.tf). An apply
+    # that would destroy it fails at plan time. substrate.sh also refuses any
+    # plan that deletes a resource.
+    prevent_destroy = true
+
     precondition {
       condition     = local.account_id == var.aws_account_id
       error_message = "The AWS session is in account ${local.account_id}, but envs/${var.environment}.tfvars names ${var.aws_account_id}. Select the environment's profile."
@@ -143,6 +148,29 @@ resource "aws_s3_bucket_lifecycle_configuration" "durable" {
 }
 
 data "aws_iam_policy_document" "durable" {
+  # The state of stage 0, its key slots and its rotation record. Only the
+  # rotation role and the operator role touch them (rotation-role.tf,
+  # scripts/stage0-store.sh). The state holds the access keys of the stage 0
+  # users, and the platform credential and every other principal are refused.
+  statement {
+    sid    = "DenyStage0StateToEveryoneElse"
+    effect = "Deny"
+    principals {
+      type        = "*"
+      identifiers = ["*"]
+    }
+    actions   = ["s3:*"]
+    resources = ["${aws_s3_bucket.durable.arn}/${local.state_prefix}/*"]
+    condition {
+      test     = "StringNotEquals"
+      variable = "aws:PrincipalArn"
+      values = concat(
+        [for r in var.stage0_state_principal_role_names : "arn:aws:iam::${var.aws_account_id}:role/${r}"],
+        var.rotation_role_enabled ? [aws_iam_role.rotation[0].arn] : [],
+      )
+    }
+  }
+
   statement {
     sid    = "DenyInsecureTransport"
     effect = "Deny"

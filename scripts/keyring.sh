@@ -135,8 +135,12 @@
 #
 # ROTATION (ADR-0171, row keyring-generated-keys). Only a member with a
 # <MEMBER>_PREVIOUS member rotates in place: OPENBAO_SEAL_KEY,
-# VELERO_REPO_PASSWORD and SETEC_DISK_SIGNING_SEED. It runs at stage 0 on the operator workstation, never
-# in a workflow (ADR-0083). The seal key:
+# VELERO_REPO_PASSWORD and SETEC_DISK_SIGNING_SEED. It runs in a workflow
+# (ADR-0083, amendment of 2026-10-21): .github/workflows/rotate-credentials.yml.
+# That workflow is the one documented entry point. It needs an approval for each run,
+# and a GitHub App writes the new keyring into the environment secret
+# BRINGUP_KEYRING. Each step below is one dispatch of that workflow
+# (scripts/rotate-credential.sh), except the commit of an overlay. The seal key:
 #   1. keyring.sh rotate <file> OPENBAO_SEAL_KEY
 #   2. keyring-to-cluster.sh, then restart OpenBao. The static seal unwraps
 #      with either key and wraps with the new one (charts, the openbao

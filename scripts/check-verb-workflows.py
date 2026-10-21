@@ -48,13 +48,14 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW_DIR = ROOT / ".github/workflows"
 FIXTURES = ROOT / "scripts/testdata/verb-workflows"
 
-VERBS = ("preflight", "teardown", "recreate")
+VERBS = ("preflight", "teardown", "recreate", "rotate-credentials")
 # preflight reads and proves; it changes nothing, so it can name staging.
 # teardown and recreate cannot (ADR-0095, hosted#403).
 ENV_OPTIONS = {
     "preflight": ["staging", "prod"],
     "teardown": ["prod"],
     "recreate": ["prod"],
+    "rotate-credentials": ["staging", "prod"],
 }
 ENV_EXPR = re.compile(r"^\$\{\{\s*inputs\.env\s*\}\}$")
 SECRET_EXPR = re.compile(r"secrets\.BRINGUP_KEYRING")

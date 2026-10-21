@@ -153,3 +153,8 @@ output "keyring_secret" {
   description = "The Secrets Manager secret that holds the keyring and substrate.env of this environment, or empty when the keyring stays on the workstation (keyring-secret.tf)."
   value       = var.keyring_in_aws ? aws_secretsmanager_secret.keyring[0].name : ""
 }
+
+output "rotation_role_arn" {
+  description = "The key rotation role (rotation-role.tf). Set it as the variable KEY_ROTATION_ROLE_ARN of the GitHub environment of this env. Empty when the role is off."
+  value       = var.rotation_role_enabled ? aws_iam_role.rotation[0].arn : ""
+}

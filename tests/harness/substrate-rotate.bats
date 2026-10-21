@@ -65,16 +65,17 @@ SH
   # state bucket is $D/s3 and the keyring secret is $D/sm.json.
   cat > "$D/bin/aws" <<'SH'
 #!/usr/bin/env bash
-B=zeroroot-ai-prod-tfstate-447184491447-us-east-1
+B=zeroroot-ai-${E:-staging}-durable-447184491447
 case "$*" in
   "sts get-caller-identity --query Account --output text") echo 447184491447; exit 0 ;;
-  # Only the stage 0 prefix of drill and its keyring secret are declared.
-  "s3api head-object --bucket $B --key substrate/drill/"*)
+  "s3api head-bucket --bucket $B") exit 0 ;;
+  # Only the stage 0 prefix of the durable bucket and the keyring secret of drill are declared.
+  "s3api head-object --bucket $B --key tfstate/stage0/"*)
     k="${*: -1}"; [ -f "$D/s3/$(basename "$k")" ] && exit 0
     echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 254 ;;
-  "s3 cp --only-show-errors s3://$B/substrate/drill/"*)
+  "s3 cp --only-show-errors s3://$B/tfstate/stage0/"*)
     cp "$D/s3/$(basename "${@: -2:1}")" "${@: -1}"; exit 0 ;;
-  "s3 cp --only-show-errors --sse aws:kms --sse-kms-key-id alias/zeroroot-ai-prod-tf-bootstrap "*" s3://$B/substrate/drill/"*)
+  "s3 cp --only-show-errors "*" s3://$B/tfstate/stage0/"*)
     mkdir -p "$D/s3"; cp "${@: -2:1}" "$D/s3/$(basename "${@: -1}")"; exit 0 ;;
   "secretsmanager get-secret-value --secret-id zeroroot-ai/drill/keyring "*)
     [ -s "$D/sm.json" ] || { echo "An error occurred (ResourceNotFoundException): Secrets Manager can't find the specified secret value" >&2; exit 254; }
@@ -210,7 +211,14 @@ SH
 }
 
 rotate() {
-  run env PATH="$D/bin:$PATH" SUBSTRATE_SH="$D/bin/substrate" K2C="$D/bin/k2c" SLEEP_SECS=0 RESTART_TIMEOUT=2 RESTART_PODS_POLL=0 \
+  # The files that the run reads from the durable bucket: what the test set up
+  # in the state directory, unless the test put its own in the bucket.
+  mkdir -p "$D/s3"
+  : > "$D/s3/terraform.tfstate"
+  for f in key-slots.tfvars.json key-rotation.json; do
+    [ -f "$STATE/$f" ] && cp "$STATE/$f" "$D/s3/$f" || true
+  done
+  run env E="${E:-staging}" D="$D" PATH="$D/bin:$PATH" SUBSTRATE_SH="$D/bin/substrate" K2C="$D/bin/k2c" SLEEP_SECS=0 RESTART_TIMEOUT=2 RESTART_PODS_POLL=0 \
     STUB_TF_REQUIRE_INIT="${STUB_TF_REQUIRE_INIT:-}" STUB_TF_OUTPUT_FAIL="${STUB_TF_OUTPUT_FAIL:-}" WANT0="${WANT0:-}" WAIT_SECS="${WAIT_SECS:-0}" QUIET_SECS="${QUIET_SECS:-0}" U="${U:-platform}" TFRES="${TFRES:-}" APPLY_FAIL="${APPLY_FAIL:-}" \
     "$REPO/scripts/substrate-rotate.sh" "$STATE" "${E:-staging}" "${U:-platform}"
 }
@@ -532,4 +540,18 @@ smtp_relay_new() {
   [ "$status" -eq 2 ]
   [[ "$output" == *"changed since it was read from or written to AWS"* ]]
   [ "$(sha256sum < "$STATE/keyring.env")" = "$before" ]
+}
+
+@test "a rotation that stops after the push to the cluster leaves the marker the workflow reads" {
+  # The new key is not used yet: the run stops with exit 10 after step 3.
+  rotate
+  [ "$status" -eq 10 ]
+  [ -e "$STATE/.cluster-keyring-pushed" ]
+}
+
+@test "FAILING FIXTURE: a rotation that fails before the push leaves no marker" {
+  rm -f "$STATE/key-slots.tfvars.json" "$D/s3/key-slots.tfvars.json"
+  rotate
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/.cluster-keyring-pushed" ]
 }
