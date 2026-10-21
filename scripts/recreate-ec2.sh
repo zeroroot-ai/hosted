@@ -116,6 +116,8 @@ case "$LIVE_CLUSTER_SINCE" in None|null) LIVE_CLUSTER_SINCE="" ;; esac
 . "$HERE/lib/ec2-cluster-access.sh"
 # shellcheck source=lib/cilium.sh
 . "$HERE/lib/cilium.sh"
+# shellcheck source=lib/targets.sh
+. "$HERE/lib/targets.sh"
 
 # ---------------------------------------------------------------------------
 # Stage 1 — the cluster.
@@ -189,6 +191,14 @@ INSTANCE_ID="$(terraform -chdir="$EC2_DIR" output -raw instance_id)" \
 NODE_IP="$(terraform -chdir="$EC2_DIR" output -raw node_public_ip)" \
   || die "stage 1 applied but reported no address"
 log "stage 1: instance ${INSTANCE_ID} at ${NODE_IP}"
+
+# The targets of this environment (targets/<name>/, for example the
+# kubernetes-goat node of the demo, gibson#496) join the network that phase 1
+# just made, so they come up here, beside the platform node, from the same
+# durable bucket. The teardown destroys them first (lib/targets.sh).
+log "stage 1: the targets that join this network"
+targets_apply "$ENV_NAME" "zeroroot-ai-${ENV_NAME}-durable-${ACCOUNT}" \
+  || die "a target under targets/ did not come up. The platform node is up. Read the error above and run the recreate again: terraform is idempotent"
 
 # ---------------------------------------------------------------------------
 # The node finishes its own bringup. The marker is written LAST by
