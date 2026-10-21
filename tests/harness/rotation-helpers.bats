@@ -520,18 +520,18 @@ PY
   cat > "$TMP/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
 case "$*" in
-  "-n velero get backups -o json")
+  "-n velero get backups.velero.io -o json")
     echo x >> "$STUB_DIR/reads"
     if [ "$(wc -l < "$STUB_DIR/reads")" -le "${STUB_BUSY:-0}" ]; then p=InProgress; else p=Completed; fi
     printf '{"items":[{"metadata":{"name":"platform-hourly-1"},"status":{"phase":"%s"}}]}' "$p" ;;
   "apply -f -") cat > "$STUB_DIR/applied"; echo x >> "$STUB_DIR/applies" ;;
   # The storage locations. STUB_BSL: the phase (default Available).
   # STUB_BSL_VALIDATED: the lastValidationTime (default: far in the future).
-  "-n velero get backupstoragelocations -o jsonpath="*) printf '%s %s\n' "${STUB_BSL:-Available}" "${STUB_BSL_VALIDATED-2099-01-01T00:00:00Z}" ;;
+  "-n velero get backupstoragelocations.velero.io -o jsonpath="*) printf '%s %s\n' "${STUB_BSL:-Available}" "${STUB_BSL_VALIDATED-2099-01-01T00:00:00Z}" ;;
   # STUB_PHASE_FIRST_EMPTY: the first backup of the check has no phase, as a
   # server that does not reconcile it. STUB_PHASE_EMPTY: every backup has none.
   # A bound, so a loop that never ends fails the test instead of hanging it.
-  "-n velero get backup rotation-drill-"*" -o jsonpath={.status.phase}")
+  "-n velero get backups.velero.io rotation-drill-"*" -o jsonpath={.status.phase}")
     echo x >> "$STUB_DIR/phase-reads"
     if [ "$(wc -l < "$STUB_DIR/phase-reads")" -gt 50 ]; then printf 'Completed'
     elif [ -n "${STUB_PHASE_EMPTY:-}" ]; then :
@@ -539,10 +539,10 @@ case "$*" in
     else printf '%s' "$STUB_PHASE"; fi ;;
   # STUB_DELETE_FAILS: the delete fails. STUB_STAYS: the delete works and the
   # backup is still there.
-  "-n velero delete backup rotation-drill-"*" --ignore-not-found --wait=false")
+  "-n velero delete backups.velero.io rotation-drill-"*" --ignore-not-found --wait=false")
     [ -z "${STUB_DELETE_FAILS:-}" ] || exit 1
     echo "$5" >> "$STUB_DIR/deleted" ;;
-  "-n velero get backup rotation-drill-"?*)
+  "-n velero get backups.velero.io rotation-drill-"?*)
     # The check that a deleted backup is gone: --ignore-not-found -o name.
     # STUB_GET_ERROR: the API does not answer.
     if [ "$#" -eq 8 ] && [ "$6" = --ignore-not-found ]; then
@@ -555,8 +555,8 @@ case "$*" in
   # The Velero server pods: two start times, the newest counts.
   "-n velero get pods -l name=velero -o jsonpath="*)
     [ -n "${STUB_POD_NONE:-}" ] || printf '2026-10-20T12:00:00Z\n%s\n' "${STUB_POD_START:-2026-10-20T13:00:05Z}" ;;
-  "-n velero get pods -o wide"|"-n velero get backupstoragelocations"|"-n velero logs deployment/velero --tail=60") echo "stub diagnostics" ;;
-  "-n velero get backup rotation-drill-"*" -o yaml") printf 'status:\n  phase: ""\n' ;;
+  "-n velero get pods -o wide"|"-n velero get backupstoragelocations.velero.io"|"-n velero logs -l name=velero --tail=60") echo "stub diagnostics" ;;
+  "-n velero get backups.velero.io rotation-drill-"*" -o yaml") printf 'status:\n  phase: ""\n' ;;
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
 esac
 SH
@@ -592,7 +592,7 @@ run_velero() {
 
 @test "FAILING FIXTURE: a backup list that cannot be read is a busy queue, not an empty one" {
   velero_helpers
-  sed -i 's|^  "-n velero get backups -o json")$|  "-n velero get backups -o json") [ -z "${STUB_LIST_BROKEN:-}" ] \|\| exit 1|' "$TMP/bin/kubectl"
+  sed -i 's|^  "-n velero get backups.velero.io -o json")$|  "-n velero get backups.velero.io -o json") [ -z "${STUB_LIST_BROKEN:-}" ] \|\| exit 1|' "$TMP/bin/kubectl"
   export STUB_BUSY=0 STUB_PHASE=Completed STUB_LIST_BROKEN=1
   run_velero 0
   [ "$status" -eq 0 ] || { echo "$output"; false; }

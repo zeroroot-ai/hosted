@@ -729,6 +729,13 @@ check-kubectl-spdy: ## A workflow job that runs kubectl exec sets KUBECTL_REMOTE
 	@python3 scripts/check-kubectl-spdy.py
 check: check-kubectl-spdy
 
+.PHONY: check-velero-kinds
+check-velero-kinds: ## kubectl names a Backup or Restore with its group, because two operators own a kind named Backup (drill 39461957621)
+	@printf "$(GREEN)▶$(NC) check-velero-kinds...\n"
+	@python3 scripts/check-velero-kinds-qualified.py --selftest
+	@python3 scripts/check-velero-kinds-qualified.py
+check: check-velero-kinds
+
 .PHONY: check-bats-negation
 check-bats-negation: ## No bats test asserts with a bare `! command`, which never fails the test (hosted#12)
 	@printf "$(GREEN)▶$(NC) check-bats-negation...\n"
