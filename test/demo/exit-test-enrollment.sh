@@ -38,18 +38,24 @@
 #      authorize URL. A person opens it and grants access at GitLab. The auth
 #      status then reports a grant authorized by the admin's subject with the
 #      mcp scope, and the connector reaches Ready.
-#   9. The agent lists the connector's tools and calls one read-only tool
-#      against DEMO_GITLAB_PROJECT. The result names the project.
-#  10. The audit trail shows the call resolved to the agent, and the agent
-#      identity resolves to the enrolling person.
+#   9. The admin submits a mission (gibson mission submit) with one agent node
+#      that names the enrolled agent. The agent claims the dispatch, lists the
+#      connector's tools and calls one read-only tool against
+#      DEMO_GITLAB_PROJECT with the work id of the dispatch, so the call runs
+#      inside the mission. The result names the project.
+#  10. The audit trail shows the call with the agent as actor and the mission
+#      id of step 9, and the agent identity resolves to the enrolling person.
 #  11. The admin revokes the grant. The status reports no grant, and the
-#      agent's next call is refused.
+#      agent's next call, again in a mission, is refused.
+#  12. The test deletes the OpenBao pod. The pod returns unsealed with no hand
+#      step (the static seal opens it from the keyring).
+#  13. The next connector call, in a new mission, works again.
 #
 # Modes:
 #   --selftest          offline. Proves every assertion in this file can fail.
 #                       No cluster, no network, no docker.
 #   --phase <p>         enroll (1 to 5 and 7), completion (1 to 3 and 6),
-#                       gitlab (1 to 3, then 8 to 11), or all (default,
+#                       gitlab (1 to 3, then 8 to 10, 12, 13 and 11), or all (default,
 #                       1 to 5, then 7, then 6; the GitLab steps need a
 #                       person at the GitLab consent page, so `all` leaves
 #                       them out and no workflow runs them).
@@ -109,7 +115,7 @@ phase_steps() {
   case "$1" in
     enroll) echo "1 2 3 4 5 7" ;;
     completion) echo "1 2 3 6" ;;
-    gitlab) echo "1 2 3 8 9 10 11" ;;
+    gitlab) echo "1 2 3 8 9 10 12 13 11" ;;
     all) echo "1 2 3 4 5 7 6" ;;
     *) ;;
   esac
@@ -221,8 +227,29 @@ assert_call_refused() {
 
 # assert_audit_names_agent <ListAuditEvents json> <agent principal id> <connector id>
 # One audit event records the agent as the actor of a call on the connector.
+# actor_id and target_object are the fields since gibson#544 (actor_user_id and
+# target_resource are reserved), and actor_source is "agent" for an agent.
 assert_audit_names_agent() {
-  jq -e --arg a "$2" --arg c "$3" '[.events[]? | select((.actorUserId == $a) and ((.targetResource // "") | contains($c)))] | length > 0' <<<"$1" >/dev/null
+  jq -e --arg a "$2" --arg c "$3" '[.events[]? | select((.actorId == $a) and (.actorSource == "agent") and ((.targetObject // "") | contains($c)))] | length > 0' <<<"$1" >/dev/null
+}
+
+# assert_audit_names_mission <ListAuditEvents json> <agent principal id> <connector id> <mission id>
+# The same event also carries the mission id in its details. A call outside a
+# mission has none, and the check refuses it.
+assert_audit_names_mission() {
+  [ -n "$4" ] || return 1
+  jq -e --arg a "$2" --arg c "$3" --arg m "$4" '[.events[]? | select((.actorId == $a) and (.actorSource == "agent") and ((.targetObject // "") | contains($c)) and ((.details.mission_id // .details.missionId // "") == $m))] | length > 0' <<<"$1" >/dev/null
+}
+
+# assert_bao_returned <old pod uid> <new pod uid> <seal state>
+# OpenBao is a new pod (a new uid), and it reports initialized and unsealed.
+assert_bao_returned() {
+  [ -n "$1" ] && [ -n "$2" ] && [ "$1" != "$2" ] && [ "$3" = unsealed ]
+}
+
+# assert_mission_id <id>: gibson mission submit --detach printed a mission id.
+assert_mission_id() {
+  [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,}$ ]]
 }
 
 # assert_host_key_kept <sha before> <sha after>
@@ -310,7 +337,7 @@ if [ "${1:-}" = "--selftest" ]; then
   log "phase selection"
   [ "$(phase_steps enroll)" = "1 2 3 4 5 7" ] || { failures=$((failures + 1)); echo "SELFTEST FAIL: the enroll phase does not run steps 1 to 5 and 7" >&2; }
   [ "$(phase_steps completion)" = "1 2 3 6" ] || { failures=$((failures + 1)); echo "SELFTEST FAIL: the completion phase does not run steps 1 to 3 and 6" >&2; }
-  [ "$(phase_steps gitlab)" = "1 2 3 8 9 10 11" ] || { failures=$((failures + 1)); echo "SELFTEST FAIL: the gitlab phase does not run steps 1 to 3 and 8 to 11" >&2; }
+  [ "$(phase_steps gitlab)" = "1 2 3 8 9 10 12 13 11" ] || { failures=$((failures + 1)); echo "SELFTEST FAIL: the gitlab phase does not run steps 1 to 3, 8 to 10, 12, 13 and 11" >&2; }
   [ -z "$(phase_steps nonsense)" ] || { failures=$((failures + 1)); echo "SELFTEST FAIL: an unknown phase runs steps" >&2; }
   echo "selftest ok: each phase names its steps and an unknown phase names none"
 
@@ -331,9 +358,25 @@ if [ "${1:-}" = "--selftest" ]; then
   expect_pass "a refused call after revoke" assert_call_refused '{"ok":false,"refused":true,"error":"permission_denied"}'
   expect_fail "a call that still answers after revoke" assert_call_refused '{"ok":true,"output":"grp/proj"}'
   expect_fail "a probe that died for another reason" assert_call_refused '{"ok":false,"error":"connect failed"}'
-  expect_pass "an audit event naming the agent on the connector" assert_audit_names_agent '{"events":[{"actorUserId":"agent_principal:1","targetResource":"component:connector/gitlab"}]}' agent_principal:1 gitlab
-  expect_fail "an audit event by another actor" assert_audit_names_agent '{"events":[{"actorUserId":"user:9","targetResource":"component:connector/gitlab"}]}' agent_principal:1 gitlab
+  ev='{"events":[{"actorId":"agent_principal:1","actorSource":"agent","targetObject":"component:connector/gitlab","details":{"mission_id":"m-0001abcd"}}]}'
+  expect_pass "an audit event naming the agent on the connector" assert_audit_names_agent "$ev" agent_principal:1 gitlab
+  expect_fail "an audit event by another actor" assert_audit_names_agent '{"events":[{"actorId":"user:9","actorSource":"user","targetObject":"component:connector/gitlab"}]}' agent_principal:1 gitlab
+  expect_fail "the reserved field names of before gibson#544" assert_audit_names_agent '{"events":[{"actorUserId":"agent_principal:1","targetResource":"component:connector/gitlab"}]}' agent_principal:1 gitlab
   expect_fail "an empty audit trail" assert_audit_names_agent '{"events":[]}' agent_principal:1 gitlab
+  expect_pass "an audit event with the mission id" assert_audit_names_mission "$ev" agent_principal:1 gitlab m-0001abcd
+  expect_fail "an audit event of another mission" assert_audit_names_mission "$ev" agent_principal:1 gitlab m-9999zzzz
+  expect_fail "an audit event with no mission id (a call outside a mission)" assert_audit_names_mission '{"events":[{"actorId":"agent_principal:1","actorSource":"agent","targetObject":"component:connector/gitlab","details":{}}]}' agent_principal:1 gitlab m-0001abcd
+  expect_fail "an empty expected mission id" assert_audit_names_mission "$ev" agent_principal:1 gitlab ""
+  expect_pass "a mission id" assert_mission_id 0198f0c2-aaaa-7bbb-8ccc-123456789abc
+  expect_fail "an empty mission id" assert_mission_id ""
+  expect_fail "an error line as a mission id" assert_mission_id "Error: no target"
+
+  log "OpenBao returns on its own"
+  expect_pass "a new pod that is unsealed" assert_bao_returned uid-1 uid-2 unsealed
+  expect_fail "the same pod (nothing was deleted)" assert_bao_returned uid-1 uid-1 unsealed
+  expect_fail "a new pod that is sealed" assert_bao_returned uid-1 uid-2 sealed
+  expect_fail "a new pod with an unknown state" assert_bao_returned uid-1 uid-2 unknown
+  expect_fail "no new pod yet" assert_bao_returned uid-1 "" unsealed
 
   log "host key kept"
   expect_pass "the same key" assert_host_key_kept abc abc
@@ -806,6 +849,76 @@ run_probe() {
     --entrypoint node "$AGENT_IMAGE" /app/probe.mjs "$mode"
 }
 
+# bao_seal_state: "unsealed", "sealed", or "unknown", from the seal status
+# that the openbao-auto-init sidecar reads over TLS (the same read as
+# test/rotation/exit-test-rotation.sh).
+BAO_POD="${RELEASE}-openbao-0"
+bao_seal_state() {
+  local st
+  st="$(kubectl -n "$NS" exec "$BAO_POD" -c openbao-auto-init -- \
+        sh -c 'curl -sS https://127.0.0.1:8200/v1/sys/seal-status' 2>/dev/null || true)"
+  case "$st" in
+    *'"initialized":true'*'"sealed":false'*) echo unsealed ;;
+    *'"initialized":true'*'"sealed":true'*) echo sealed ;;
+    *) echo unknown ;;
+  esac
+}
+
+# mission_call <label>: one GitLab tool call by the enrolled agent, INSIDE a
+# mission. A person (the admin session of step 1) submits a mission whose one
+# agent node names the enrolled agent. The probe is that agent: it polls for
+# the dispatch, claims it, and calls the tool with the work id of the item, so
+# the harness scopes the call to the mission. Prints the probe's JSON line,
+# and sets MISSION_ID to the id that `gibson mission submit --detach` printed.
+MISSION_WAIT_SECONDS="${MISSION_WAIT_SECONDS:-300}"
+TARGET_ID=""
+MISSION_ID=""
+MISSION_LINE=""
+mission_call() {
+  local label="$1" out err cname spid deadline
+  out="${WORK}/mission-${label}.out"; err="${WORK}/mission-${label}.err"
+  cname="probe-mission-${label}-${RUN_ID}"
+  MISSION_ID=""
+  if [ -z "$TARGET_ID" ]; then
+    TARGET_ID="$("$GIBSON_BIN" target create --name "demo-gitlab-${RUN_ID}" --type custom \
+      --url "${GITLAB_INSTANCE_URL}/${DEMO_GITLAB_PROJECT}" 2>"${WORK}/target.err" | tail -1)"
+    assert_mission_id "$TARGET_ID" || { MISSION_LINE="{\"ok\":false,\"error\":\"gibson target create gave no target id: $(tr -d '"\n' < "${WORK}/target.err" | head -c 200)\"}"; TARGET_ID=""; return 0; }
+  fi
+  jq -n --arg n "demo-gitlab-${label}-${RUN_ID}" --arg a "$AGENT_NAME" --arg p "$DEMO_GITLAB_PROJECT" '{
+    name: $n, description: "The demo: the enrolled agent calls the GitLab connector inside a mission.",
+    version: "1.0.0",
+    nodes: {call: {id: "call", type: "NODE_TYPE_AGENT",
+      agentConfig: {agentName: $a, task: {goal: ("Call get_project of the GitLab connector for " + $p + " and report its path.")}}}},
+    entryPoints: ["call"], exitPoints: ["call"]}' > "${WORK}/mission-${label}.json"
+  : > "$out"; : > "$err"
+  run_probe mission-gitlab --name "$cname" -e "PROBE_GITLAB_PROJECT=${DEMO_GITLAB_PROJECT}" \
+    -e "PROBE_MISSION_WAIT_MS=$(( MISSION_WAIT_SECONDS * 1000 ))" >"$out" 2>"$err" &
+  spid=$!
+  deadline=$(( $(date +%s) + 120 ))
+  until grep -q 'worker ready' "$err" 2>/dev/null; do
+    if ! kill -0 "$spid" 2>/dev/null || [ "$(date +%s)" -ge "$deadline" ]; then
+      docker rm -f "$cname" >/dev/null 2>&1 || true
+      MISSION_LINE="{\"ok\":false,\"error\":\"the probe never started its agent worker: $(tail -3 "$err" | tr -d '"\n' | head -c 300)\"}"; return 0
+    fi
+    sleep 2
+  done
+  MISSION_ID="$("$GIBSON_BIN" mission submit --detach --format json --target "$TARGET_ID" "${WORK}/mission-${label}.json" 2>"${WORK}/mission-${label}.submit.err" | tail -1)"
+  if ! assert_mission_id "$MISSION_ID"; then
+    docker rm -f "$cname" >/dev/null 2>&1 || true
+    MISSION_LINE="{\"ok\":false,\"error\":\"gibson mission submit gave no mission id: $(tr -d '"\n' < "${WORK}/mission-${label}.submit.err" | head -c 300)\"}"
+    MISSION_ID=""; return 0
+  fi
+  deadline=$(( $(date +%s) + MISSION_WAIT_SECONDS + 60 ))
+  while kill -0 "$spid" 2>/dev/null; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then docker rm -f "$cname" >/dev/null 2>&1 || true; break; fi
+    sleep 3
+  done
+  wait "$spid" 2>/dev/null || true
+  tail -20 "$err" >&2
+  MISSION_LINE="$(tail -1 "$out")"
+  [ -n "$MISSION_LINE" ] || MISSION_LINE='{"ok":false,"error":"the probe printed no result"}'
+}
+
 # ---------------------------------------------------------------------------
 # Step 7: a finding, attributed, and a read of the tenant graph
 if runs_step 7; then
@@ -991,21 +1104,21 @@ step_result 8 PASS
 fi
 
 # ---------------------------------------------------------------------------
-# Step 9: the agent calls one read-only GitLab tool
+# Step 9: the agent calls one read-only GitLab tool, inside a mission
 # ---------------------------------------------------------------------------
 if runs_step 9; then
-log "step 9: the agent lists the connector's tools and calls one against ${DEMO_GITLAB_PROJECT}"
+log "step 9: a mission sends the agent to call a tool of the connector against ${DEMO_GITLAB_PROJECT}"
 step_result 9 FAIL
-GL_OUT="$(run_probe gitlab -e "PROBE_GITLAB_PROJECT=${DEMO_GITLAB_PROJECT}" 2>"${WORK}/probe-gitlab.err" || true)"
-tail -20 "${WORK}/probe-gitlab.err"
-GL_LINE="$(echo "$GL_OUT" | tail -1)"
+mission_call first
+GL_LINE="$MISSION_LINE"
+MISSION_ID_9="$MISSION_ID"
 echo "$GL_LINE"
-if assert_call_answered "$GL_LINE" "$DEMO_GITLAB_PROJECT"; then
-  pass "step 9: $(jq -r '.tool' <<<"$GL_LINE") answered and named ${DEMO_GITLAB_PROJECT}"
+if [ -n "$MISSION_ID_9" ] && assert_call_answered "$GL_LINE" "$DEMO_GITLAB_PROJECT"; then
+  pass "step 9: mission ${MISSION_ID_9}: $(jq -r '.tool' <<<"$GL_LINE") answered and named ${DEMO_GITLAB_PROJECT}"
   step_result 9 PASS
 else
-  diag step9-probe "$(printf '%s\n--- stderr\n%s\n' "$GL_OUT" "$(cat "${WORK}/probe-gitlab.err")")"
-  fail "step 9: the agent's GitLab tool call did not answer with ${DEMO_GITLAB_PROJECT}"
+  diag step9-probe "$(printf '%s\n--- stderr\n%s\n' "$GL_LINE" "$(cat "${WORK}/mission-first.err" 2>/dev/null)")"
+  fail "step 9: the agent's GitLab tool call in a mission did not answer with ${DEMO_GITLAB_PROJECT} (mission id: ${MISSION_ID_9:-none})"
 fi
 fi
 
@@ -1013,21 +1126,21 @@ fi
 # Step 10: the trail resolves the call to the agent and the person
 # ---------------------------------------------------------------------------
 if runs_step 10; then
-log "step 10: the audit trail names the agent on the connector, and the identity names the person"
+log "step 10: the audit trail names the agent and the mission of step 9 on the connector, and the identity names the person"
 step_result 10 FAIL
 AUDIT_JSON="{}"
 NAMED=""
 for _ in $(seq 1 12); do
   AUDIT_JSON="$(grpc_call "$SCHEMA_DIR" gibson.tenant.v1.TenantService/ListAuditEvents "$(jq -n --arg t "$TENANT" --arg c "$CONNECTOR" '{tenant_id:$t,target_match:$c,page_size:100}')" 2>"${WORK}/audit.err" || true)"
-  if assert_audit_names_agent "$AUDIT_JSON" "$PRINCIPAL_ID" "$CONNECTOR"; then NAMED=yes; break; fi
+  if assert_audit_names_mission "$AUDIT_JSON" "$PRINCIPAL_ID" "$CONNECTOR" "${MISSION_ID_9:-}"; then NAMED=yes; break; fi
   sleep 5
 done
 IDS_JSON="$(grpc_call "$SDK_SCHEMA" gibson.agentidentity.v1.AgentIdentityService/ListAgentIdentities '{}' 2>"${WORK}/identities.err" || true)"
 ok=yes
 if [ -z "$NAMED" ]; then
   diag step10-audit "$(printf '%s\n--- stderr\n%s\n' "$AUDIT_JSON" "$(cat "${WORK}/audit.err")")"
-  jq -c '.events[]? | {eventType, actorUserId, targetResource}' <<<"$AUDIT_JSON" 2>/dev/null | head -20 >&2 || echo "$AUDIT_JSON" >&2
-  fail "step 10: no audit event records ${PRINCIPAL_ID} as the actor of a call on ${CONNECTOR}. The trail does not resolve the call to the agent"
+  jq -c '.events[]? | {eventType, actorSource, actorId, targetObject, details}' <<<"$AUDIT_JSON" 2>/dev/null | head -20 >&2 || echo "$AUDIT_JSON" >&2
+  fail "step 10: no audit event records ${PRINCIPAL_ID} as the actor of a call on ${CONNECTOR} with mission ${MISSION_ID_9:-none}. The trail does not show the agent and the mission"
   ok=""
 fi
 if ! assert_identity_created_by "$IDS_JSON" "$AGENT_NAME" "$HUMAN_SUB"; then
@@ -1035,10 +1148,69 @@ if ! assert_identity_created_by "$IDS_JSON" "$AGENT_NAME" "$HUMAN_SUB"; then
   ok=""
 fi
 if [ -n "$ok" ]; then
-  jq -c --arg a "$PRINCIPAL_ID" '.events[] | select(.actorUserId == $a) | {eventType, actorUserId, targetResource, timestamp}' <<<"$AUDIT_JSON" | head -1
-  echo "mission: none (a mission-less call by an enrolled agent carries no mission id)"
-  pass "step 10: the call resolves to ${PRINCIPAL_ID}, and ${AGENT_NAME} resolves to ${ADMIN_USER} (${HUMAN_SUB})"
+  jq -c --arg a "$PRINCIPAL_ID" '.events[] | select(.actorId == $a) | {eventType, actorSource, actorId, targetObject, details, timestamp}' <<<"$AUDIT_JSON" | head -1
+  pass "step 10: the call shows ${PRINCIPAL_ID} and mission ${MISSION_ID_9}, and ${AGENT_NAME} resolves to ${ADMIN_USER} (${HUMAN_SUB})"
   step_result 10 PASS
+fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 12: the OpenBao pod is deleted, and it returns unsealed on its own
+# ---------------------------------------------------------------------------
+if runs_step 12; then
+log "step 12: delete the OpenBao pod ${BAO_POD}, and wait for it to return unsealed with no hand step"
+step_result 12 FAIL
+BAO_RETURN_WAIT="${BAO_RETURN_WAIT:-300}"
+OLD_UID="$(kubectl -n "$NS" get pod "$BAO_POD" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+[ -n "$OLD_UID" ] || die "step 12: no pod ${BAO_POD} in ${NS}, so there is nothing to delete"
+# The one change this test makes to the cluster: it deletes the pod of its own
+# install, as a crash would. Nothing unseals it, restarts it or patches it
+# afterwards. The static seal opens the new pod from the keyring.
+kubectl -n "$NS" delete pod "$BAO_POD" --wait=true --timeout=120s >/dev/null \
+  || die "step 12: the pod ${BAO_POD} did not delete"
+NEW_UID=""; STATE_NOW="unknown"
+deadline=$(( $(date +%s) + BAO_RETURN_WAIT ))
+T_KILL="$(date +%s)"
+while [ "$(date +%s)" -lt "$deadline" ]; do
+  NEW_UID="$(kubectl -n "$NS" get pod "$BAO_POD" -o jsonpath='{.metadata.uid}' 2>/dev/null || true)"
+  if [ -n "$NEW_UID" ] && [ "$NEW_UID" != "$OLD_UID" ]; then
+    STATE_NOW="$(bao_seal_state)"
+    if assert_bao_returned "$OLD_UID" "$NEW_UID" "$STATE_NOW"; then break; fi
+  fi
+  sleep 5
+done
+if assert_bao_returned "$OLD_UID" "$NEW_UID" "$STATE_NOW"; then
+  pass "step 12: ${BAO_POD} returned unsealed $(( $(date +%s) - T_KILL )) s after the delete, with no hand step"
+  step_result 12 PASS
+else
+  diag step12-openbao "$(kubectl -n "$NS" get pod "$BAO_POD" -o wide 2>&1; kubectl -n "$NS" logs "$BAO_POD" -c openbao --tail=40 2>&1)"
+  fail "step 12: ${BAO_POD} is not back unsealed ${BAO_RETURN_WAIT} s after the delete (new pod uid '${NEW_UID:-none}', seal state ${STATE_NOW})"
+fi
+fi
+
+# ---------------------------------------------------------------------------
+# Step 13: the next connector call, in a new mission, works
+# ---------------------------------------------------------------------------
+if runs_step 13; then
+log "step 13: the next GitLab call by the agent, in a new mission, answers after OpenBao returned"
+step_result 13 FAIL
+# The call goes through the daemon, the connector proxy and the secret store.
+# A few tries bound a daemon that is still reconnecting to OpenBao, and the
+# number of tries is part of the record.
+TRIES=0; GL3_LINE=""
+for TRIES in 1 2 3; do
+  mission_call "next${TRIES}"
+  GL3_LINE="$MISSION_LINE"
+  echo "$GL3_LINE"
+  if [ -n "$MISSION_ID" ] && assert_call_answered "$GL3_LINE" "$DEMO_GITLAB_PROJECT"; then break; fi
+  sleep 30
+done
+if [ -n "$MISSION_ID" ] && assert_call_answered "$GL3_LINE" "$DEMO_GITLAB_PROJECT"; then
+  pass "step 13: mission ${MISSION_ID} answered on try ${TRIES} after the OpenBao pod was deleted"
+  step_result 13 PASS
+else
+  diag step13-probe "$GL3_LINE"
+  fail "step 13: no GitLab call in a mission answered in ${TRIES} tries after the OpenBao pod was deleted"
 fi
 fi
 
@@ -1062,15 +1234,16 @@ REFUSED=""
 T_REVOKE="$(date +%s)"
 GL2_LINE=""
 GL2_OUT=""
-for _ in $(seq 1 45); do
-  GL2_OUT="$(run_probe gitlab -e "PROBE_GITLAB_PROJECT=${DEMO_GITLAB_PROJECT}" 2>"${WORK}/probe-gitlab-2.err" || true)"
-  GL2_LINE="$(echo "$GL2_OUT" | tail -1)"
+until [ "$(date +%s)" -ge $(( T_REVOKE + 450 )) ]; do
+  MISSION_WAIT_SECONDS=90 mission_call "revoked"
+  GL2_LINE="$MISSION_LINE"
+  GL2_OUT="$GL2_LINE"
   if assert_call_refused "$GL2_LINE"; then REFUSED=yes; break; fi
   sleep 10
 done
 echo "$GL2_LINE"
 if [ -z "$REFUSED" ]; then
-  diag step11-probe "$(printf '%s\n--- stderr\n%s\n' "$GL2_OUT" "$(cat "${WORK}/probe-gitlab-2.err")")"
+  diag step11-probe "$(printf '%s\n--- stderr\n%s\n' "$GL2_OUT" "$(cat "${WORK}/mission-revoked.err" 2>/dev/null)")"
   fail "step 11: the agent's call still answers $(( $(date +%s) - T_REVOKE )) s after the revoke"
 else
   pass "step 11: the call was refused $(( $(date +%s) - T_REVOKE )) s after the revoke, and the status reports no grant"
@@ -1083,7 +1256,7 @@ fi
 # ---------------------------------------------------------------------------
 log "summary (run ${RUN_ID}, agent ${AGENT_NAME}, tenant ${TENANT})"
 SUMMARY=""
-for i in 1 2 3 4 5 6 7 8 9 10 11; do
+for i in 1 2 3 4 5 6 7 8 9 10 12 13 11; do
   if runs_step "$i"; then r="${STEP_RESULT[$i]:-NOT RUN}"; else r="OUTSIDE PHASE ${PHASE}"; fi
   printf '  step %s: %s\n' "$i" "$r"
   SUMMARY="${SUMMARY}| ${i} | ${r} |"$'\n'
