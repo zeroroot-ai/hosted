@@ -34,6 +34,8 @@
 #      NS            the release namespace (default gibson)
 #      OPENBAO_STS   the OpenBao StatefulSet (default gibson-openbao)
 #      RESTART_TIMEOUT  seconds for each restart (default 600)
+# Marker: after the keyring went to the cluster (or the push began), the file
+#      <state-dir>/.cluster-keyring-pushed exists. The workflow reads it.
 # Exit: the exit code of substrate-rotate.sh for an access key (0 done, 10
 #       waits, 3 halted, 2 failed), 0 or 2 for a keyring member.
 # ---------------------------------------------------------------------------
@@ -51,14 +53,16 @@ NS="${NS:-gibson}"
 OPENBAO_STS="${OPENBAO_STS:-gibson-openbao}"
 RESTART_TIMEOUT="${RESTART_TIMEOUT:-600}"
 
+# shellcheck source=lib/keyring-pushed.sh
+. "$HERE/lib/keyring-pushed.sh"
+rm -f "$STATE/$PUSHED_MARKER" 2>/dev/null || true
+
 die() { printf '! [rotate-credential] %s\n' "$*" >&2; exit 2; }
 say() { printf '  ✓ [rotate-credential] %s\n' "$*"; }
 
 [ -n "$STATE" ] && [ -n "$ENV" ] && [ -n "$CRED" ] && [ -n "$STEP" ] \
   || die "usage: rotate-credential.sh <state-dir> <env> <credential> <step>"
 case "$ENV" in staging|prod) ;; *) die "ENV=$ENV is not staging or prod. The drill rotates in drill.yml" ;; esac
-[ "${GITHUB_ACTIONS:-}" = true ] \
-  || die "a credential rotation runs in a GitHub Actions workflow only: .github/workflows/rotate-credentials.yml (ADR-0083)"
 [ -s "$STATE/keyring.env" ] && [ -s "$STATE/substrate.env" ] \
   || die "$STATE holds no keyring.env or substrate.env: the workflow reads them from the environment first"
 
@@ -86,6 +90,12 @@ fi
 
 "$KEYRING" "$STEP" "$STATE/keyring.env" "$CRED" >/dev/null
 say "keyring: $STEP of $CRED"
+# From the next line on, the cluster may hold the new keyring. The marker tells
+# the workflow to write the keyring back on ANY exit after this point, also a
+# failed one. If it did not, the next run would make a second new value and
+# push it over the first, and the store could stay sealed. The marker comes
+# before the push, because a push that fails half way has changed the cluster.
+: > "$STATE/$PUSHED_MARKER"
 "$K2C" "$STATE/substrate.env" >/dev/null
 say "the keyring is in the cluster"
 

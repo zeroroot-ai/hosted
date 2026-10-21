@@ -7,8 +7,7 @@
 #                                   rotation dispatch of drill)
 #   drill-rotate-keys.sh continue   continue each open rotation (each run)
 #
-# Each user is one `make substrate-rotate ENV=drill CREDENTIAL=<user>`
-# (scripts/substrate-rotate.sh): a new key, the keyring and the cluster move
+# Each user is one run of scripts/substrate-rotate.sh: a new key, the keyring and the cluster move
 # to it, each reader restarts, and the old key is deleted only after AWS
 # reports it unused since the switch. One rotation takes longer than one run:
 # the new key must be seen in use (WAIT_SECS), and the old key must then stay
@@ -67,8 +66,8 @@ for user in $USERS; do
     continue
   fi
   printf '▶ %s: %s the rotation\n' "$user" "$MODE"
-  # The same call as `make substrate-rotate`, without make, which turns
-  # every exit code into 2: substrate-rotate.sh exits 10 when it must wait.
+  # Without make, which turns every exit code into 2: substrate-rotate.sh
+  # exits 10 when it must wait.
   "$WITH_CLUSTER" "$ENV" "$HERE/substrate-rotate.sh" "$STATE" "$ENV" "$user"
   # Only exit 10 of substrate-rotate.sh is a wait. Exit 1 is also the exit of
   # with-cluster.sh when nothing ran (no instance, two instances, no session

@@ -31,7 +31,8 @@
 #   stage0_pull <env> <state-dir>             AWS -> <state-dir>
 #   stage0_push <env> <state-dir>             <state-dir> -> AWS
 #
-# As a command, for a runner: stage0-store.sh pull <env> <state-dir>
+# As a command: stage0-store.sh pull <env> <state-dir> (a runner), and
+# stage0-store.sh migrate <env> <state-dir> (the one-time move of an existing state)
 #
 # The files that hold secrets go to disk only under <state-dir>, mode 0600,
 # and through `file://`, never through an argument.
@@ -51,6 +52,31 @@ stage0_bucket() {
   printf 'zeroroot-ai-%s-durable-%s' "$1" "$acct"
 }
 
+# _stage0_head <bucket> <key>: 0 when the object exists, 1 when it does not,
+# 2 when the answer is an error (no access, no network). A caller never reads
+# an error as "does not exist".
+_stage0_head() {
+  local err
+  err="$(aws s3api head-object --bucket "$1" --key "$2" 2>&1 >/dev/null)" && return 0
+  case "$err" in *"Not Found"*|*404*|*NoSuchKey*|*NoSuchBucket*) return 1 ;; esac
+  printf '%s\n' "$err" >&2
+  return 2
+}
+
+# stage0_old_state <env> <state-dir>: prints where a stage 0 state of this env
+# exists outside tfstate/stage0/, one place a line: the local file of the state
+# directory, and for drill the old key in the prod state bucket.
+stage0_old_state() {
+  local env="$1" state="$2" acct rc
+  [ -s "${state}/terraform.tfstate" ] && printf '%s\n' "${state}/terraform.tfstate"
+  if [ "$env" = drill ]; then
+    acct="$(aws sts get-caller-identity --query Account --output text)" || return 0
+    _stage0_head "zeroroot-ai-prod-tfstate-${acct}-${STAGE0_REGION}" "substrate/drill/terraform.tfstate" 2>/dev/null && \
+      printf 's3://zeroroot-ai-prod-tfstate-%s-%s/substrate/drill/terraform.tfstate\n' "$acct" "$STAGE0_REGION"
+  fi
+  return 0
+}
+
 # stage0_init <tf-dir> <env> <state-dir>
 # The state is in the durable bucket. A new environment has no bucket yet, so
 # its first apply uses a local state file under <state-dir>, and substrate.sh
@@ -60,6 +86,19 @@ stage0_init() {
   bucket="$(stage0_bucket "$env")" || die "could not read the AWS account, so the stage 0 state bucket of ${env} has no name"
   if aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1; then
     rm -f "$state/.stage0-bootstrap" "$tf/backend_override.tf"
+    # An empty state key is a fresh start, and a plan from nothing would try to
+    # create every resource again. So when the key is empty and a state exists
+    # in the old place, refuse, and print the one-time migration.
+    local rc=0 old
+    _stage0_head "$bucket" "${STAGE0_PREFIX}/terraform.tfstate" || rc=$?
+    case "$rc" in
+      0) ;;
+      1) old="$(stage0_old_state "$env" "$state")"
+         if [ -n "$old" ]; then
+           die "the stage 0 state of ${env} is not at s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate, and a state exists at: $(printf '%s' "$old" | tr '\n' ' '). A plan now would start from nothing and try to create every resource again. Run the one-time migration first: scripts/stage0-store.sh migrate ${env} ${state}"
+         fi ;;
+      *) die "could not read s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate, so this run cannot tell an empty state from a state it may not read" ;;
+    esac
     terraform -chdir="$tf" init -reconfigure -input=false -no-color \
       -backend-config="bucket=${bucket}" \
       -backend-config="key=${STAGE0_PREFIX}/terraform.tfstate" \
@@ -80,9 +119,9 @@ stage0_init() {
 stage0_migrate() {
   local tf="$1" env="$2" state="$3"
   [ -e "$state/.stage0-bootstrap" ] || return 0
-  rm -f "$state/.stage0-bootstrap"
-  stage0_init "$tf" "$env" "$state"
-  [ ! -e "$state/.stage0-bootstrap" ] || die "the durable bucket of ${env} does not exist after the apply, so the state stays in ${state}/terraform.tfstate"
+  rm -f "$state/.stage0-bootstrap" "$tf/backend_override.tf"
+  aws s3api head-bucket --bucket "$(stage0_bucket "$env")" >/dev/null 2>&1 \
+    || die "the durable bucket of ${env} does not exist after the apply, so the state stays in ${state}/terraform.tfstate"
   terraform -chdir="$tf" init -migrate-state -force-copy -input=false -no-color \
     -backend-config="bucket=$(stage0_bucket "$env")" \
     -backend-config="key=${STAGE0_PREFIX}/terraform.tfstate" \
@@ -178,6 +217,43 @@ PY
   sha256sum < "${state}/keyring.env" | cut -d' ' -f1 > "${state}/.keyring.sha256"
 }
 
+# stage0_migrate_old <env> <state-dir>: the one-time move of an existing state
+# into tfstate/stage0/ (scripts/stage0-store.sh migrate <env> <state-dir>).
+# It refuses when the new key already holds a state. The sources are the local
+# file of the state directory and, for drill, the old key in the prod state
+# bucket. The key slots and the rotation record move with the state.
+stage0_migrate_old() {
+  local env="$1" state="$2" bucket rc=0 f tf="$STAGE0_TF_DIR"
+  bucket="$(stage0_bucket "$env")" || die "could not read the AWS account"
+  aws s3api head-bucket --bucket "$bucket" >/dev/null 2>&1 \
+    || die "the durable bucket ${bucket} does not exist. A new environment needs no migration: make substrate ENV=${env}"
+  _stage0_head "$bucket" "${STAGE0_PREFIX}/terraform.tfstate" || rc=$?
+  [ "$rc" -eq 1 ] || { [ "$rc" -eq 0 ] && die "s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate already holds a state. Nothing to migrate"; die "could not read s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate"; }
+  ( umask 077; mkdir -p "$state" )
+  if [ ! -s "${state}/terraform.tfstate" ] && [ "$env" = drill ]; then
+    local acct; acct="$(aws sts get-caller-identity --query Account --output text)" || die "could not read the AWS account"
+    aws s3 cp --only-show-errors "s3://zeroroot-ai-prod-tfstate-${acct}-${STAGE0_REGION}/substrate/drill/terraform.tfstate" "${state}/terraform.tfstate" \
+      || die "could not read the old state of drill"
+  fi
+  [ -s "${state}/terraform.tfstate" ] || die "${state}/terraform.tfstate does not exist, so there is no state to migrate"
+  printf 'terraform {\n  backend "local" {\n    path = "%s/terraform.tfstate"\n  }\n}\n' "$state" > "$tf/backend_override.tf"
+  terraform -chdir="$tf" init -reconfigure -input=false -no-color >/dev/null \
+    || { rm -f "$tf/backend_override.tf"; die "terraform init on the local state failed"; }
+  rm -f "$tf/backend_override.tf"
+  terraform -chdir="$tf" init -migrate-state -force-copy -input=false -no-color \
+    -backend-config="bucket=${bucket}" \
+    -backend-config="key=${STAGE0_PREFIX}/terraform.tfstate" \
+    -backend-config="region=${STAGE0_REGION}" \
+    -backend-config="use_lockfile=true" \
+    -backend-config="encrypt=true" >/dev/null \
+    || die "terraform init -migrate-state failed against s3://${bucket}/${STAGE0_PREFIX}/"
+  for f in key-slots.tfvars.json key-rotation.json; do
+    [ -f "${state}/${f}" ] || continue
+    aws s3 cp --only-show-errors "${state}/${f}" "s3://${bucket}/${STAGE0_PREFIX}/${f}" \
+      || die "could not write s3://${bucket}/${STAGE0_PREFIX}/${f}"
+  done
+}
+
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -euo pipefail
   die() { printf '! [stage0-store] %s\n' "$*" >&2; exit 2; }
@@ -188,6 +264,9 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
           [ -s "$3/keyring.env" ] && [ -s "$3/substrate.env" ] \
             || die "the keyring secret zeroroot-ai/$2/keyring holds no keyring yet. Run make substrate ENV=$2 once from the workstation"
           printf '  ✓ [stage0-store] stage 0 of %s read from AWS into %s\n' "$2" "$3" ;;
-    *) die "usage: stage0-store.sh pull <env> <state-dir>" ;;
+    migrate) [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: stage0-store.sh migrate <env> <state-dir>"
+             stage0_migrate_old "$2" "$3"
+             printf '  ✓ [stage0-store] the stage 0 state of %s is now in s3://%s/%s/\n' "$2" "$(stage0_bucket "$2")" "$STAGE0_PREFIX" ;;
+    *) die "usage: stage0-store.sh pull|migrate <env> <state-dir>" ;;
   esac
 fi

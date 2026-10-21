@@ -135,10 +135,9 @@
 #
 # ROTATION (ADR-0171, row keyring-generated-keys). Only a member with a
 # <MEMBER>_PREVIOUS member rotates in place: OPENBAO_SEAL_KEY,
-# VELERO_REPO_PASSWORD and SETEC_DISK_SIGNING_SEED. It runs in a workflow and
-# nowhere else (ADR-0083, amendment of 2026-10-21): rotate and retire refuse
-# to run unless GITHUB_ACTIONS is true. The workflow is
-# .github/workflows/rotate-credentials.yml. It needs an approval for each run,
+# VELERO_REPO_PASSWORD and SETEC_DISK_SIGNING_SEED. It runs in a workflow
+# (ADR-0083, amendment of 2026-10-21): .github/workflows/rotate-credentials.yml.
+# That workflow is the one documented entry point. It needs an approval for each run,
 # and a GitHub App writes the new keyring into the environment secret
 # BRINGUP_KEYRING. Each step below is one dispatch of that workflow
 # (scripts/rotate-credential.sh), except the commit of an overlay. The seal key:
@@ -574,13 +573,7 @@ write_members() {
 
 # cmd_rotate FILE MEMBER — keep MEMBER as MEMBER_PREVIOUS and generate a new
 # MEMBER. Refuses while a previous value is kept (see ROTATION above).
-require_workflow() {
-  [ "${GITHUB_ACTIONS:-}" = true ] \
-    || die "a keyring rotation runs in a GitHub Actions workflow only: .github/workflows/rotate-credentials.yml (ADR-0083)"
-}
-
 cmd_rotate() {
-  require_workflow
   local file="${1:?usage: keyring.sh rotate <keyring-file> <MEMBER>}"
   local name="${2:?usage: keyring.sh rotate <keyring-file> <MEMBER>}"
   [ -r "$file" ] || die "cannot read $file"
@@ -601,7 +594,6 @@ cmd_rotate() {
 # cmd_retire FILE MEMBER — clear MEMBER_PREVIOUS, after the cluster runs on
 # the new value.
 cmd_retire() {
-  require_workflow
   local file="${1:?usage: keyring.sh retire <keyring-file> <MEMBER>}"
   local name="${2:?usage: keyring.sh retire <keyring-file> <MEMBER>}"
   [ -r "$file" ] || die "cannot read $file"

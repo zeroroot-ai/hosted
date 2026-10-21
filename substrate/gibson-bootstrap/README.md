@@ -179,6 +179,17 @@ The state of this workspace lives in the durable bucket it creates
 | `tfstate/stage0/key-slots.tfvars.json` | the active access key slot of each user |
 | `tfstate/stage0/key-rotation.json` | the time of the last switch of each user |
 
+An environment whose state is still on a workstation (or, for drill, in the old
+location of the prod state bucket) moves it once:
+
+```bash
+scripts/stage0-store.sh migrate <env> <state-dir>
+```
+
+The command refuses when the new key already holds a state. Until it ran,
+`stage0_init` refuses to start on the empty new key, because a plan from nothing
+would try to create every resource again.
+
 The state holds the IAM access keys in clear text. So the bucket policy
 (`bucket.tf`, `DenyStage0StateToEveryoneElse`) denies this prefix to every
 principal except the key rotation role (`rotation-role.tf`) and the roles in
@@ -209,15 +220,17 @@ gh secret set BRINGUP_KEYRING --env staging -R zeroroot-ai/hosted < /bulk/substr
 gh variable set SUBSTRATE_ENV_FILE --env staging -R zeroroot-ai/hosted < /bulk/substrate/staging/substrate.env
 ```
 
-After that, a rotation writes both through a GitHub App
-(`.github/workflows/rotate-credentials.yml`).
+After that, a rotation writes both through a GitHub App with the Environments
+write permission (`.github/workflows/rotate-credentials.yml`). A step that fails
+after the cluster may hold the new keyring writes the keyring back too, and the
+job still fails: the environment must hold what the cluster holds.
 
 ## Rotation
 
-Each rotation runs in `.github/workflows/rotate-credentials.yml`, and nowhere
-else. `keyring.sh rotate`, `keyring.sh retire` and `substrate-rotate.sh` refuse to
-run unless `GITHUB_ACTIONS` is true. The workflow is `workflow_dispatch` only.
-The GitHub environment of the env gates each run with its required reviewers.
+Each rotation runs in `.github/workflows/rotate-credentials.yml`. That workflow
+is the one documented entry point, and the IAM policy of the rotation role
+limits what it can change. The workflow is `workflow_dispatch` only. The GitHub
+environment of the env gates each run with its required reviewers.
 
 | Credential | Dispatch | ADR-0171 row |
 |---|---|---|

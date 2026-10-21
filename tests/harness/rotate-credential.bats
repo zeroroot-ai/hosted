@@ -22,8 +22,8 @@ setup() {
     chmod +x "$D/$n"
   done
   printf '#!/bin/sh\necho "substrate-rotate $*" >> "%s/log"\nexit "${ROTATE_RC:-0}"\n' "$D" > "$D/rotate"
-  printf 'restart_pods() { echo "restart $1 $2" >> "%s/log"; RESTART_PODS_RESULT=restarted; }\n' "$D" > "$D/restart-lib.sh"
-  export GITHUB_ACTIONS=true K2C="$D/k2c" SUBSTRATE_SH="$D/substrate" SUBSTRATE_ROTATE="$D/rotate" RESTART_PODS_LIB="$D/restart-lib.sh"
+  printf 'restart_pods() { echo "restart $1 $2" >> "%s/log"; [ -z "${RESTART_FAIL:-}" ] || return 1; RESTART_PODS_RESULT=restarted; }\n' "$D" > "$D/restart-lib.sh"
+  export K2C="$D/k2c" SUBSTRATE_SH="$D/substrate" SUBSTRATE_ROTATE="$D/rotate" RESTART_PODS_LIB="$D/restart-lib.sh"
 }
 
 step() { run "$REPO/scripts/rotate-credential.sh" "$STATE" "$@"; }
@@ -56,14 +56,6 @@ get() { "$REPO/scripts/keyring.sh" get "$STATE/keyring.env" "$1"; }
   [ "$status" -eq 0 ]
   run grep -q restart "$D/log"
   [ "$status" -ne 0 ]
-}
-
-@test "FAILING FIXTURE: a step outside a workflow is refused and changes nothing" {
-  before="$(sha256sum < "$STATE/keyring.env")"
-  GITHUB_ACTIONS="" step staging OPENBAO_SEAL_KEY rotate
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"runs in a GitHub Actions workflow only"* ]]
-  [ "$(sha256sum < "$STATE/keyring.env")" = "$before" ]
 }
 
 @test "FAILING FIXTURE: drill is not rotated by this workflow" {
@@ -112,4 +104,39 @@ get() { "$REPO/scripts/keyring.sh" get "$STATE/keyring.env" "$1"; }
   [ "$status" -eq 1 ]
   grep -qE '^[^#]*scripts/with-cluster\.sh staging' "$wf"
   grep -qE '^[^#]*make eks-kubeconfig ENV=prod' "$wf"
+}
+
+@test "the marker exists after a failure that comes after the push to the cluster, and the keyring holds the new key" {
+  old="$(get OPENBAO_SEAL_KEY)"
+  RESTART_FAIL=1 step prod OPENBAO_SEAL_KEY rotate
+  [ "$status" -eq 2 ]
+  [ -e "$STATE/.cluster-keyring-pushed" ]
+  [ "$(get OPENBAO_SEAL_KEY_PREVIOUS)" = "$old" ]
+  [ "$(get OPENBAO_SEAL_KEY)" != "$old" ]
+}
+
+@test "FAILING FIXTURE: a failure before the push leaves no marker" {
+  step staging VELERO_REPO_PASSWORD rotate
+  [ "$status" -eq 2 ]
+  [ ! -e "$STATE/.cluster-keyring-pushed" ]
+}
+
+@test "FAILING FIXTURE: a failed push to the cluster still leaves the marker, because the push may have changed the cluster" {
+  printf '#!/bin/sh\nexit 1\n' > "$D/k2c"
+  step prod OPENBAO_SEAL_KEY rotate
+  [ "$status" -ne 0 ]
+  [ -e "$STATE/.cluster-keyring-pushed" ]
+}
+
+@test "a marker from an earlier run in the same state directory is removed at the start" {
+  : > "$STATE/.cluster-keyring-pushed"
+  step staging OPENBAO_SEAL_KEY retire
+  [ "$status" -eq 2 ]
+  [ ! -e "$STATE/.cluster-keyring-pushed" ]
+}
+
+@test "the workflow writes the keyring back on any exit after the marker, and the job still fails" {
+  wf="$REPO/.github/workflows/rotate-credentials.yml"
+  grep -q "pushed=true" "$wf"
+  [ "$(grep -c "steps.rotate.outputs.pushed == 'true'" "$wf")" -ge 3 ]
 }

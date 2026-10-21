@@ -45,6 +45,12 @@ locals {
     "zeroroot-ai-${var.environment}-setec-disk-builder",
   ]
   state_prefix = "tfstate/stage0"
+  # Every role that stage 0 looks up by name, and the rotation role.
+  stage0_role_names = distinct(concat(
+    var.keyring_principal_role_names,
+    var.edge_cert_principal_role_names,
+    [var.inbox_reader_role_name, local.rotation_role_name],
+  ))
 }
 
 data "aws_iam_openid_connect_provider" "github" {
@@ -186,12 +192,22 @@ data "aws_iam_policy_document" "rotation" {
     "arn:aws:iam::${var.aws_account_id}:user/substrate/${n}"]
   }
 
-  # The roles that the policies of stage 0 name, and this role itself.
+  # The roles that stage 0 reads by name (data.aws_iam_role in keyring-secret.tf,
+  # inbox.tf and edge-cert.tf) and this role itself. No other role.
   statement {
-    sid       = "ReadTheRoles"
+    sid     = "ReadTheStage0Roles"
+    effect  = "Allow"
+    actions = ["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListRoleTags"]
+    resources = [for n in local.stage0_role_names :
+    "arn:aws:iam::${var.aws_account_id}:role/${n}"]
+  }
+
+  # The data source finds the provider by its URL: a list, then a get.
+  statement {
+    sid       = "ListTheOidcProviders"
     effect    = "Allow"
-    actions   = ["iam:GetRole", "iam:GetRolePolicy", "iam:ListRolePolicies", "iam:ListAttachedRolePolicies", "iam:ListRoleTags"]
-    resources = ["arn:aws:iam::${var.aws_account_id}:role/*"]
+    actions   = ["iam:ListOpenIDConnectProviders"]
+    resources = ["*"]
   }
 
   statement {
@@ -216,9 +232,10 @@ data "aws_iam_policy_document" "rotation" {
   }
 
   statement {
-    sid       = "ReadTheMailRules"
-    effect    = "Allow"
-    actions   = ["ses:DescribeActiveReceiptRuleSet", "ses:DescribeReceiptRuleSet", "ses:DescribeReceiptRule", "ses:GetIdentityVerificationAttributes", "sesv2:GetEmailIdentity"]
+    sid    = "ReadTheMailRules"
+    effect = "Allow"
+    # The SES v2 API uses the ses: prefix in IAM.
+    actions   = ["ses:DescribeActiveReceiptRuleSet", "ses:DescribeReceiptRuleSet", "ses:DescribeReceiptRule", "ses:GetEmailIdentity"]
     resources = ["*"]
   }
 

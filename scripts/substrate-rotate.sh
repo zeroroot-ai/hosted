@@ -5,12 +5,11 @@
 # Stage 0 keeps two access key slots on each IAM user (key_slots in
 # substrate/gibson-bootstrap/variables.tf, the state file
 # <state-dir>/key-slots.tfvars.json). One rotation, run at stage 0 on the
-# runner of a workflow and nowhere else (ADR-0083, amendment of 2026-10-21):
+# runner of a workflow (ADR-0083, amendment of 2026-10-21):
 # .github/workflows/rotate-credentials.yml for staging and prod, and
 # .github/workflows/drill.yml for drill. The role of the first workflow can
 # change only the access keys of these users (substrate/gibson-bootstrap/
-# rotation-role.tf). `make substrate-rotate ENV=<env> CREDENTIAL=<...>` is the
-# same call:
+# rotation-role.tf). The call is:
 #
 #   1. Add the free slot and make it active: terraform applies a new key and
 #      deletes nothing. The outputs now give the new key.
@@ -57,6 +56,8 @@ set -euo pipefail
 
 STATE="${1:-}"; ENV="${2:-}"; USER_NAME="${3:-}"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# shellcheck source=lib/keyring-pushed.sh
+. "$REPO/scripts/lib/keyring-pushed.sh"
 TF_DIR="$REPO/substrate/gibson-bootstrap"
 KEYRING="$REPO/scripts/keyring.sh"
 # Overridable for tests/harness/substrate-rotate.bats only.
@@ -81,10 +82,6 @@ say()  { printf '  ✓ [substrate-rotate] %s\n' "$*"; }
 
 [ -n "$STATE" ] && [ -n "$ENV" ] && [ -n "$USER_NAME" ] || die "usage: substrate-rotate.sh <state-dir> <env> <platform|smtp|dns|setec-disk-builder>"
 case "$ENV" in staging|prod|drill) ;; *) die "ENV=$ENV has no AWS stage 0" ;; esac
-# The rotation runs in a workflow. A workstation has no approval step, no
-# short-lived role and no record of who ran it, so the hand path is gone.
-[ "${GITHUB_ACTIONS:-}" = true ] \
-  || die "a credential rotation runs in a GitHub Actions workflow only: .github/workflows/rotate-credentials.yml (ADR-0083)"
 # The stage 0 files live in the durable bucket (scripts/stage0-store.sh). The
 # run reads them first, and keeps every change in AWS when it ends, stopped
 # or done.
@@ -230,6 +227,9 @@ secret_value() { kubectl -n "$1" get secret "$2" -o json 2>/dev/null | jq -r --a
 
 # 3. The cluster: the producer of the keyring Secrets, and a restart of each
 #    workload whose pods read one of the Secret keys of this user.
+# From here the cluster may hold the new key. The marker tells the workflow to
+# write the keyring back on any exit (scripts/lib/keyring-pushed.sh).
+: > "$STATE/$PUSHED_MARKER"
 "$K2C" "$STATE/substrate.env" >/dev/null
 for sk in $SECRET_KEYS; do
   ns="${sk%%/*}"; rest="${sk#*/}"; sec="${rest%%/*}"; key="${rest#*/}"

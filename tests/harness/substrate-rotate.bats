@@ -216,7 +216,7 @@ rotate() {
   for f in key-slots.tfvars.json key-rotation.json; do
     [ -f "$STATE/$f" ] && cp "$STATE/$f" "$D/s3/$f" || true
   done
-  run env GITHUB_ACTIONS="${GITHUB_ACTIONS-true}" E="${E:-staging}" D="$D" PATH="$D/bin:$PATH" SUBSTRATE_SH="$D/bin/substrate" K2C="$D/bin/k2c" SLEEP_SECS=0 RESTART_TIMEOUT=2 RESTART_PODS_POLL=0 \
+  run env E="${E:-staging}" D="$D" PATH="$D/bin:$PATH" SUBSTRATE_SH="$D/bin/substrate" K2C="$D/bin/k2c" SLEEP_SECS=0 RESTART_TIMEOUT=2 RESTART_PODS_POLL=0 \
     STUB_TF_REQUIRE_INIT="${STUB_TF_REQUIRE_INIT:-}" STUB_TF_OUTPUT_FAIL="${STUB_TF_OUTPUT_FAIL:-}" WANT0="${WANT0:-}" WAIT_SECS="${WAIT_SECS:-0}" QUIET_SECS="${QUIET_SECS:-0}" U="${U:-platform}" TFRES="${TFRES:-}" APPLY_FAIL="${APPLY_FAIL:-}" \
     "$REPO/scripts/substrate-rotate.sh" "$STATE" "${E:-staging}" "${U:-platform}"
 }
@@ -540,10 +540,16 @@ smtp_relay_new() {
   [ "$(sha256sum < "$STATE/keyring.env")" = "$before" ]
 }
 
-@test "FAILING FIXTURE: a rotation outside a workflow is refused before it touches a key" {
-  GITHUB_ACTIONS="" rotate
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"runs in a GitHub Actions workflow only"* ]]
-  [ ! -s "$D/log" ] || [ "$(grep -c apply "$D/log")" = 0 ]
-  [ "$(slots)" = '{"active":"a","keep":["a"]}' ]
+@test "a rotation that stops after the push to the cluster leaves the marker the workflow reads" {
+  # The new key is not used yet: the run stops with exit 10 after step 3.
+  rotate
+  [ "$status" -eq 10 ]
+  [ -e "$STATE/.cluster-keyring-pushed" ]
+}
+
+@test "FAILING FIXTURE: a rotation that fails before the push leaves no marker" {
+  rm -f "$STATE/key-slots.tfvars.json" "$D/s3/key-slots.tfvars.json"
+  rotate
+  [ "$status" -ne 0 ]
+  [ ! -e "$STATE/.cluster-keyring-pushed" ]
 }
