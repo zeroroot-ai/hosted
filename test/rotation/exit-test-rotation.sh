@@ -871,7 +871,7 @@ VELERO_IN_FLIGHT_PHASES="New Queued ReadyToStart InProgress WaitingForPluginOper
 # one name a line.
 velero_in_flight() {
   local list
-  list="$(kubectl -n velero get backups -o json)" || return 1
+  list="$(kubectl -n velero get backups.velero.io -o json)" || return 1
   printf '%s' "$list" \
     | jq -r --arg ph "$VELERO_IN_FLIGHT_PHASES" '
         ($ph | split(" ")) as $p
@@ -914,7 +914,7 @@ velero_storage_ready() {
   [ -n "$VELERO_RESTARTED_AT" ] || return 1
   deadline=$(( $(date +%s) + VELERO_READY_WAIT ))
   while :; do
-    rows="$(kubectl -n velero get backupstoragelocations \
+    rows="$(kubectl -n velero get backupstoragelocations.velero.io \
       -o jsonpath='{range .items[*]}{.status.phase} {.status.lastValidationTime}{"\n"}{end}' 2>/dev/null || true)"
     # Each location is Available and, when a restart time is known, validated
     # after it. An ISO time in UTC compares as text.
@@ -937,9 +937,12 @@ velero_diagnose() {
   {
     echo "    --- the Velero server, for backup $1 ---"
     kubectl -n velero get pods -o wide 2>&1 | sed 's/^/      /'
-    kubectl -n velero get backupstoragelocations 2>&1 | sed 's/^/      /'
-    kubectl -n velero get backup "$1" -o yaml 2>&1 | sed -n '/^status:/,$p' | sed 's/^/      /'
-    kubectl -n velero logs deployment/velero --tail=60 2>&1 | sed 's/^/      /'
+    kubectl -n velero get backupstoragelocations.velero.io 2>&1 | sed 's/^/      /'
+    kubectl -n velero get backups.velero.io "$1" -o yaml 2>&1 | tail -n 40 | sed 's/^/      /'
+    # The pod of the server, not deployment/velero: the node-agent pods carry
+    # the labels of the Deployment selector, and kubectl logs takes the first
+    # pod of the selector (drill 39461957621 printed the log of the node-agent).
+    kubectl -n velero logs -l name=velero --tail=60 2>&1 | sed 's/^/      /'
   } >&2 || true
 }
 
@@ -956,14 +959,14 @@ VELERO_DELETE_WAIT="${VELERO_DELETE_WAIT:-60}"
 # restarts on the keyring password, and it would end Completed.
 velero_delete_backup() {
   local deadline out rc
-  kubectl -n velero delete backup "$1" --ignore-not-found --wait=false >/dev/null 2>&1 || return 1
+  kubectl -n velero delete backups.velero.io "$1" --ignore-not-found --wait=false >/dev/null 2>&1 || return 1
   deadline=$(( $(date +%s) + VELERO_DELETE_WAIT ))
   while :; do
     # --ignore-not-found: exit 0 and no output is gone, exit 0 and a name is
     # still there, and a non-zero exit is an error (an API that does not
     # answer), which is not "gone". An error is read again until the deadline.
     rc=0
-    out="$(kubectl -n velero get backup "$1" --ignore-not-found -o name 2>/dev/null)" || rc=$?
+    out="$(kubectl -n velero get backups.velero.io "$1" --ignore-not-found -o name 2>/dev/null)" || rc=$?
     [ "$rc" -ne 0 ] || [ -n "$out" ] || return 0
     [ "$(date +%s)" -lt "$deadline" ] || return 1
     sleep 5
@@ -1001,7 +1004,7 @@ YAML
     deadline=""
     pickup_deadline=$(( $(date +%s) + VELERO_PICKUP_WAIT ))
     while :; do
-      phase="$(kubectl -n velero get backup "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
+      phase="$(kubectl -n velero get backups.velero.io "$name" -o jsonpath='{.status.phase}' 2>/dev/null || true)"
       case "$phase" in
         Completed|PartiallyFailed|Failed|FailedValidation) printf '%s' "$phase"; return ;;
         "")
