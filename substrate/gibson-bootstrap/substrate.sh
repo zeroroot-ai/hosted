@@ -237,10 +237,7 @@ chmod 0644 "$WORK/substrate.env"
 mv "$WORK/substrate.env" "$STATE/substrate.env"
 say "wrote $STATE/substrate.env"
 stage0_push "$ENV" "$STATE"
-say "kept the key slots of $ENV in the durable bucket"
-if stage0_keyring_remote "$ENV"; then
-  say "kept the keyring and substrate.env of $ENV in AWS ($(out keyring_secret))"
-fi
+say "kept the key slots of $ENV in the durable bucket, and the keyring and substrate.env in the secret $(out keyring_secret)"
 
 printf '    bucket   %s/%s\n' "$BUCKET_ENDPOINT" "$BUCKET_NAME"
 printf '    smtp     %s:%s as %s\n' "$SMTP_HOST" "$SMTP_PORT" "$SMTP_USER"

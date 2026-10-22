@@ -1,0 +1,25 @@
+# Fixture: the rotation workflow makes a GitHub App token for the keyring. The
+# guard must REJECT this: there is no GitHub App for the keyring.
+name: rotate-credentials
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        type: choice
+        options: [staging, prod]
+concurrency:
+  group: bringup-${{ inputs.env }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  rotate:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    steps:
+      - name: Make the GitHub App token
+        uses: actions/create-github-app-token@x
+        with:
+          app-id: ${{ vars.KEYRING_APP_ID }}
+          private-key: ${{ secrets.KEYRING_APP_PRIVATE_KEY }}

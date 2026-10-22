@@ -12,9 +12,8 @@
 # and no workflow tears it down. scripts/check-staging-not-ephemeral.py fails
 # when the option comes back.
 #
-# Stage 0 state reaches the runner the same way as preflight.yml: keyring
-# from the environment secret BRINGUP_KEYRING (mode 0600, never echoed),
-# substrate.env from the environment variable SUBSTRATE_ENV_FILE. The make
+# Stage 0 state reaches the runner from the keyring secret in Secrets Manager
+# (mode 0600, never echoed), through the .github/actions/stage0-setup action. The make
 # target runs preflight first, then destroys. The destroy body for the AWS
 # envs is scripts/teardown-aws.sh (deploy#1746). The cloud credential is an
 # OIDC session on the eks-bringup role (bootstrap/eks/aws-org github-oidc.tf), trusted
@@ -69,121 +68,21 @@ jobs:
       - name: Checkout deploy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
-      # Same step as preflight.yml. The keyring file lands on disk mode 0600
-      # and is never echoed; every member value is registered with the
-      # runner's masker on top of GitHub's own per-line masking.
-      - name: Materialize stage 0 state from the environment
-        env:
-          BRINGUP_KEYRING: ${{ secrets.BRINGUP_KEYRING }}
-          SUBSTRATE_ENV_FILE: ${{ vars.SUBSTRATE_ENV_FILE }}
-        run: |
-          set -euo pipefail
-          SUBSTRATE_DIR="${RUNNER_TEMP}/substrate"
-          echo "SUBSTRATE_DIR=${SUBSTRATE_DIR}" >> "$GITHUB_ENV"
-          state="${SUBSTRATE_DIR}/${ENV}"
-          mkdir -p "$state"
-          if [ -z "${BRINGUP_KEYRING}" ]; then
-            echo "::error::Environment secret BRINGUP_KEYRING is empty or missing for environment '${ENV}'."
-            echo "Load it from the operator keyring file: gh secret set BRINGUP_KEYRING --env ${ENV} -R ${{ github.repository }} < keyring.env"
-            exit 2
-          fi
-          if [ -z "${SUBSTRATE_ENV_FILE}" ]; then
-            echo "::error::Environment variable SUBSTRATE_ENV_FILE is empty or missing for environment '${ENV}'."
-            echo "Load it: gh variable set SUBSTRATE_ENV_FILE --env ${ENV} -R ${{ github.repository }} < substrate.env"
-            exit 2
-          fi
-          umask 077
-          printf '%s\n' "${BRINGUP_KEYRING}" > "$state/keyring.env"
-          chmod 0600 "$state/keyring.env"
-          while IFS= read -r line; do
-            case "$line" in ''|'#'*) continue ;; esac
-            v="${line#*=}"
-            if [ -n "$v" ]; then echo "::add-mask::$v"; fi
-          done < "$state/keyring.env"
-          printf '%s\n' "${SUBSTRATE_ENV_FILE}" \
-            | sed "s|^KEYRING_FILE=.*|KEYRING_FILE=$state/keyring.env|" > "$state/substrate.env"
-          test "$(grep -c '^KEYRING_FILE=' "$state/substrate.env")" = 1
-
-      # THE SEAL KEY IS NEVER PRINTED, AND IS REGISTERED WITH THE MASKER.
-      #
-      # This step used to print the key and then say, in prose, that the line
-      # above ought to read ***. It asserted nothing: if the value was not
-      # masked the key went to the log in clear and the step still passed.
-      #
-      # Worse, the property it was testing is not one anything established. The
-      # runner masks repository and environment secrets. This value is read
-      # from a keyring file that stage 0 writes ON the runner, so nothing had
-      # taught the masker about it — the check could only pass by accident,
-      # when the key happened to have arrived from a secret.
-      #
-      # So: add-mask it, which is what actually makes it unprintable for the
-      # rest of the job, and prove identity with a short sha256 rather than the
-      # value. A 12-hex prefix of a sha256 is not reversible.
-      - name: The keyring's seal key is present, and masked from here on
-        run: |
-          set -euo pipefail
-          v="$(scripts/keyring.sh get "${SUBSTRATE_DIR}/${ENV}/keyring.env" OPENBAO_SEAL_KEY)"
-          if [ -z "$v" ]; then
-            echo "::error::the keyring holds no OPENBAO_SEAL_KEY. Stage 0 did not write one, or this run is pointed at the wrong keyring (README.md, Rotation)."
-            exit 1
-          fi
-          echo "::add-mask::$v"
-          printf '✓ OPENBAO_SEAL_KEY present and now masked (sha256 %s)\n' \
-            "$(printf '%s' "$v" | sha256sum | cut -c1-12)"
-
-      # A preserve teardown ends by printing the backup name. That name is
-      # the only thing a later restore accepts (ADR-0083): read it from this
-      # step's log and write it down.
-      # The cloud credential the verb needs. A bringup verb applies and
-      # destroys a whole EKS estate, so the role is admin-equivalent in the
-      # workload account, bounded by PB-OperatorMaxPermissions and trusted
-      # only for this repo's `staging` and `prod` environments and only for
-      # these two workflows (bootstrap/eks/aws-org/github-oidc.tf, eks_bringup).
-      #
-      # configure-aws-credentials treats an unset role-to-assume as "look for
-      # credentials elsewhere", then retries 12 times over 100 seconds and
-      # reports "Could not load credentials from any providers" — which reads
-      # like a broken OIDC trust rather than an unset variable. Say which.
-      - name: The bringup role ARN variable must be set
-        env:
-          ROLE_ARN: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
-        run: |
-          set -euo pipefail
-          if [ -z "${ROLE_ARN}" ]; then
-            echo "::error::Repo variable EKS_BRINGUP_ROLE_ARN is not set." >&2
-            echo "The eks-bringup role is defined in bootstrap/eks/aws-org/github-oidc.tf." >&2
-            echo "Apply that workspace, then set the variable to the role ARN:" >&2
-            echo "  gh variable set EKS_BRINGUP_ROLE_ARN -R ${{ github.repository }} \\" >&2
-            echo "    --body arn:aws:iam::<account-id>:role/eks-bringup" >&2
-            exit 1
-          fi
-          echo "OK — role ARN is configured."
-
-      - name: Configure AWS credentials (OIDC role assumption)
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+      # The keyring and substrate.env come from the Secrets Manager secret of the
+      # environment (ADR-0083, amendment of 2026-10-22) through the OIDC session
+      # of the keyring reader role of the environment, which reads that one secret.
+      # The bringup role is not a principal of it. The action then takes the
+      # bringup session, masks each member, checks the seal key, and installs
+      # Terraform, Helm, kubectl and the SSM plugin.
+      # The bringup role is trusted only for this repo's environments and only for
+      # the verb workflows (bootstrap/eks/aws-org/github-oidc.tf, eks_bringup).
+      - name: Read the stage 0 files and set up the tools
+        uses: ./.github/actions/stage0-setup
         with:
-          role-to-assume: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
-          role-session-name: gh-actions-teardown-${{ github.run_id }}
-          aws-region: us-east-1
-          role-duration-seconds: 14400
-
-      - name: Verify AWS credentials
-        run: aws sts get-caller-identity
-
-      - name: Install Terraform
-        uses: ./.github/actions/install-terraform
-
-      - name: Install Helm and kubectl
-        run: |
-          set -euo pipefail
-          if ! command -v helm >/dev/null; then
-            curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
-          fi
-          if ! command -v kubectl >/dev/null; then
-            curl -fsSLO "https://dl.k8s.io/release/$(curl -fsSL -L https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
-            chmod +x kubectl && sudo mv kubectl /usr/local/bin/kubectl
-          fi
-          for t in terraform helm kubectl aws; do command -v "$t" >/dev/null || { echo "::error::$t is required"; exit 1; }; done
+          env: ${{ inputs.env }}
+          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          session-name: gh-actions-teardown-${{ github.run_id }}
+          keyring-role-arn: ${{ vars.KEYRING_READER_ROLE_ARN }}
 
       - name: make teardown
         run: make teardown ENV="${ENV}" MODE="${MODE}"

@@ -15,23 +15,23 @@
 # zeroroot-ai-<env>-durable-<account>. The role of the workflow can write
 # only under that prefix (substrate/gibson-bootstrap/rotation-role.tf).
 #
-# The keyring and substrate.env have two homes:
-#
-#   staging, prod   the GitHub environment secret BRINGUP_KEYRING and the
-#                   environment variable SUBSTRATE_ENV_FILE. The workflow reads
-#                   them, and writes the new ones back through a GitHub App.
-#   drill           the Secrets Manager secret zeroroot-ai/drill/keyring (an
-#                   envs/drill.tfvars with keyring_in_aws = true), because the
-#                   drill workflow token cannot write an environment secret.
+# The keyring and substrate.env of EVERY environment live in one Secrets
+# Manager secret, zeroroot-ai/<env>/keyring (substrate/gibson-bootstrap/
+# keyring-secret.tf), as {"keyring", "substrate_env"}. No GitHub environment
+# secret and no workstation file holds a keyring (ADR-0083, amendment of
+# 2026-10-22).
 #
 # Functions (source this file; the caller defines die):
-#   stage0_keyring_remote <env>               true when the keyring is in Secrets Manager
 #   stage0_bucket <env>                       the durable bucket of the env
 #   stage0_init <tf-dir> <env> <state-dir>    terraform init on the S3 backend
-#   stage0_pull <env> <state-dir>             AWS -> <state-dir>
-#   stage0_push <env> <state-dir>             <state-dir> -> AWS
+#   stage0_pull_keyring <env> <state-dir>     the keyring and substrate.env, from Secrets Manager
+#   stage0_pull <env> <state-dir>             the same, and the slot files from the bucket
+#   stage0_push_keyring <env> <state-dir>     keyring.env and substrate.env -> Secrets Manager
+#   stage0_push <env> <state-dir>             the same, and the slot files -> the bucket
 #
-# As a command: stage0-store.sh pull <env> <state-dir> (a runner), and
+# As a command: stage0-store.sh pull-keyring <env> <state-dir> (a job that
+# reads only the keyring), stage0-store.sh pull <env> <state-dir> (a job that
+# also reads the slot files), and
 # stage0-store.sh migrate <env> <state-dir> (the one-time move of an existing state)
 #
 # The files that hold secrets go to disk only under <state-dir>, mode 0600,
@@ -41,10 +41,6 @@
 STAGE0_TF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../substrate/gibson-bootstrap" && pwd)"
 STAGE0_REGION="us-east-1"
 STAGE0_PREFIX="tfstate/stage0"
-
-stage0_keyring_remote() {
-  grep -qE '^keyring_in_aws[[:space:]]*=[[:space:]]*true' "$STAGE0_TF_DIR/envs/$1.tfvars" 2>/dev/null
-}
 
 stage0_bucket() {
   local acct
@@ -126,13 +122,13 @@ _stage0_s3_get() {
   ( umask 077; aws s3 cp --only-show-errors "s3://$1/$2" "$3" ) || die "could not copy s3://$1/$2"
 }
 
-# stage0_pull <env> <state-dir>
-stage0_pull() {
-  local env="$1" state="$2" bucket f
+# stage0_pull_keyring <env> <state-dir>: keyring.env and substrate.env from the
+# keyring secret. A job that has no access to tfstate/stage0/ calls this one.
+stage0_pull_keyring() {
+  local env="$1" state="$2"
   # A caller that pulled already (substrate-rotate.sh, which then runs
   # substrate.sh) has newer files than AWS until it pushes. Pull once.
   [ "${STAGE0_PULLED:-}" != "$state" ] || return 0
-  bucket="$(stage0_bucket "$env")" || die "could not read the AWS account"
   ( umask 077; mkdir -p "$state" )
   # A keyring changed on this runner since the last pull or push holds a
   # value that AWS does not: a pull would overwrite it and write the old value
@@ -142,18 +138,15 @@ stage0_pull() {
      && [ "$(sha256sum < "${state}/keyring.env" | cut -d' ' -f1)" != "$(cat "${state}/.keyring.sha256")" ]; then
     die "${state}/keyring.env changed since it was read from or written to AWS; a pull would overwrite it with the copy in zeroroot-ai/${env}/keyring. Push it, or remove it, first"
   fi
-  for f in key-slots.tfvars.json key-rotation.json; do
-    _stage0_s3_get "$bucket" "${STAGE0_PREFIX}/${f}" "${state}/${f}"
-  done
-  stage0_keyring_remote "$env" || { export STAGE0_PULLED="$state"; return 0; }
   if ! ( umask 077
       aws secretsmanager get-secret-value --secret-id "zeroroot-ai/${env}/keyring" \
         --query SecretString --output text > "${state}/.keyring-secret.json" 2> "${state}/.keyring-secret.err" ); then
-    # A secret with no value yet: stage 0 made it and has not written it. The
-    # workstation run that moves the keyring into AWS keeps its own files.
-    if grep -q "can't find the specified secret value" "${state}/.keyring-secret.err"; then
+    # A secret with no value yet, or no secret yet: stage 0 has not written
+    # one. The first stage 0 run of an environment keeps its own files.
+    if grep -q "can't find the specified secret" "${state}/.keyring-secret.err"; then
       rm -f "${state}/.keyring-secret.json" "${state}/.keyring-secret.err"
       printf '  the keyring secret zeroroot-ai/%s/keyring holds no value yet; the files in %s stay\n' "$env" "$state" >&2
+      export STAGE0_PULLED="$state"
       return 0
     fi
     die "could not read the keyring secret zeroroot-ai/${env}/keyring: $(head -c 300 "${state}/.keyring-secret.err")"
@@ -176,16 +169,22 @@ PY
   export STAGE0_PULLED="$state"
 }
 
-# stage0_push <env> <state-dir>
-stage0_push() {
+# stage0_pull <env> <state-dir>: the keyring, and the slot files.
+stage0_pull() {
   local env="$1" state="$2" bucket f
+  [ "${STAGE0_PULLED:-}" != "$state" ] || return 0
   bucket="$(stage0_bucket "$env")" || die "could not read the AWS account"
+  ( umask 077; mkdir -p "$state" )
   for f in key-slots.tfvars.json key-rotation.json; do
-    [ -f "${state}/${f}" ] || continue
-    aws s3 cp --only-show-errors "${state}/${f}" "s3://${bucket}/${STAGE0_PREFIX}/${f}" \
-      || die "could not write s3://${bucket}/${STAGE0_PREFIX}/${f}"
+    _stage0_s3_get "$bucket" "${STAGE0_PREFIX}/${f}" "${state}/${f}"
   done
-  stage0_keyring_remote "$env" || return 0
+  stage0_pull_keyring "$env" "$state"
+}
+
+# stage0_push_keyring <env> <state-dir>: keyring.env and substrate.env into the
+# keyring secret. The one write of the keyring.
+stage0_push_keyring() {
+  local env="$1" state="$2"
   [ -s "${state}/keyring.env" ] && [ -s "${state}/substrate.env" ] \
     || die "${state} holds no keyring.env or substrate.env to keep"
   ( umask 077
@@ -199,6 +198,18 @@ PY
     || { rm -f "${state}/.keyring-secret.json"; die "could not write the keyring secret zeroroot-ai/${env}/keyring"; }
   rm -f "${state}/.keyring-secret.json"
   sha256sum < "${state}/keyring.env" | cut -d' ' -f1 > "${state}/.keyring.sha256"
+}
+
+# stage0_push <env> <state-dir>: the keyring, and the slot files.
+stage0_push() {
+  local env="$1" state="$2" bucket f
+  bucket="$(stage0_bucket "$env")" || die "could not read the AWS account"
+  for f in key-slots.tfvars.json key-rotation.json; do
+    [ -f "${state}/${f}" ] || continue
+    aws s3 cp --only-show-errors "${state}/${f}" "s3://${bucket}/${STAGE0_PREFIX}/${f}" \
+      || die "could not write s3://${bucket}/${STAGE0_PREFIX}/${f}"
+  done
+  stage0_push_keyring "$env" "$state"
 }
 
 # stage0_migrate_old <env> <state-dir>: the one-time move of an existing state
@@ -254,15 +265,19 @@ if [ "${BASH_SOURCE[0]}" = "$0" ]; then
   set -euo pipefail
   die() { printf '! [stage0-store] %s\n' "$*" >&2; exit 2; }
   case "${1:-}" in
-    pull) [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: stage0-store.sh pull <env> <state-dir>"
-          stage0_keyring_remote "$2" || die "ENV=$2 keeps its keyring in the GitHub environment, not in AWS"
-          stage0_pull "$2" "$3"
-          [ -s "$3/keyring.env" ] && [ -s "$3/substrate.env" ] \
-            || die "the keyring secret zeroroot-ai/$2/keyring holds no keyring yet. Run make substrate ENV=$2 once from the workstation"
-          printf '  ✓ [stage0-store] stage 0 of %s read from AWS into %s\n' "$2" "$3" ;;
+    pull)         [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: stage0-store.sh pull <env> <state-dir>"
+                  stage0_pull "$2" "$3"
+                  [ -s "$3/keyring.env" ] && [ -s "$3/substrate.env" ] \
+                    || die "the keyring secret zeroroot-ai/$2/keyring holds no keyring yet. Run make substrate ENV=$2 once from the workstation"
+                  printf '  ✓ [stage0-store] stage 0 of %s read from AWS into %s\n' "$2" "$3" ;;
+    pull-keyring) [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: stage0-store.sh pull-keyring <env> <state-dir>"
+                  stage0_pull_keyring "$2" "$3"
+                  [ -s "$3/keyring.env" ] && [ -s "$3/substrate.env" ] \
+                    || die "the keyring secret zeroroot-ai/$2/keyring holds no keyring yet. Run make substrate ENV=$2 once from the workstation"
+                  printf '  ✓ [stage0-store] the keyring of %s read from AWS into %s\n' "$2" "$3" ;;
     migrate) [ -n "${2:-}" ] && [ -n "${3:-}" ] || die "usage: stage0-store.sh migrate <env> <state-dir>"
              stage0_migrate_old "$2" "$3"
              printf '  ✓ [stage0-store] the stage 0 state of %s is now in s3://%s/%s/\n' "$2" "$(stage0_bucket "$2")" "$STAGE0_PREFIX" ;;
-    *) die "usage: stage0-store.sh pull|migrate <env> <state-dir>" ;;
+    *) die "usage: stage0-store.sh pull|pull-keyring|migrate <env> <state-dir>" ;;
   esac
 fi

@@ -49,12 +49,12 @@ locals {
   stage0_role_names = distinct(concat(
     var.keyring_principal_role_names,
     var.edge_cert_principal_role_names,
-    [var.inbox_reader_role_name, local.rotation_role_name],
+    [var.inbox_reader_role_name, local.rotation_role_name, local.keyring_reader_role_name],
   ))
 }
 
 data "aws_iam_openid_connect_provider" "github" {
-  count = var.rotation_role_enabled ? 1 : 0
+  count = var.rotation_role_enabled || var.keyring_reader_role_enabled ? 1 : 0
   url   = "https://token.actions.githubusercontent.com"
 }
 
@@ -115,6 +115,15 @@ data "aws_iam_policy_document" "rotation" {
     effect    = "Allow"
     actions   = ["iam:GetAccessKeyLastUsed"]
     resources = ["*"]
+  }
+
+  # The keyring of this environment (keyring-secret.tf): read and write, and no
+  # other secret.
+  statement {
+    sid       = "ReadAndWriteTheKeyring"
+    effect    = "Allow"
+    actions   = ["secretsmanager:GetSecretValue", "secretsmanager:PutSecretValue"]
+    resources = [aws_secretsmanager_secret.keyring.arn]
   }
 
   # 3. The state, the key slots and the rotation record.

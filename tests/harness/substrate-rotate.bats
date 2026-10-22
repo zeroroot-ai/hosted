@@ -77,10 +77,10 @@ case "$*" in
     cp "$D/s3/$(basename "${@: -2:1}")" "${@: -1}"; exit 0 ;;
   "s3 cp --only-show-errors "*" s3://$B/tfstate/stage0/"*)
     mkdir -p "$D/s3"; cp "${@: -2:1}" "$D/s3/$(basename "${@: -1}")"; exit 0 ;;
-  "secretsmanager get-secret-value --secret-id zeroroot-ai/drill/keyring "*)
-    [ -s "$D/sm.json" ] || { echo "An error occurred (ResourceNotFoundException): Secrets Manager can't find the specified secret value" >&2; exit 254; }
+  "secretsmanager get-secret-value --secret-id zeroroot-ai/"*"/keyring "*)
+    [ -s "$D/sm.json" ] || { echo "An error occurred (ResourceNotFoundException): Secrets Manager can't find the specified secret" >&2; exit 254; }
     cat "$D/sm.json"; exit 0 ;;
-  "secretsmanager put-secret-value --secret-id zeroroot-ai/drill/keyring --secret-string file://"*)
+  "secretsmanager put-secret-value --secret-id zeroroot-ai/"*"/keyring --secret-string file://"*)
     f="${*: -1}"; cp "${f#file://}" "$D/sm.json"; exit 0 ;;
   # Only an access key that the test made exists.
   "iam get-access-key-last-used --access-key-id "*)

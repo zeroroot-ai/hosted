@@ -35,3 +35,6 @@ audit_lock_mode = "COMPLIANCE"
 # The key rotation role (rotation-role.tf): the access keys of this env rotate in
 # .github/workflows/rotate-credentials.yml.
 rotation_role_enabled = true
+
+# preflight.yml reads the keyring with this role (keyring-reader-role.tf).
+keyring_reader_role_enabled = true

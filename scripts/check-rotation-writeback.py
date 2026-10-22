@@ -6,9 +6,9 @@ The cluster may hold the new keyring before the job ends. The environment must
 then hold it too, also after a cancel, a timeout or a failed step between the
 Rotate step and the write-back. So:
 
-  1. The steps "Decide the write-back", "Make the GitHub App token" and
-     "Write the keyring and substrate.env back to the environment" exist and
-     their `if` holds always().
+  1. The steps "Decide the write-back" and "Write the keyring and
+     substrate.env back to the environment" exist and their `if` holds
+     always().
   2. The deciding step tests the marker file .cluster-keyring-pushed on the
      disk, with `-e`.
   3. No `if` of these steps reads steps.rotate.outputs. A step output is not
@@ -30,7 +30,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github/workflows/rotate-credentials.yml"
 FIXTURES = ROOT / "scripts/testdata/rotation-writeback"
 DECIDE = "Decide the write-back"
-WRITE_STEPS = (DECIDE, "Make the GitHub App token", "Write the keyring and substrate.env back to the environment")
+WRITE_STEPS = (DECIDE, "Write the keyring and substrate.env back to the environment")
 MARKER = ".cluster-keyring-pushed"
 
 
@@ -63,7 +63,7 @@ def load(path: pathlib.Path) -> dict:
 def selftest() -> int:
     good = sorted(FIXTURES.glob("good-*.yml"))
     bads = sorted(FIXTURES.glob("bad-*.yml"))
-    if not good or len(bads) < 3:
+    if not good or len(bads) < 5:
         print("check-rotation-writeback: selftest: the fixtures are missing", file=sys.stderr)
         return 2
     for g in good:

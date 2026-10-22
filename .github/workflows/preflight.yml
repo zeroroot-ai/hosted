@@ -8,13 +8,15 @@
 # read-only against the substrate, but it still runs on the environment so the
 # keyring secret is scoped to it.
 #
-# Stage 0 state reaches the runner from the environment, never from a cloud
-# role: the whole keyring file is the environment secret BRINGUP_KEYRING
-# (written to disk mode 0600 and NEVER echoed), and substrate.env is the
-# environment variable SUBSTRATE_ENV_FILE (no secrets in it by design).
-# preflight then proves the substrate live with the keyring's platform
-# credential only — no OIDC role, no shared credentials file (ADR-0083,
-# scripts/preflight.sh).
+# The keyring and substrate.env reach the runner from the Secrets Manager
+# secret zeroroot-ai/<env>/keyring (ADR-0083, amendment of 2026-10-22), through
+# an OIDC session on the keyring reader role of the environment
+# (substrate/gibson-bootstrap/keyring-reader-role.tf). That role can read that
+# one secret and nothing else. The keyring is written to disk mode 0600 and
+# NEVER echoed. preflight then proves the substrate live with the keyring's
+# platform credential only: the make step starts with the role session
+# removed from its environment, so no ambient credential can answer for it
+# (scripts/preflight.sh).
 #
 # Guard: scripts/check-verb-workflows.py (the verb-workflow-guard CI job)
 # with failing fixtures under scripts/testdata/verb-workflows/.
@@ -39,6 +41,7 @@ concurrency:
 
 permissions:
   contents: read
+  id-token: write   # OIDC, aws-actions/configure-aws-credentials
 
 env:
   # The WebSocket transport of kubectl drops stream bytes and the exec still
@@ -57,42 +60,41 @@ jobs:
       - name: Checkout deploy
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
-      # The keyring file lands on disk mode 0600 and is never echoed. Every
-      # member value is also registered with the runner's masker, belt and
-      # braces on top of GitHub's own per-line masking of multi-line secrets.
-      # KEYRING_FILE inside substrate.env is a host-local path by design
-      # (docs/bringup.md: the keyring lives wherever its holder is), so it is
-      # repointed at this runner's copy.
-      - name: Materialize stage 0 state from the environment
+      - name: The keyring reader role ARN variable must be set
         env:
-          BRINGUP_KEYRING: ${{ secrets.BRINGUP_KEYRING }}
-          SUBSTRATE_ENV_FILE: ${{ vars.SUBSTRATE_ENV_FILE }}
+          ROLE_ARN: ${{ vars.KEYRING_READER_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROLE_ARN}" ]; then
+            echo "::error::Environment variable KEYRING_READER_ROLE_ARN is not set for '${ENV}'."
+            echo "The role is substrate/gibson-bootstrap/keyring-reader-role.tf. Apply stage 0 with keyring_reader_role_enabled, then set the variable to the output keyring_reader_role_arn." >&2
+            exit 1
+          fi
+          echo "OK, the role ARN is configured."
+
+      - name: Configure AWS credentials (OIDC role assumption)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+        with:
+          role-to-assume: ${{ vars.KEYRING_READER_ROLE_ARN }}
+          role-session-name: gh-actions-preflight-${{ github.run_id }}
+          aws-region: us-east-1
+          role-duration-seconds: 3600
+
+      # The keyring file lands on disk mode 0600 and is never echoed. Every
+      # member value is registered with the runner's masker. KEYRING_FILE inside
+      # substrate.env is repointed at this runner's copy.
+      - name: Read the keyring and substrate.env from Secrets Manager
         run: |
           set -euo pipefail
           SUBSTRATE_DIR="${RUNNER_TEMP}/substrate"
           echo "SUBSTRATE_DIR=${SUBSTRATE_DIR}" >> "$GITHUB_ENV"
           state="${SUBSTRATE_DIR}/${ENV}"
-          mkdir -p "$state"
-          if [ -z "${BRINGUP_KEYRING}" ]; then
-            echo "::error::Environment secret BRINGUP_KEYRING is empty or missing for environment '${ENV}'."
-            echo "Load it from the operator keyring file: gh secret set BRINGUP_KEYRING --env ${ENV} -R ${{ github.repository }} < keyring.env"
-            exit 2
-          fi
-          if [ -z "${SUBSTRATE_ENV_FILE}" ]; then
-            echo "::error::Environment variable SUBSTRATE_ENV_FILE is empty or missing for environment '${ENV}'."
-            echo "Load it: gh variable set SUBSTRATE_ENV_FILE --env ${ENV} -R ${{ github.repository }} < substrate.env"
-            exit 2
-          fi
-          umask 077
-          printf '%s\n' "${BRINGUP_KEYRING}" > "$state/keyring.env"
-          chmod 0600 "$state/keyring.env"
+          scripts/stage0-store.sh pull-keyring "$ENV" "$state"
           while IFS= read -r line; do
             case "$line" in ''|'#'*) continue ;; esac
             v="${line#*=}"
             if [ -n "$v" ]; then echo "::add-mask::$v"; fi
           done < "$state/keyring.env"
-          printf '%s\n' "${SUBSTRATE_ENV_FILE}" \
-            | sed "s|^KEYRING_FILE=.*|KEYRING_FILE=$state/keyring.env|" > "$state/substrate.env"
           test "$(grep -c '^KEYRING_FILE=' "$state/substrate.env")" = 1
 
       # The printf below must render as OPENBAO_SEAL_KEY=*** in the log: the
@@ -128,4 +130,7 @@ jobs:
             "$(printf '%s' "$v" | sha256sum | cut -c1-12)"
 
       - name: make preflight
-        run: make preflight ENV="${ENV}"
+        run: |
+          set -euo pipefail
+          # The role session is removed: preflight answers with the keyring's own credential.
+          env -u AWS_ACCESS_KEY_ID -u AWS_SECRET_ACCESS_KEY -u AWS_SESSION_TOKEN -u AWS_PROFILE make preflight ENV="${ENV}"

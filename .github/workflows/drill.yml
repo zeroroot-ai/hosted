@@ -108,7 +108,7 @@ permissions:
 # credential and its own limit under the GitHub limit of 360 minutes, and
 # each one starts from nothing: it reads the stage 0 files from AWS
 # (scripts/stage0-store.sh) and finds the cluster in AWS, never on the disk of
-# an earlier job (.github/actions/drill-setup, scripts/with-cluster.sh).
+# an earlier job (.github/actions/stage0-setup, scripts/with-cluster.sh).
 #
 #   up        recreate from nothing, the ceiling, the smoke, and the open
 #             access key rotation. 345 minutes.
@@ -235,13 +235,14 @@ jobs:
         run: scripts/check-node-count.sh "${ENV}" "${NODE_COUNT}"
 
       # Stage 0 state, the masked seal key, a credential of this job's own,
-      # Terraform and the pinned tools (.github/actions/drill-setup).
+      # Terraform and the pinned tools (.github/actions/stage0-setup).
       - name: Set up the job from nothing
-        uses: ./.github/actions/drill-setup
+        uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
           role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-up-${{ github.run_id }}
+          slots: "true"
 
       # A leftover from a previous run would make the recreate adopt an estate
       # rather than build one, and "from nothing" is the property under test.
@@ -361,13 +362,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       # Stage 0 state, the masked seal key, a credential of this job's own,
-      # Terraform and the pinned tools (.github/actions/drill-setup).
+      # Terraform and the pinned tools (.github/actions/stage0-setup).
       - name: Set up the job from nothing
-        uses: ./.github/actions/drill-setup
+        uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
           role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-restore-${{ github.run_id }}
+          slots: "true"
 
       # Before the backup: one known record in each store the backup covers,
       # read back at once (test/dr/lib/restore-markers.sh).
@@ -444,13 +446,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       # Stage 0 state, the masked seal key, a credential of this job's own,
-      # Terraform and the pinned tools (.github/actions/drill-setup).
+      # Terraform and the pinned tools (.github/actions/stage0-setup).
       - name: Set up the job from nothing
-        uses: ./.github/actions/drill-setup
+        uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
           role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-rotation-${{ github.run_id }}
+          slots: "true"
 
       # THE ROTATION TEST (hosted#444). It runs only in a rotation run, which
       # does no restore half, on the cluster that the smoke proved.
@@ -582,13 +585,14 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 
       # Stage 0 state, the masked seal key, a credential of this job's own,
-      # Terraform and the pinned tools (.github/actions/drill-setup).
+      # Terraform and the pinned tools (.github/actions/stage0-setup).
       - name: Set up the job from nothing
-        uses: ./.github/actions/drill-setup
+        uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
           role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-teardown-${{ github.run_id }}
+          slots: "true"
 
       - name: Tear down, and ask the account what survived
         id: teardown

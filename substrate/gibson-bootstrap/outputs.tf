@@ -150,11 +150,16 @@ output "edge_cert_secret" {
 }
 
 output "keyring_secret" {
-  description = "The Secrets Manager secret that holds the keyring and substrate.env of this environment, or empty when the keyring stays on the workstation (keyring-secret.tf)."
-  value       = var.keyring_in_aws ? aws_secretsmanager_secret.keyring[0].name : ""
+  description = "The Secrets Manager secret that holds the keyring and substrate.env of this environment (keyring-secret.tf)."
+  value       = aws_secretsmanager_secret.keyring.name
 }
 
 output "rotation_role_arn" {
   description = "The key rotation role (rotation-role.tf). Set it as the variable KEY_ROTATION_ROLE_ARN of the GitHub environment of this env. Empty when the role is off."
   value       = var.rotation_role_enabled ? aws_iam_role.rotation[0].arn : ""
+}
+
+output "keyring_reader_role_arn" {
+  description = "The keyring reader role (keyring-reader-role.tf). Set it as the variable KEYRING_READER_ROLE_ARN of the GitHub environment of this env. Empty when the role is off."
+  value       = var.keyring_reader_role_enabled ? aws_iam_role.keyring_reader[0].arn : ""
 }

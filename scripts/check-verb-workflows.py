@@ -27,10 +27,10 @@ workflow files honest, keyed by content, never by line number:
      workflow's) have no `contents: write` and no `pull-requests: write`.
      Only the catch-up job of a restore writes, and it runs no verb (D91,
      hosted#687).
-  6. The keyring never reaches a log. `secrets.BRINGUP_KEYRING` may appear
-     only as the env mapping `BRINGUP_KEYRING: ${{ secrets.BRINGUP_KEYRING }}`
-     of a step, never inline in a `run:` body. Inside run bodies, an
-     echo/printf that expands $BRINGUP_KEYRING must redirect to a file.
+  6. The keyring comes from Secrets Manager (ADR-0083, amendment of
+     2026-10-22). No workflow reads `secrets.BRINGUP_KEYRING`,
+     `vars.SUBSTRATE_ENV_FILE`, `KEYRING_APP_ID` or `KEYRING_APP_PRIVATE_KEY`:
+     the GitHub environments hold no keyring, and there is no GitHub App for it.
 
 Usage: scripts/check-verb-workflows.py            # the guard
        scripts/check-verb-workflows.py --selftest # prove it can fail
@@ -58,11 +58,10 @@ ENV_OPTIONS = {
     "rotate-credentials": ["staging", "prod"],
 }
 ENV_EXPR = re.compile(r"^\$\{\{\s*inputs\.env\s*\}\}$")
-SECRET_EXPR = re.compile(r"secrets\.BRINGUP_KEYRING")
-ENV_MAP_LINE = re.compile(
-    r"^\s*BRINGUP_KEYRING:\s*\$\{\{\s*secrets\.BRINGUP_KEYRING\s*\}\}\s*$"
+# What a workflow may not read. A comment line is not a read.
+KEYRING_FROM_GITHUB = re.compile(
+    r"secrets\.BRINGUP_KEYRING|vars\.SUBSTRATE_ENV_FILE|KEYRING_APP_ID|KEYRING_APP_PRIVATE_KEY"
 )
-ECHO_KEYRING = re.compile(r"\b(echo|printf)\b[^>\n]*\$\{?BRINGUP_KEYRING\b[^>\n]*$")
 VERB_RUN = re.compile(r"\bmake\s+(preflight|teardown|recreate)\b")
 WRITE_SCOPES = ("contents", "pull-requests")
 
@@ -158,23 +157,14 @@ def check_workflow(path: pathlib.Path, verb: str) -> list[str]:
         for step in job.get("steps") or []:
             if not isinstance(step, dict):
                 continue
-            run = step.get("run")
-            if isinstance(run, str):
-                if SECRET_EXPR.search(run):
-                    bad.append(f"{rel}: job `{job_id}` interpolates secrets.BRINGUP_KEYRING inside a run body — the keyring reaches a step only through `env:`")
-                for line in run.splitlines():
-                    if ECHO_KEYRING.search(line):
-                        bad.append(f"{rel}: job `{job_id}` echoes the keyring without a redirect: {line.strip()[:80]}")
-            step_env = step.get("env") or {}
-            for key, value in step_env.items() if isinstance(step_env, dict) else []:
-                if SECRET_EXPR.search(str(value)) and not ENV_MAP_LINE.match(f"{key}: {value}"):
-                    bad.append(f"{rel}: job `{job_id}` maps secrets.BRINGUP_KEYRING to `{key}` — the one allowed mapping is BRINGUP_KEYRING itself")
 
-    # Raw-text backstop: the secret expression may appear only on the exact
-    # env-mapping line, wherever the structural walk above could not reach.
+    # The keyring is not read from GitHub, wherever it is mentioned in code.
     for n, line in enumerate(path.read_text().splitlines(), 1):
-        if SECRET_EXPR.search(line) and not ENV_MAP_LINE.match(line):
-            bad.append(f"{rel}:{n}: secrets.BRINGUP_KEYRING outside the BRINGUP_KEYRING env mapping")
+        if line.lstrip().startswith("#"):
+            continue
+        m = KEYRING_FROM_GITHUB.search(line)
+        if m:
+            bad.append(f"{rel}:{n}: reads {m.group(0)}: the keyring comes from Secrets Manager, not from GitHub")
     return bad
 
 
@@ -188,7 +178,7 @@ def run_guard() -> int:
             print(f"  {b}", file=sys.stderr)
         return 1
     print(f"✅ {', '.join(v + '.yml' for v in VERBS)}: dispatch-only, required un-defaulted inputs, environment-gated, "
-          "keyring never echoed, no verb job holds a write token")
+          "keyring read from Secrets Manager, never from GitHub, no verb job holds a write token")
     return 0
 
 
@@ -200,7 +190,9 @@ def selftest() -> int:
     cases = [  # fixture file, verb to check it as, reason substring the guard must name
         ("teardown-defaulted-mode.yml", "teardown", "declares a default"),
         ("teardown-missing-mode.yml", "teardown", "no `mode` input"),
-        ("teardown-echoes-keyring.yml", "teardown", "secrets.BRINGUP_KEYRING"),
+        ("teardown-echoes-keyring.yml", "teardown", "reads secrets.BRINGUP_KEYRING"),
+        ("recreate-reads-substrate-env-var.yml", "recreate", "reads vars.SUBSTRATE_ENV_FILE"),
+        ("rotate-uses-github-app.yml", "rotate-credentials", "reads KEYRING_APP_ID"),
         ("preflight-no-environment.yml", "preflight", "must run on `environment:"),
         ("recreate-on-schedule.yml", "recreate", "workflow_dispatch only"),
         ("recreate-write-token.yml", "recreate", "holds a write token"),
@@ -219,7 +211,7 @@ def selftest() -> int:
     # The guard must also fail on an absent file, never pass silently.
     if not check_workflow(FIXTURES / "does-not-exist.yml", "teardown"):
         return broken("a missing workflow was accepted")
-    print("✅ self-test: 6 bad fixtures rejected for the right reason, the clean fixture passes, a missing file fails")
+    print("✅ self-test: 8 bad fixtures rejected for the right reason, the clean fixture passes, a missing file fails")
     return 0
 
 

@@ -16,7 +16,7 @@
 #                 "rotate" or "retire".
 #
 # The keyring of the state directory is the keyring of the environment (the
-# workflow wrote it from the environment secret BRINGUP_KEYRING). A rotation
+# workflow read it from the keyring secret in Secrets Manager). A rotation
 # changes it and substrate.env, and the workflow writes both back, so this
 # script never touches GitHub.
 #
@@ -64,7 +64,13 @@ say() { printf '  ✓ [rotate-credential] %s\n' "$*"; }
   || die "usage: rotate-credential.sh <state-dir> <env> <credential> <step>"
 case "$ENV" in staging|prod) ;; *) die "ENV=$ENV is not staging or prod. The drill rotates in drill.yml" ;; esac
 [ -s "$STATE/keyring.env" ] && [ -s "$STATE/substrate.env" ] \
-  || die "$STATE holds no keyring.env or substrate.env: the workflow reads them from the environment first"
+  || die "$STATE holds no keyring.env or substrate.env: the workflow reads them first with scripts/stage0-store.sh pull"
+# The pull wrote this file. It also tells substrate.sh, a child of this script,
+# that the files are already read: its own pull would refuse a keyring that this
+# script changed.
+[ -s "$STATE/.keyring.sha256" ] \
+  || die "$STATE has no record of a pull. Run scripts/stage0-store.sh pull ${ENV} ${STATE} first"
+export STAGE0_PULLED="$STATE"
 
 case "$CRED" in
   platform|smtp|dns|setec-disk-builder)

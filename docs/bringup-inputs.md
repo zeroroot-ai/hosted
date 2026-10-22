@@ -76,14 +76,14 @@ member you just set (staging, 2026-09-10).
 |---|---|---|
 | var | `EKS_BRINGUP_ROLE_ARN` | `arn:aws:iam::000000000000:role/eks-bringup` |
 | var | `EKS_PLAN_READONLY_ROLE_ARN` | the read-only role |
-| var | `SUBSTRATE_ENV_FILE` | contents of `/bulk/substrate/<env>/substrate.env` |
-| secret | `BRINGUP_KEYRING` | contents of `/bulk/substrate/<env>/keyring.env` |
 | var | `ARGOCD_GITHUB_APP_ID` | the App ID (step 1) |
 | var | `ARGOCD_GITHUB_APP_INSTALLATION_ID` | the installation ID (step 1) |
 | secret | `ARGOCD_GITHUB_APP_PRIVATE_KEY` | the App private-key PEM (step 1) |
 
-`gh variable set SUBSTRATE_ENV_FILE --env <env> -R zeroroot-ai/hosted < /bulk/substrate/<env>/substrate.env`
-and `gh secret set BRINGUP_KEYRING --env <env> -R zeroroot-ai/hosted < /bulk/substrate/<env>/keyring.env`.
+The keyring and `substrate.env` are not on this list. They live in the Secrets
+Manager secret `zeroroot-ai/<env>/keyring` of every environment, and the
+workflows read them with an OIDC session (ADR-0083, amendment of 2026-10-22).
+`make substrate ENV=<env>` writes the secret.
 
 ## 5. Committed config in this repo
 

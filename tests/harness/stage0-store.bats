@@ -32,6 +32,12 @@ case "$*" in
     b="$4"; k="$6"
     [ -e "$REC/obj/$b/$k" ] && exit 0
     echo "An error occurred (404) when calling the HeadObject operation: Not Found" >&2; exit 254 ;;
+  # The keyring secret of any environment: $REC/sm.json is its value.
+  "secretsmanager get-secret-value --secret-id zeroroot-ai/"*"/keyring "*)
+    [ -s "$REC/sm.json" ] || { echo "An error occurred (ResourceNotFoundException): Secrets Manager can't find the specified secret." >&2; exit 254; }
+    cat "$REC/sm.json"; exit 0 ;;
+  "secretsmanager put-secret-value --secret-id zeroroot-ai/"*"/keyring --secret-string file://"*)
+    f="${*: -1}"; cp "${f#file://}" "$REC/sm.json"; echo "$4" > "$REC/sm.id"; exit 0 ;;
   "s3 cp --only-show-errors "*)
     # A copy down from the old drill key, or a copy up of a slot file.
     case "$4" in s3://*) mkdir -p "$(dirname "$5")"; echo '{}' > "$5" ;; *) echo "up $5" >> "$REC/uploads" ;; esac
@@ -48,13 +54,29 @@ remote_state() { mkdir -p "$REC/obj/zeroroot-ai-$1-durable-447184491447/tfstate/
 
 lib() { bash -c 'die() { echo "DIE: $*" >&2; exit 2; }; . "$1"; shift; "$@"' _ "$REPO_ROOT/scripts/stage0-store.sh" "$@"; }
 
-@test "only drill keeps its keyring in AWS, as its tfvars say" {
-  run lib stage0_keyring_remote drill
-  [ "$status" -eq 0 ]
-  run lib stage0_keyring_remote staging
-  [ "$status" -ne 0 ]
-  run lib stage0_keyring_remote prod
-  [ "$status" -ne 0 ]
+@test "every env keeps its keyring in its Secrets Manager secret: a pull reads it, a push writes it" {
+  for e in staging prod drill; do
+    rm -rf "$REC/sm.json" "$BATS_TEST_TMPDIR/s"
+    mkdir -p "$BATS_TEST_TMPDIR/s"
+    printf 'OPENBAO_SEAL_KEY=abc\n' > "$BATS_TEST_TMPDIR/s/keyring.env"
+    printf 'KEYRING_FILE=/x\nBUCKET_NAME=b\n' > "$BATS_TEST_TMPDIR/s/substrate.env"
+    run lib stage0_push_keyring "$e" "$BATS_TEST_TMPDIR/s"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    [ "$(cat "$REC/sm.id")" = "zeroroot-ai/$e/keyring" ]
+    rm -f "$BATS_TEST_TMPDIR/s/keyring.env" "$BATS_TEST_TMPDIR/s/substrate.env" "$BATS_TEST_TMPDIR/s/.keyring.sha256"
+    run "$REPO_ROOT/scripts/stage0-store.sh" pull-keyring "$e" "$BATS_TEST_TMPDIR/s"
+    [ "$status" -eq 0 ] || { echo "$output"; false; }
+    grep -qx 'OPENBAO_SEAL_KEY=abc' "$BATS_TEST_TMPDIR/s/keyring.env"
+    grep -qx "KEYRING_FILE=$BATS_TEST_TMPDIR/s/keyring.env" "$BATS_TEST_TMPDIR/s/substrate.env"
+  done
+}
+
+@test "pull-keyring reads no slot file from the state bucket, so a role without tfstate/stage0/ can use it" {
+  remote_state staging
+  printf '{"keyring":"OPENBAO_SEAL_KEY=abc\\n","substrate_env":"KEYRING_FILE=/x\\n"}' > "$REC/sm.json"
+  run "$REPO_ROOT/scripts/stage0-store.sh" pull-keyring staging "$BATS_TEST_TMPDIR/s"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$BATS_TEST_TMPDIR/s/key-slots.tfvars.json" ]
 }
 
 @test "every env inits on the state in its own durable bucket, with lock files" {
@@ -174,10 +196,10 @@ SH
   [ ! -e "$REC/terraform.args" ]
 }
 
-@test "FAILING FIXTURE: the pull command refuses an env whose keyring is in the GitHub environment" {
+@test "FAILING FIXTURE: the pull command refuses an env whose keyring secret holds no value yet" {
   run "$REPO_ROOT/scripts/stage0-store.sh" pull staging "$BATS_TEST_TMPDIR/state"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"keeps its keyring in the GitHub environment"* ]]
+  [[ "$output" == *"holds no keyring yet"* ]]
 }
 
 @test "the bucket policy denies tfstate/stage0/ to every principal but the rotation role and the operator roles" {
@@ -185,4 +207,25 @@ SH
   grep -q 'DenyStage0StateToEveryoneElse' "$f"
   grep -q 'aws_iam_role.rotation\[0\].arn' "$f"
   grep -q 'stage0_state_principal_role_names' "$f"
+}
+
+@test "the rotation role reads and writes the keyring secret of its environment and no other secret value" {
+  f="$REPO_ROOT/substrate/gibson-bootstrap/rotation-role.tf"
+  grep -q 'ReadAndWriteTheKeyring' "$f"
+  grep -q 'aws_secretsmanager_secret.keyring.arn' "$f"
+  # No statement grants GetSecretValue or PutSecretValue on a wildcard resource.
+  run grep -nE 'secretsmanager:(Get|Put)SecretValue' "$f"
+  [ "$(printf '%s\n' "$output" | wc -l)" -eq 1 ]
+}
+
+@test "the keyring reader role reads one secret, and the secret policy lets both roles in" {
+  r="$REPO_ROOT/substrate/gibson-bootstrap/keyring-reader-role.tf"
+  grep -q 'secretsmanager:GetSecretValue' "$r"
+  run grep -c 'PutSecretValue' "$r"
+  [ "$output" = 0 ]
+  s="$REPO_ROOT/substrate/gibson-bootstrap/keyring-secret.tf"
+  grep -q 'aws_iam_role.rotation\[0\].arn' "$s"
+  grep -q 'aws_iam_role.keyring_reader\[0\].arn' "$s"
+  run grep -rn 'keyring_in_aws' "$REPO_ROOT/substrate" "$REPO_ROOT/scripts"
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
 }

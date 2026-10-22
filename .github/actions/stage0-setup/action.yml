@@ -1,11 +1,15 @@
-name: drill-setup
+name: stage0-setup
 description: >-
-  The setup that each job of drill.yml needs, from nothing on a fresh runner:
-  a credential of the job's own (OIDC, eks-bringup), the stage 0 files of
-  drill read from AWS (the keyring and substrate.env from the Secrets Manager
-  secret zeroroot-ai/drill/keyring, ADR-0083), the seal key masked, Terraform,
-  the Python requirements and the pinned cluster tools. Nothing comes from the
-  disk of an earlier job, and the GitHub Environment holds no keyring.
+  The setup that each job of a bringup workflow needs, from nothing on a fresh
+  runner: the keyring and substrate.env of the environment read from the Secrets
+  Manager secret zeroroot-ai/<env>/keyring (ADR-0083, amendment of 2026-10-22)
+  with the keyring reader role of that environment, then a credential of the
+  job's own on the bringup role (OIDC, eks-bringup), the seal key masked,
+  Terraform, the Python requirements and the pinned cluster tools. The bringup
+  role is a principal of the keyring secret of drill only, so drill alone leaves
+  keyring-role-arn empty and reads with the bringup role, and drill alone sets
+  slots to true. Nothing comes from the disk of an earlier job, and the GitHub
+  Environment holds no keyring.
 inputs:
   env:
     description: The environment name.
@@ -16,6 +20,14 @@ inputs:
   session-name:
     description: The role session name, one for each job.
     required: true
+  keyring-role-arn:
+    description: "The KEYRING_READER_ROLE_ARN variable of the environment. Required for staging and prod. Empty only for drill."
+    required: false
+    default: ""
+  slots:
+    description: "true reads the key slots and the rotation record of tfstate/stage0/ too. Only drill's bringup role may."
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -37,6 +49,57 @@ runs:
         fi
         echo "OK — role ARN is configured."
 
+    # The keyring reader role of this environment reads the keyring and nothing
+    # else. The bringup role is not a principal of the keyring secret of staging
+    # or prod, because staging, prod and drill share one account and the bringup
+    # role trusts all three environments.
+    - name: The keyring reader role must be set outside drill
+      shell: bash
+      env:
+        ENV: ${{ inputs.env }}
+        KEYRING_ROLE: ${{ inputs.keyring-role-arn }}
+        SLOTS: ${{ inputs.slots }}
+      run: |
+        set -euo pipefail
+        if [ "${ENV}" != drill ] && [ -z "${KEYRING_ROLE}" ]; then
+          echo "::error::Environment variable KEYRING_READER_ROLE_ARN is not set for '${ENV}'. Only drill reads its keyring with the bringup role." >&2
+          exit 1
+        fi
+        if [ -n "${KEYRING_ROLE}" ] && [ "${SLOTS}" = true ]; then
+          echo "::error::slots needs the bringup role, which only drill may use for the keyring." >&2
+          exit 1
+        fi
+
+    - name: Configure AWS credentials (keyring reader role)
+      if: ${{ inputs.keyring-role-arn != '' }}
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
+      with:
+        role-to-assume: ${{ inputs.keyring-role-arn }}
+        role-session-name: ${{ inputs.session-name }}-keyring
+        aws-region: us-east-1
+        role-duration-seconds: 3600
+
+    # The keyring and substrate.env, from the Secrets Manager secret
+    # (scripts/stage0-store.sh pull-keyring). The keyring file lands on disk mode
+    # 0600 and is never echoed. Every member value is registered with the
+    # runner's masker.
+    - name: Read the keyring of the environment from AWS
+      if: ${{ inputs.keyring-role-arn != '' }}
+      shell: bash
+      env:
+        ENV: ${{ inputs.env }}
+      run: |
+        set -euo pipefail
+        SUBSTRATE_DIR="${RUNNER_TEMP}/substrate"
+        echo "SUBSTRATE_DIR=${SUBSTRATE_DIR}" >> "$GITHUB_ENV"
+        scripts/stage0-store.sh pull-keyring "${ENV}" "${SUBSTRATE_DIR}/${ENV}"
+        while IFS= read -r line; do
+          case "$line" in ''|'#'*) continue ;; esac
+          v="${line#*=}"
+          if [ -n "$v" ]; then echo "::add-mask::$v"; fi
+        done < "${SUBSTRATE_DIR}/${ENV}/keyring.env"
+        test "$(grep -c '^KEYRING_FILE=' "${SUBSTRATE_DIR}/${ENV}/substrate.env")" = 1
+
     # A credential of this job's own. Six hours: longer than any job of
     # drill.yml (each stops before the GitHub limit of 360 minutes), so the
     # credential never ends before its job. The role allows it
@@ -53,19 +116,22 @@ runs:
       shell: bash
       run: aws sts get-caller-identity
 
-    # The keyring and substrate.env of drill, from its Secrets Manager secret
-    # (scripts/stage0-store.sh pull). The keyring file lands on disk mode
-    # 0600 and is never echoed. Every member value is registered with the
-    # runner's masker.
-    - name: Read the stage 0 files of the environment from AWS
+    # Drill only: the bringup role reads the keyring (and the slot files).
+    - name: Read the stage 0 files of drill from AWS
+      if: ${{ inputs.keyring-role-arn == '' }}
       shell: bash
       env:
         ENV: ${{ inputs.env }}
+        SLOTS: ${{ inputs.slots }}
       run: |
         set -euo pipefail
         SUBSTRATE_DIR="${RUNNER_TEMP}/substrate"
         echo "SUBSTRATE_DIR=${SUBSTRATE_DIR}" >> "$GITHUB_ENV"
-        scripts/stage0-store.sh pull "${ENV}" "${SUBSTRATE_DIR}/${ENV}"
+        if [ "${SLOTS}" = true ]; then
+          scripts/stage0-store.sh pull "${ENV}" "${SUBSTRATE_DIR}/${ENV}"
+        else
+          scripts/stage0-store.sh pull-keyring "${ENV}" "${SUBSTRATE_DIR}/${ENV}"
+        fi
         while IFS= read -r line; do
           case "$line" in ''|'#'*) continue ;; esac
           v="${line#*=}"

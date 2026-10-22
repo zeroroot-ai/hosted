@@ -27,9 +27,11 @@ WORKFLOWS = ROOT / ".github/workflows"
 TF_DIR = ROOT / "bootstrap/eks/aws-org"
 # The key rotation role of stage 0 (rotation-role.tf). Its trust pins
 # job_workflow_ref to full refs, one for each workflow file.
-ROTATION_TF = ROOT / "substrate/gibson-bootstrap/rotation-role.tf"
-ROTATION_VAR = "KEY_ROTATION_ROLE_ARN"
-ROTATION_LOCAL = "rotation_job_workflow_refs"
+# (variable of the environment that holds the role ARN, Terraform file, local with the list)
+STAGE0_ROLES = [
+    ("KEY_ROTATION_ROLE_ARN", ROOT / "substrate/gibson-bootstrap/rotation-role.tf", "rotation_job_workflow_refs"),
+    ("KEYRING_READER_ROLE_ARN", ROOT / "substrate/gibson-bootstrap/keyring-reader-role.tf", "keyring_reader_job_workflow_refs"),
+]
 
 # (repository variable that holds the role ARN, Terraform local with the list)
 ROLES = [
@@ -65,17 +67,17 @@ def problems(tf_text: str, workflows: dict[str, str], roles=ROLES) -> list[str]:
     return bad
 
 
-def rotation_trusted(tf_text: str) -> set[str]:
-    m = re.search(ROTATION_LOCAL + r"\s*=\s*\[(?P<body>[^\]]*)\]", tf_text, re.S)
+def stage0_trusted(tf_text: str, local: str) -> set[str]:
+    m = re.search(local + r"\s*=\s*\[(?P<body>[^\]]*)\]", tf_text, re.S)
     if m is None:
-        raise ValueError(f"{ROTATION_LOCAL} list not found")
+        raise ValueError(f"{local} list not found")
     return set(re.findall(r"\.github/workflows/([\w.-]+\.ya?ml)@refs/heads/main", m.group("body")))
 
 
-def rotation_problems(tf_text: str, workflows: dict[str, str]) -> list[str]:
-    t, c = rotation_trusted(tf_text), callers(workflows, ROTATION_VAR)
-    bad = [f"{w}: assumes {ROTATION_VAR}, and {ROTATION_LOCAL} does not name it" for w in sorted(c - t)]
-    bad += [f"{w}: named in {ROTATION_LOCAL}, and no workflow of that name assumes {ROTATION_VAR}" for w in sorted(t - c)]
+def stage0_problems(tf_text: str, workflows: dict[str, str], var: str, local: str) -> list[str]:
+    t, c = stage0_trusted(tf_text, local), callers(workflows, var)
+    bad = [f"{w}: assumes {var}, and {local} does not name it" for w in sorted(c - t)]
+    bad += [f"{w}: named in {local}, and no workflow of that name assumes {var}" for w in sorted(t - c)]
     return bad
 
 
@@ -87,7 +89,7 @@ def selftest() -> int:
         ("a rotation file with no caller", {"rotate-credentials.yml": "steps: []\n"}, True),
         ("the rotation sets match", {"rotate-credentials.yml": ruse}, False),
     ):
-        if bool(rotation_problems(rtf, wfs)) != want_bad:
+        if bool(stage0_problems(rtf, wfs, "KEY_ROTATION_ROLE_ARN", "rotation_job_workflow_refs")) != want_bad:
             print(f"GUARD BROKEN: {label} gave the wrong result", file=sys.stderr)
             return 2
     roles = [("ROLE_A", "list_a"), ("ROLE_B", "list_b")]
@@ -122,7 +124,9 @@ def main(argv: list[str]) -> int:
     wfs = {p.name: p.read_text() for p in sorted(WORKFLOWS.glob("*.y*ml"))}
     tf = "\n".join(p.read_text() for p in sorted(TF_DIR.glob("*.tf")))
     try:
-        bad = problems(tf, wfs) + rotation_problems(ROTATION_TF.read_text(), wfs)
+        bad = problems(tf, wfs)
+        for var, path, local in STAGE0_ROLES:
+            bad += stage0_problems(path.read_text(), wfs, var, local)
     except ValueError as e:
         print(f"❌ {TF_DIR.relative_to(ROOT)}: {e}", file=sys.stderr)
         return 2
@@ -131,7 +135,7 @@ def main(argv: list[str]) -> int:
         for b in bad:
             print("   ", b)
         return 1
-    for var, _ in ROLES + [(ROTATION_VAR, ROTATION_LOCAL)]:
+    for var, _ in ROLES + [(v, l) for v, _, l in STAGE0_ROLES]:
         print(f"✅ {len(callers(wfs, var))} workflows assume {var}, and its trust names each one")
     return 0
 

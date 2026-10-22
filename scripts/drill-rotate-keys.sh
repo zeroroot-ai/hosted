@@ -17,7 +17,7 @@
 #
 # A user with one key slot has no open rotation, and `continue` skips it.
 #
-# Env: SUBSTRATE_DIR (the runner's stage 0 directory, from drill-setup),
+# Env: SUBSTRATE_DIR (the runner's stage 0 directory, from stage0-setup),
 #      WAIT_SECS (default 900 here: a run does not wait hours for a key to be
 #      used, the next run looks again), QUIET_SECS (the script's default).
 # Exit: 0 every user rotated, waits (exit 10 only), or has nothing open · 1 a
@@ -30,7 +30,7 @@ MODE="${1:-}"
 ENV=drill
 USERS="platform smtp dns setec-disk-builder"
 case "$MODE" in start|continue) ;; *) echo "usage: drill-rotate-keys.sh start|continue" >&2; exit 2 ;; esac
-[ -n "${SUBSTRATE_DIR:-}" ] || { echo "SUBSTRATE_DIR is not set (drill-setup sets it)" >&2; exit 2; }
+[ -n "${SUBSTRATE_DIR:-}" ] || { echo "SUBSTRATE_DIR is not set (stage0-setup sets it)" >&2; exit 2; }
 STATE="${SUBSTRATE_DIR}/${ENV}"
 SLOTS="${STATE}/key-slots.tfvars.json"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
