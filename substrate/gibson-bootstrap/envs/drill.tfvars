@@ -38,3 +38,8 @@ audit_lock_mode = "GOVERNANCE"
 # zeroroot-ai/drill/keyring, as every environment does. Drill rotates its keys in
 # drill.yml as the bringup role, which therefore also reads tfstate/stage0/.
 stage0_state_principal_role_names = ["OrganizationAccountAccessRole", "eks-bringup"]
+
+# The bringup role is a principal of the keyring secret of drill only. It trusts
+# every GitHub environment of the shared account, so it must not reach the
+# keyring of staging or prod.
+keyring_principal_role_names = ["OrganizationAccountAccessRole", "eks-bringup"]

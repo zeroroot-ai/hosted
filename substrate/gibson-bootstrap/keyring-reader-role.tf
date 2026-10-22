@@ -1,13 +1,19 @@
 # ----------------------------------------------------------------------------
 # The keyring reader role (ADR-0083, amendment of 2026-10-22).
 #
-# preflight.yml reads the keyring of an environment from Secrets Manager
-# (keyring-secret.tf) and nothing else. The bringup role is administrator
-# equivalent and preflight only reads, so preflight gets its own role. GitHub
-# OIDC assumes it, off main, in the GitHub environment of the env, and only
-# from preflight.yml. It can read one secret: the keyring of this environment.
-# It cannot read the state under tfstate/stage0/, which the bucket policy keeps
-# for the rotation role and the operator roles.
+# One read-only role for each environment. The workflows preflight.yml,
+# recreate.yml and teardown.yml read the keyring of an environment from Secrets
+# Manager (keyring-secret.tf) with it, and with nothing else. GitHub OIDC assumes
+# it only from the GitHub environment of the env (the sub claim names that one
+# environment), only off main, and only from those three workflow files. So a
+# run in another environment cannot assume it.
+#
+# Staging, prod and drill share one AWS account, and the bringup role trusts all
+# three GitHub environments. So the bringup role is NOT a principal of the
+# keyring secret of staging or prod: this role is how recreate and teardown read
+# it. The role can read one secret: the keyring of this environment. It cannot
+# read the state under tfstate/stage0/, which the bucket policy keeps for the
+# rotation role and the operator roles.
 #
 # It exists only where var.keyring_reader_role_enabled is true. The variable
 # KEYRING_READER_ROLE_ARN of the GitHub environment names it.
@@ -17,6 +23,8 @@ locals {
   keyring_reader_role_name = "zeroroot-ai-${var.environment}-keyring-reader"
   keyring_reader_job_workflow_refs = [
     "${var.github_repository}/.github/workflows/preflight.yml@refs/heads/main",
+    "${var.github_repository}/.github/workflows/recreate.yml@refs/heads/main",
+    "${var.github_repository}/.github/workflows/teardown.yml@refs/heads/main",
   ]
 }
 
@@ -73,7 +81,7 @@ resource "aws_iam_role" "keyring_reader" {
   count = var.keyring_reader_role_enabled ? 1 : 0
 
   name                 = local.keyring_reader_role_name
-  description          = "Reads the keyring of ${var.environment} (ADR-0083). Assumed by ${var.github_repository} preflight.yml, off main, in the ${var.environment} GitHub environment."
+  description          = "Reads the keyring of ${var.environment} (ADR-0083). Assumed by ${var.github_repository} preflight.yml, recreate.yml and teardown.yml, off main, in the ${var.environment} GitHub environment only."
   assume_role_policy   = data.aws_iam_policy_document.keyring_reader_trust[0].json
   max_session_duration = 3600
 }

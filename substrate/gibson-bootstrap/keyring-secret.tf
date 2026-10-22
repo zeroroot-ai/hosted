@@ -9,12 +9,12 @@
 # "<substrate.env>"}. Encrypted with KMS (the Secrets Manager key of the
 # account). Four kinds of principal read or write it:
 #
-#   - the roles of var.keyring_principal_role_names: the bringup role, and the
-#     operator role that runs stage 0 from the workstation;
+#   - the roles of var.keyring_principal_role_names: the operator role that runs
+#     stage 0 from the workstation, and for drill only the bringup role;
 #   - the key rotation role (rotation-role.tf): read and write, because the
 #     rotation changes the keyring;
-#   - the keyring reader role (keyring-reader-role.tf): read only, for
-#     preflight.
+#   - the keyring reader role of the environment (keyring-reader-role.tf): read
+#     only, for preflight, recreate and teardown.
 # The resource policy denies every other principal.
 # ----------------------------------------------------------------------------
 

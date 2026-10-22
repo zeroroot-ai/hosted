@@ -219,11 +219,15 @@ no GitHub App, and no file on a workstation.
 | Reader or writer | How | Rights |
 |---|---|---|
 | `make substrate ENV=<env>` | the operator role `OrganizationAccountAccessRole` | read and write |
-| `recreate.yml`, `teardown.yml`, `drill.yml` | the bringup role `eks-bringup` | read (and write for drill) |
-| `preflight.yml` | the keyring reader role (`keyring-reader-role.tf`) | read, and nothing else |
+| `drill.yml` | the bringup role `eks-bringup`, for drill only | read and write |
+| `preflight.yml`, `recreate.yml`, `teardown.yml` | the keyring reader role of the environment (`keyring-reader-role.tf`), assumable only from that GitHub environment and only from these three files, off `main` | read that one secret, and nothing else |
 | `rotate-credentials.yml` | the key rotation role (`rotation-role.tf`) | read and write, and nothing else |
 
-The resource policy of the secret denies every other principal. A rotation
+The bringup role is not a principal of the keyring secret of staging or prod:
+staging, prod and drill share one AWS account, and the bringup role trusts all
+three GitHub environments. The resource policy of the secret denies every other
+principal. `scripts/check-keyring-secret.py` fails if any other role can read a
+keyring, or if a trust policy lets one environment assume the role of another. A rotation
 writes the new keyring through `scripts/keyring-writeback.sh`. A step that fails
 after the cluster may hold the new keyring writes the keyring back too, and the
 job still fails: the secret must hold what the cluster holds.

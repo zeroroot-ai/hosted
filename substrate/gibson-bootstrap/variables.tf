@@ -201,9 +201,9 @@ variable "edge_cert_principal_role_names" {
 }
 
 variable "keyring_principal_role_names" {
-  description = "The IAM roles that read and write the keyring secret of every environment: the bringup role, and the operator role that runs stage 0 from the workstation."
+  description = "The IAM roles that read and write the keyring secret: the operator role that runs stage 0 from the workstation. Drill adds the bringup role. Staging and prod never do: the bringup role trusts every environment of the shared account."
   type        = list(string)
-  default     = ["eks-bringup", "OrganizationAccountAccessRole"]
+  default     = ["OrganizationAccountAccessRole"]
 }
 
 variable "rotation_role_enabled" {

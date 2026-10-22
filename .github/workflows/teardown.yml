@@ -70,8 +70,10 @@ jobs:
 
       # The keyring and substrate.env come from the Secrets Manager secret of the
       # environment (ADR-0083, amendment of 2026-10-22) through the OIDC session
-      # of this job on the bringup role. The action also masks each member, checks
-      # the seal key, and installs Terraform, Helm, kubectl and the SSM plugin.
+      # of the keyring reader role of the environment, which reads that one secret.
+      # The bringup role is not a principal of it. The action then takes the
+      # bringup session, masks each member, checks the seal key, and installs
+      # Terraform, Helm, kubectl and the SSM plugin.
       # The bringup role is trusted only for this repo's environments and only for
       # the verb workflows (bootstrap/eks/aws-org/github-oidc.tf, eks_bringup).
       - name: Read the stage 0 files and set up the tools
@@ -80,6 +82,7 @@ jobs:
           env: ${{ inputs.env }}
           role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-teardown-${{ github.run_id }}
+          keyring-role-arn: ${{ vars.KEYRING_READER_ROLE_ARN }}
 
       - name: make teardown
         run: make teardown ENV="${ENV}" MODE="${MODE}"
