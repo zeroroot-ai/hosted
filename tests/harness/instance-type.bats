@@ -100,7 +100,7 @@ for name in ("up", "restore"):
 steps = job["steps"]
 runs = [s.get("run", "") for s in steps]
 check = next(i for i, r in enumerate(runs) if "check-instance-type.sh" in r)
-creds = next(i for i, s in enumerate(steps) if s.get("uses") == "./.github/actions/drill-setup")
+creds = next(i for i, s in enumerate(steps) if s.get("uses") == "./.github/actions/stage0-setup")
 assert check < creds, "the type check must run before the AWS credential"
 allruns = [s.get("run", "") for j in ("up", "restore") for s in w["jobs"][j]["steps"]]
 recreates = [l for r in allruns for l in r.splitlines() if "make recreate" in l]

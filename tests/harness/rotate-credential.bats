@@ -16,6 +16,8 @@ setup() {
   STATE="$D/state"; mkdir -p "$STATE"
   "$REPO/scripts/keyring.sh" generate "$STATE/keyring.env" >/dev/null
   printf 'KEYRING_FILE=%s\n' "$STATE/keyring.env" > "$STATE/substrate.env"
+  # The workflow read the files with scripts/stage0-store.sh pull, which wrote this.
+  sha256sum < "$STATE/keyring.env" | cut -d' ' -f1 > "$STATE/.keyring.sha256"
   : > "$D/log"
   for n in k2c substrate rotate; do
     printf '#!/bin/sh\necho "%s $*" >> "%s/log"\n' "$n" "$D" > "$D/$n"
@@ -133,4 +135,13 @@ get() { "$REPO/scripts/keyring.sh" get "$STATE/keyring.env" "$1"; }
   step staging OPENBAO_SEAL_KEY retire
   [ "$status" -eq 2 ]
   [ ! -e "$STATE/.cluster-keyring-pushed" ]
+}
+
+@test "FAILING FIXTURE: a state directory with no record of a pull is refused before the keyring changes" {
+  rm -f "$STATE/.keyring.sha256"
+  before="$(sha256sum < "$STATE/keyring.env")"
+  step prod OPENBAO_SEAL_KEY rotate
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"no record of a pull"* ]]
+  [ "$(sha256sum < "$STATE/keyring.env")" = "$before" ]
 }

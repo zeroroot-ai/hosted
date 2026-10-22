@@ -21,10 +21,11 @@ jobs:
     runs-on: ubuntu-latest
     environment: ${{ inputs.env }}
     steps:
-      - name: Materialize stage 0 state from the environment
-        env:
-          BRINGUP_KEYRING: ${{ secrets.BRINGUP_KEYRING }}
-        run: |
-          printf '%s\n' "${BRINGUP_KEYRING}" > keyring.env
+      - name: Read the stage 0 files and set up the tools
+        uses: ./.github/actions/stage0-setup
+        with:
+          env: ${{ inputs.env }}
+          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          session-name: x
       - name: make teardown
         run: make teardown ENV="${{ inputs.env }}" MODE="${{ inputs.mode }}"

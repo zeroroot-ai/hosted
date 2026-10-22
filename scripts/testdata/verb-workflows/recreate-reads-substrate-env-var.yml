@@ -1,0 +1,30 @@
+# Fixture: a verb workflow reads substrate.env from a GitHub environment
+# variable. The guard must REJECT this: the keyring and substrate.env come from
+# Secrets Manager (ADR-0083, amendment of 2026-10-22).
+name: recreate
+on:
+  workflow_dispatch:
+    inputs:
+      env:
+        required: true
+        type: choice
+        options: [prod]
+      restore_from:
+        required: false
+        type: string
+concurrency:
+  group: bringup-${{ inputs.env }}
+  cancel-in-progress: false
+permissions:
+  contents: read
+jobs:
+  recreate:
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.env }}
+    steps:
+      - name: Materialize substrate.env
+        env:
+          SUBSTRATE_ENV_FILE: ${{ vars.SUBSTRATE_ENV_FILE }}
+        run: printf '%s\n' "${SUBSTRATE_ENV_FILE}" > substrate.env
+      - name: make recreate
+        run: make recreate ENV="${{ inputs.env }}"

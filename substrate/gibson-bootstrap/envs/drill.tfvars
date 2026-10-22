@@ -33,10 +33,8 @@ audit_lock_mode = "GOVERNANCE"
 # through TF_VAR_*, not committed (hosted#108). Both default to "", so a missing
 # one fails at preflight rather than silently here.
 
-# The drill keeps its keyring and substrate.env in Secrets Manager, and its
-# stage 0 state in the prod state bucket (ADR-0083 amendment of 2026-10-13):
-# the drill rotates its own access keys (scripts/substrate-rotate.sh).
-keyring_in_aws = true
-
-# Drill rotates its keys in drill.yml as the bringup role, which then reads tfstate/stage0/.
+# Drill keeps its stage 0 state, key slots and rotation record in its own durable
+# bucket under tfstate/stage0/, and its keyring in the Secrets Manager secret
+# zeroroot-ai/drill/keyring, as every environment does. Drill rotates its keys in
+# drill.yml as the bringup role, which therefore also reads tfstate/stage0/.
 stage0_state_principal_role_names = ["OrganizationAccountAccessRole", "eks-bringup"]

@@ -203,25 +203,21 @@ sget() { "$REPO/scripts/keyring.sh" get "$S/keyring.env" "$1"; }
   grep -q 'step recover' "$REPO/substrate/gibson-bootstrap/README.md"
 }
 
-@test "the write-back writes a file only when it differs from the copy that was read" {
-  W="$D/wstate"; mkdir -p "$W" "$D/gh"; cp "$K" "$W/keyring.env"; cp "$S/substrate.env" "$W/substrate.env"
-  cat > "$D/bin/gh" <<'SH'
+@test "the write-back writes the keyring and substrate.env into the keyring secret, with no gh and no GitHub variable" {
+  W="$D/wstate"; mkdir -p "$W"; cp "$K" "$W/keyring.env"; cp "$S/substrate.env" "$W/substrate.env"
+  cat > "$D/bin/aws" <<'SH'
 #!/usr/bin/env bash
-case "$1 $2" in
-  "secret set")   cat > "$D/gh/secret.$3" ;;
-  "variable set") cat > "$D/gh/variable.$3" ;;
-  *) echo "gh stub: undeclared call: $*" >&2; exit 1 ;;
+case "$*" in
+  "secretsmanager put-secret-value --secret-id zeroroot-ai/staging/keyring --secret-string file://"*)
+    f="${*: -1}"; cp "${f#file://}" "$D/sm.json" ;;
+  *) echo "aws stub: undeclared call: $*" >&2; exit 1 ;;
 esac
 SH
-  chmod +x "$D/bin/gh"
-  sha256sum < "$W/keyring.env" | cut -d' ' -f1 > "$W/.read-keyring.sha256"
-  sha256sum < "$W/substrate.env" | cut -d' ' -f1 > "$W/.read-substrate.sha256"
-  GH="$D/bin/gh" run "$REPO/scripts/keyring-writeback.sh" "$W" staging
-  [ "$status" -eq 0 ]
-  [ ! -e "$D/gh/secret.BRINGUP_KEYRING" ]
-  echo "KEYRING_SET_AT_X=1" >> "$W/keyring.env"
-  GH="$D/bin/gh" run "$REPO/scripts/keyring-writeback.sh" "$W" staging
-  [ "$status" -eq 0 ]
-  [ -s "$D/gh/secret.BRINGUP_KEYRING" ]
-  [ ! -e "$D/gh/variable.SUBSTRATE_ENV_FILE" ]
+  chmod +x "$D/bin/aws"
+  run "$REPO/scripts/keyring-writeback.sh" "$W" staging
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -r .keyring "$D/sm.json")" = "$(cat "$K")" ]
+  [ "$(jq -r .substrate_env "$D/sm.json")" = "$(cat "$S/substrate.env")" ]
+  run grep -nE '\bgh\b|BRINGUP_KEYRING|SUBSTRATE_ENV_FILE' "$REPO/scripts/keyring-writeback.sh"
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
 }

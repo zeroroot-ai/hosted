@@ -209,21 +209,24 @@ workflows do: an SSM command and port forward to the one instance tagged
 `Name=zeroroot-ai-<env>` for staging, and `eks:DescribeCluster` for prod. It
 cannot change any other resource.
 
-## The keyring reaches GitHub
+## Where the keyring lives
 
-`BRINGUP_KEYRING` is a GitHub environment secret, and `SUBSTRATE_ENV_FILE` is an
-environment variable. The first load is one command per environment, by the
-person who holds the keyring:
+Every environment keeps its keyring and `substrate.env` in one Secrets Manager
+secret, `zeroroot-ai/<env>/keyring` (`keyring-secret.tf`), as
+`{"keyring", "substrate_env"}`. There is no GitHub environment secret for it,
+no GitHub App, and no file on a workstation.
 
-```bash
-gh secret set BRINGUP_KEYRING --env staging -R zeroroot-ai/hosted < /bulk/substrate/staging/keyring.env
-gh variable set SUBSTRATE_ENV_FILE --env staging -R zeroroot-ai/hosted < /bulk/substrate/staging/substrate.env
-```
+| Reader or writer | How | Rights |
+|---|---|---|
+| `make substrate ENV=<env>` | the operator role `OrganizationAccountAccessRole` | read and write |
+| `recreate.yml`, `teardown.yml`, `drill.yml` | the bringup role `eks-bringup` | read (and write for drill) |
+| `preflight.yml` | the keyring reader role (`keyring-reader-role.tf`) | read, and nothing else |
+| `rotate-credentials.yml` | the key rotation role (`rotation-role.tf`) | read and write, and nothing else |
 
-After that, a rotation writes both through a GitHub App with the Environments
-write permission (`.github/workflows/rotate-credentials.yml`). A step that fails
+The resource policy of the secret denies every other principal. A rotation
+writes the new keyring through `scripts/keyring-writeback.sh`. A step that fails
 after the cluster may hold the new keyring writes the keyring back too, and the
-job still fails: the environment must hold what the cluster holds.
+job still fails: the secret must hold what the cluster holds.
 
 If the write-back fails, or the runner dies, after the cluster got the new keyring, run the workflow `rotate-credentials` with `step recover`, then run it again for the rotation.
 
@@ -257,8 +260,7 @@ starts a new kopia repository at a new prefix, so merge the overlay change of
 The keyring has 12 members since hosted#528 deleted `CNPG_BACKUP_KEY`. The set
 fingerprint in a `substrate.env` written before that change covers 13 lines,
 so `keyring.sh verify` fails on it. Run `make substrate ENV=<env>` one time on
-each environment, then load the new `substrate.env` with
-`gh variable set SUBSTRATE_ENV_FILE`.
+each environment. It writes the new `substrate.env` into the keyring secret.
 
 ## Prod
 

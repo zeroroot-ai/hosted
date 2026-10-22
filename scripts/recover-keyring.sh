@@ -8,9 +8,9 @@
 #   scripts/recover-keyring.sh <staging|prod> <state-dir> [--accept-changed MEMBER]... [--empty MEMBER]...
 #
 # Use it when the write-back of the workflow failed, or the runner died, after
-# the cluster got the new keyring. The environment secret BRINGUP_KEYRING then
-# holds an older keyring than the cluster. The workflow has read that old
-# keyring and substrate.env into <state-dir> (keyring.env and substrate.env).
+# the cluster got the new keyring. The keyring secret then holds an older
+# keyring than the cluster. The workflow has read that old keyring and
+# substrate.env into <state-dir> (keyring.env and substrate.env).
 # The command:
 #
 #   1. reads the keyring Secrets of the cluster (scripts/with-cluster.sh for
@@ -35,7 +35,7 @@
 #      old value;
 #   5. writes keyring.env and substrate.env (new fingerprints) into <state-dir>
 #      and creates the marker .cluster-keyring-pushed. The workflow then writes
-#      BRINGUP_KEYRING and SUBSTRATE_ENV_FILE with scripts/keyring-writeback.sh,
+#      the keyring secret with scripts/keyring-writeback.sh,
 #      the one write-back code.
 #
 # Env: NS (release namespace, default gibson), and for tests WITH_CLUSTER, KEYRING.

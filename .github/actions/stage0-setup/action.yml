@@ -1,11 +1,13 @@
-name: drill-setup
+name: stage0-setup
 description: >-
-  The setup that each job of drill.yml needs, from nothing on a fresh runner:
-  a credential of the job's own (OIDC, eks-bringup), the stage 0 files of
-  drill read from AWS (the keyring and substrate.env from the Secrets Manager
-  secret zeroroot-ai/drill/keyring, ADR-0083), the seal key masked, Terraform,
-  the Python requirements and the pinned cluster tools. Nothing comes from the
-  disk of an earlier job, and the GitHub Environment holds no keyring.
+  The setup that each job of a bringup workflow needs, from nothing on a fresh
+  runner: a credential of the job's own (OIDC, eks-bringup), the keyring and
+  substrate.env of the environment read from the Secrets Manager secret
+  zeroroot-ai/<env>/keyring (ADR-0083, amendment of 2026-10-22), the seal key
+  masked, Terraform, the Python requirements and the pinned cluster tools. The
+  key slots come from the state bucket only for a job that sets slots to true
+  (drill: the bringup role reads tfstate/stage0/ of drill only). Nothing comes
+  from the disk of an earlier job, and the GitHub Environment holds no keyring.
 inputs:
   env:
     description: The environment name.
@@ -16,6 +18,10 @@ inputs:
   session-name:
     description: The role session name, one for each job.
     required: true
+  slots:
+    description: "true reads the key slots and the rotation record of tfstate/stage0/ too. Only drill's bringup role may."
+    required: false
+    default: "false"
 runs:
   using: composite
   steps:
@@ -61,11 +67,16 @@ runs:
       shell: bash
       env:
         ENV: ${{ inputs.env }}
+        SLOTS: ${{ inputs.slots }}
       run: |
         set -euo pipefail
         SUBSTRATE_DIR="${RUNNER_TEMP}/substrate"
         echo "SUBSTRATE_DIR=${SUBSTRATE_DIR}" >> "$GITHUB_ENV"
-        scripts/stage0-store.sh pull "${ENV}" "${SUBSTRATE_DIR}/${ENV}"
+        if [ "${SLOTS}" = true ]; then
+          scripts/stage0-store.sh pull "${ENV}" "${SUBSTRATE_DIR}/${ENV}"
+        else
+          scripts/stage0-store.sh pull-keyring "${ENV}" "${SUBSTRATE_DIR}/${ENV}"
+        fi
         while IFS= read -r line; do
           case "$line" in ''|'#'*) continue ;; esac
           v="${line#*=}"

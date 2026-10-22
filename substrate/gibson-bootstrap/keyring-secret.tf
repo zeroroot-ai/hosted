@@ -1,33 +1,31 @@
 # ----------------------------------------------------------------------------
-# The bringup keyring and substrate.env of this environment, in Secrets
-# Manager (ADR-0083 amendment of 2026-10-13, drill sweep row 24).
-#
-# Only drill keeps its keyring here (var.keyring_in_aws). The drill rotates
-# its own access keys (scripts/substrate-rotate.sh, in .github/workflows/
-# drill.yml), so a runner must read and write the keyring, and the GitHub
-# workflow token cannot write a GitHub Environment secret. Every drill job
-# reads the keyring from this secret (scripts/stage0-store.sh), and the
-# rotation writes the new one here. The trust holds for drill only: drill is
-# disposable, its keyring protects a disposable environment, and the bringup
-# role can already read everything the keyring protects. Staging and prod
-# keep their keyring on the operator workstation.
+# ----------------------------------------------------------------------------
+# The bringup keyring and substrate.env of this environment, in Secrets Manager
+# (ADR-0083, amendment of 2026-10-22). Every environment keeps its keyring
+# here. There is no other store: no GitHub environment secret, no file on a
+# workstation.
 #
 # The value is a JSON object {"keyring": "<keyring.env>", "substrate_env":
 # "<substrate.env>"}. Encrypted with KMS (the Secrets Manager key of the
-# account). The principals of var.keyring_principal_role_names read and write
-# it: the bringup role, and the operator role that runs stage 0 from the
-# workstation. The resource policy denies every other principal.
+# account). Four kinds of principal read or write it:
+#
+#   - the roles of var.keyring_principal_role_names: the bringup role, and the
+#     operator role that runs stage 0 from the workstation;
+#   - the key rotation role (rotation-role.tf): read and write, because the
+#     rotation changes the keyring;
+#   - the keyring reader role (keyring-reader-role.tf): read only, for
+#     preflight.
+# The resource policy denies every other principal.
 # ----------------------------------------------------------------------------
 
 data "aws_iam_role" "keyring" {
-  for_each = var.keyring_in_aws ? toset(var.keyring_principal_role_names) : toset([])
+  for_each = toset(var.keyring_principal_role_names)
   name     = each.value
 }
 
 resource "aws_secretsmanager_secret" "keyring" {
-  count       = var.keyring_in_aws ? 1 : 0
   name        = "zeroroot-ai/${var.environment}/keyring"
-  description = "The bringup keyring and substrate.env of ${var.environment} (ADR-0083). Written by stage 0 and by the access key rotation of the drill, read by each drill job (scripts/stage0-store.sh)."
+  description = "The bringup keyring and substrate.env of ${var.environment} (ADR-0083). Written by stage 0 and by the credential rotation, read by each bringup job (scripts/stage0-store.sh)."
   # Stage 0 outlives every cluster. A stage 0 destroy (never a teardown)
   # removes it at once.
   recovery_window_in_days = 0
@@ -38,8 +36,6 @@ resource "aws_secretsmanager_secret" "keyring" {
 }
 
 data "aws_iam_policy_document" "keyring" {
-  count = var.keyring_in_aws ? 1 : 0
-
   statement {
     sid     = "StageZeroReadsAndWrites"
     effect  = "Allow"
@@ -64,14 +60,20 @@ data "aws_iam_policy_document" "keyring" {
     condition {
       test     = "StringNotEquals"
       variable = "aws:PrincipalArn"
-      values   = [for r in data.aws_iam_role.keyring : r.arn]
+      # The roles above, and the two roles of this root that its own IAM
+      # policy lets in: the rotation role (read and write) and the reader role
+      # (read only). Their IAM policies grant exactly that.
+      values = concat(
+        [for r in data.aws_iam_role.keyring : r.arn],
+        var.rotation_role_enabled ? [aws_iam_role.rotation[0].arn] : [],
+        var.keyring_reader_role_enabled ? [aws_iam_role.keyring_reader[0].arn] : [],
+      )
     }
   }
 }
 
 resource "aws_secretsmanager_secret_policy" "keyring" {
-  count               = var.keyring_in_aws ? 1 : 0
-  secret_arn          = aws_secretsmanager_secret.keyring[0].arn
-  policy              = data.aws_iam_policy_document.keyring[0].json
+  secret_arn          = aws_secretsmanager_secret.keyring.arn
+  policy              = data.aws_iam_policy_document.keyring.json
   block_public_policy = true
 }

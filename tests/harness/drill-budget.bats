@@ -5,7 +5,7 @@
 # fixed (drill sweep rows 19, 21, 26 and 29).
 #
 #   - up, restore, rotation and teardown. Each one sets itself up from
-#     nothing with a credential of its own (.github/actions/drill-setup)
+#     nothing with a credential of its own (.github/actions/stage0-setup)
 #   - the teardown job waits for every job, runs `always()`, and skips only
 #     a run that changed nothing (hosted#470)
 #   - each job stops before GitHub's 360 minutes, the credential outlives
@@ -27,7 +27,7 @@ TFVARS="$REPO_ROOT/bootstrap/ec2/gibson/envs/drill.tfvars"
 # check MUTATION: apply the python MUTATION to the parsed drill.yml, then run
 # the check. An empty MUTATION checks the committed file.
 check() {
-  python3 - "$WF" "$TFVARS" "$REPO_ROOT/.github/actions/drill-setup/action.yml" "$1" <<'PY'
+  python3 - "$WF" "$TFVARS" "$REPO_ROOT/.github/actions/stage0-setup/action.yml" "$1" <<'PY'
 import re, sys, yaml
 w = yaml.safe_load(open(sys.argv[1]))
 tfvars = open(sys.argv[2]).read()
@@ -58,7 +58,7 @@ for n, j in jobs.items():
     limit = j["timeout-minutes"]
     assert limit < 360, n + ": the job limit is not below the GitHub limit of 360 minutes"
     assert duration >= limit * 60, n + ": the credential ends before the job"
-    assert any(s.get("uses") == "./.github/actions/drill-setup" for s in j["steps"]), n + " has no credential and setup of its own"
+    assert any(s.get("uses") == "./.github/actions/stage0-setup" for s in j["steps"]), n + " has no credential and setup of its own"
 assert ceiling > jobs["up"]["timeout-minutes"], "the drill node terminates before the up job ends"
 assert jobs["up"]["outputs"]["started"], "the up job does not say whether it started"
 for n in ("up", "restore"):

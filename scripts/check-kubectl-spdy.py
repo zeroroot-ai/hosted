@@ -10,7 +10,7 @@ so it needs one of these places:
 
   - `env:` at workflow level or at job level with the value false;
   - a step that uses ./.github/actions/install-cluster-tools or
-    ./.github/actions/drill-setup, which write the variable to GITHUB_ENV.
+    ./.github/actions/stage0-setup, which write the variable to GITHUB_ENV.
     GITHUB_ENV reaches only later steps, so that step comes before the first
     step that runs kubectl.
 
@@ -51,7 +51,7 @@ RUNS_KUBECTL = re.compile(
     re.M,
 )
 KUBECTL_ACTIONS = ("demo-enrollment-install", "smoke-prereqs", "edge-harness")
-SETTER_ACTIONS = ("install-cluster-tools", "drill-setup")
+SETTER_ACTIONS = ("install-cluster-tools", "stage0-setup")
 
 
 def uses(step: dict, names: tuple[str, ...]) -> bool:

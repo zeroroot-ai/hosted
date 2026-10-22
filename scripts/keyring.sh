@@ -138,8 +138,8 @@
 # VELERO_REPO_PASSWORD and SETEC_DISK_SIGNING_SEED. It runs in a workflow
 # (ADR-0083, amendment of 2026-10-21): .github/workflows/rotate-credentials.yml.
 # That workflow is the one documented entry point. It needs an approval for each run,
-# and a GitHub App writes the new keyring into the environment secret
-# BRINGUP_KEYRING. Each step below is one dispatch of that workflow
+# and the workflow writes the new keyring into the keyring secret in Secrets
+# Manager. Each step below is one dispatch of that workflow
 # (scripts/rotate-credential.sh), except the commit of an overlay. The seal key:
 #   1. keyring.sh rotate <file> OPENBAO_SEAL_KEY
 #   2. keyring-to-cluster.sh, then restart OpenBao. The static seal unwraps

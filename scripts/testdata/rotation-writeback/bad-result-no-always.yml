@@ -16,14 +16,24 @@ jobs:
         \ \"^$1=\" \"$state/substrate.env\" | head -n1 | cut -d= -f2- || true; }\n\
         TF_VAR_argocd_github_app_id=\"$(sget GITHUB_APP_ID)\"\nTF_VAR_argocd_github_app_installation_id=\"\
         $(sget GITHUB_APP_INSTALLATION_ID)\"\nexport TF_VAR_argocd_github_app_id TF_VAR_argocd_github_app_installation_id\n\
-        # The cluster path of the other workflows: an SSM forward for staging\n# (scripts/with-cluster.sh\
-        \ passes the exit code of the command on),\n# the EKS kubeconfig for prod.\n\
-        case \"$ENV\" in\n  staging) scripts/with-cluster.sh staging scripts/rotate-credential.sh\
-        \ \"$state\" \"$ENV\" \"$CREDENTIAL\" \"$STEP\"; rc=$? ;;\n  prod)    make\
-        \ eks-kubeconfig ENV=prod \\\n             && KUBECONFIG=\"/tmp/eks-prod.kubeconfig\"\
-        \ scripts/rotate-credential.sh \"$state\" \"$ENV\" \"$CREDENTIAL\" \"$STEP\"\
-        ; rc=$? ;;\n  *)       echo \"::error::ENV=$ENV has no cluster path\"; rc=2\
-        \ ;;\nesac\necho \"rc=$rc\" >> \"$GITHUB_OUTPUT\"\nexit 0\n"
+        if [ \"$STEP\" = recover ]; then\n  # The recovery reads the cluster itself,\
+        \ by the same paths as below\n  # (scripts/recover-keyring.sh). The member\
+        \ lists are words of capital\n  # letters and underscores, and nothing else.\n\
+        \  args=()\n  for m in ${ACCEPT_CHANGED}; do [[ \"$m\" =~ ^[A-Z_]+$ ]] ||\
+        \ { echo \"::error::accept_changed holds '$m', which is not a member name\"\
+        ; exit 1; }; args+=(--accept-changed \"$m\"); done\n  for m in ${EMPTY_MEMBERS};\
+        \ do [[ \"$m\" =~ ^[A-Z_]+$ ]] || { echo \"::error::empty_members holds '$m',\
+        \ which is not a member name\"; exit 1; }; args+=(--empty \"$m\"); done\n\
+        \  scripts/recover-keyring.sh \"$ENV\" \"$state\" \"${args[@]}\"; rc=$?\n\
+        else\n# The cluster path of the other workflows: an SSM forward for staging\n\
+        # (scripts/with-cluster.sh passes the exit code of the command on),\n# the\
+        \ EKS kubeconfig for prod.\ncase \"$ENV\" in\n  staging) scripts/with-cluster.sh\
+        \ staging scripts/rotate-credential.sh \"$state\" \"$ENV\" \"$CREDENTIAL\"\
+        \ \"$STEP\"; rc=$? ;;\n  prod)    make eks-kubeconfig ENV=prod \\\n      \
+        \       && KUBECONFIG=\"/tmp/eks-prod.kubeconfig\" scripts/rotate-credential.sh\
+        \ \"$state\" \"$ENV\" \"$CREDENTIAL\" \"$STEP\"; rc=$? ;;\n  *)       echo\
+        \ \"::error::ENV=$ENV has no cluster path\"; rc=2 ;;\nesac\nfi\necho \"rc=$rc\"\
+        \ >> \"$GITHUB_OUTPUT\"\nexit 0\n"
     - name: Decide the write-back
       id: decide
       if: ${{ always() }}
@@ -33,34 +43,19 @@ jobs:
         \ -r line; do\n    case \"$line\" in ''|'#'*) continue ;; esac\n    v=\"${line#*=}\"\
         \n    if [ -n \"$v\" ]; then echo \"::add-mask::$v\"; fi\n  done < \"$state/keyring.env\"\
         \nelse\n  echo \"write=false\" >> \"$GITHUB_OUTPUT\"\nfi\n"
-    - name: Make the GitHub App token
-      id: app
-      if: ${{ steps.decide.outputs.write == 'true' }}
-      uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510
-      with:
-        app-id: ${{ vars.KEYRING_APP_ID }}
-        private-key: ${{ secrets.KEYRING_APP_PRIVATE_KEY }}
-        owner: ${{ github.repository_owner }}
-        repositories: ${{ github.event.repository.name }}
-        permission-environments: write
     - name: Write the keyring and substrate.env back to the environment
       if: ${{ always() && steps.decide.outputs.write == 'true' }}
-      env:
-        GH_TOKEN: ${{ steps.app.outputs.token }}
-      run: "set -euo pipefail\nstate=\"${SUBSTRATE_DIR}/${ENV}\"\n[ -e \"$state/.cluster-keyring-pushed\"\
-        \ ] || { echo \"No marker on disk: nothing to write back.\"; exit 0; }\nif\
-        \ [ \"$(sha256sum < \"$state/keyring.env\" | cut -d' ' -f1)\" != \"$(cat \"\
-        $state/.read-keyring.sha256\")\" ]; then\n  gh secret set BRINGUP_KEYRING\
-        \ --env \"$ENV\" --repo \"$GITHUB_REPOSITORY\" < \"$state/keyring.env\"\n\
-        \  echo \"BRINGUP_KEYRING of ${ENV} holds the new keyring.\"\nelse\n  echo\
-        \ \"The keyring did not change.\"\nfi\nif [ \"$(sha256sum < \"$state/substrate.env\"\
-        \ | cut -d' ' -f1)\" != \"$(cat \"$state/.read-substrate.sha256\")\" ]; then\n\
-        \  gh variable set SUBSTRATE_ENV_FILE --env \"$ENV\" --repo \"$GITHUB_REPOSITORY\"\
-        \ < \"$state/substrate.env\"\n  echo \"SUBSTRATE_ENV_FILE of ${ENV} holds\
-        \ the new substrate.env.\"\nelse\n  echo \"substrate.env did not change.\"\
-        \nfi\n"
+      run: 'set -euo pipefail
+
+        state="${SUBSTRATE_DIR}/${ENV}"
+
+        [ -e "$state/.cluster-keyring-pushed" ] || { echo "No marker on disk: nothing
+        to write back."; exit 0; }
+
+        scripts/keyring-writeback.sh "$state" "$ENV"
+
+        '
     - name: Result
-      if: ${{ always() }}
       env:
         RC: ${{ steps.rotate.outputs.rc }}
       run: "case \"$RC\" in\n  0)  echo \"The rotation step is done.\" ;;\n  10) echo\

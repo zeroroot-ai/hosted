@@ -200,14 +200,8 @@ variable "edge_cert_principal_role_names" {
   default     = ["eks-bringup"]
 }
 
-variable "keyring_in_aws" {
-  description = "Keep the bringup keyring and substrate.env of this environment in Secrets Manager (keyring-secret.tf). True for drill only: its access keys rotate in the drill (ADR-0083)."
-  type        = bool
-  default     = false
-}
-
 variable "keyring_principal_role_names" {
-  description = "The IAM roles that read and write the keyring secret: the bringup role, and the operator role that runs stage 0 from the workstation."
+  description = "The IAM roles that read and write the keyring secret of every environment: the bringup role, and the operator role that runs stage 0 from the workstation."
   type        = list(string)
   default     = ["eks-bringup", "OrganizationAccountAccessRole"]
 }
@@ -228,4 +222,10 @@ variable "stage0_state_principal_role_names" {
   description = "The IAM roles besides the rotation role that read and write tfstate/stage0/ of the durable bucket: the operator role that runs stage 0 from the workstation. Drill adds the bringup role, which rotates its keys in drill.yml."
   type        = list(string)
   default     = ["OrganizationAccountAccessRole"]
+}
+
+variable "keyring_reader_role_enabled" {
+  description = "Make the keyring reader role of this environment (keyring-reader-role.tf): preflight.yml reads the keyring with it. True for staging and prod."
+  type        = bool
+  default     = false
 }

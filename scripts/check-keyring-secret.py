@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""check-keyring-secret.py: the drill keyring secret has exactly two principals
+"""check-keyring-secret.py: the keyring secret has exactly two principals
 (ADR-0083 amendment of 2026-10-13).
 
 The secret zeroroot-ai/<env>/keyring (substrate/gibson-bootstrap/
-keyring-secret.tf) holds the bringup keyring of drill. Two roles read and
+keyring-secret.tf) holds the bringup keyring of each environment. Two roles read and
 write it, and no other: eks-bringup (each drill job and the rotation), and
 OrganizationAccountAccessRole (the operator role that runs
 `make substrate ENV=drill` and writes the first value).
