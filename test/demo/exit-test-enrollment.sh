@@ -226,19 +226,20 @@ assert_call_refused() {
 }
 
 # assert_audit_names_agent <ListAuditEvents json> <agent principal id> <connector id>
-# One audit event records the agent as the actor of a call on the connector.
-# actor_id and target_object are the fields since gibson#544 (actor_user_id and
-# target_resource are reserved), and actor_source is "agent" for an agent.
+# One record of a connector tool call (gibson#1288): the action
+# connector.tool.call, the target connector:<id>, the actor source agent, and
+# the agent principal as the actor.
 assert_audit_names_agent() {
-  jq -e --arg a "$2" --arg c "$3" '[.events[]? | select((.actorId == $a) and (.actorSource == "agent") and ((.targetObject // "") | contains($c)))] | length > 0' <<<"$1" >/dev/null
+  jq -e --arg a "$2" --arg c "$3" '[.events[]? | select(.eventType == "connector.tool.call" and .actorSource == "agent" and .actorId == $a and .targetObject == ("connector:" + $c))] | length > 0' <<<"$1" >/dev/null
 }
 
 # assert_audit_names_mission <ListAuditEvents json> <agent principal id> <connector id> <mission id>
-# The same event also carries the mission id in its details. A call outside a
-# mission has none, and the check refuses it.
+# The same record also carries details.tool, details.work_id (the work item that
+# the agent claimed) and details.mission_id. A call that carries no claimed work
+# id has no mission id, and the check refuses it.
 assert_audit_names_mission() {
   [ -n "$4" ] || return 1
-  jq -e --arg a "$2" --arg c "$3" --arg m "$4" '[.events[]? | select((.actorId == $a) and (.actorSource == "agent") and ((.targetObject // "") | contains($c)) and ((.details.mission_id // .details.missionId // "") == $m))] | length > 0' <<<"$1" >/dev/null
+  jq -e --arg a "$2" --arg c "$3" --arg m "$4" '[.events[]? | select(.eventType == "connector.tool.call" and .actorSource == "agent" and .actorId == $a and .targetObject == ("connector:" + $c) and ((.details.tool // "") != "") and ((.details.work_id // "") != "") and ((.details.mission_id // "") == $m))] | length > 0' <<<"$1" >/dev/null
 }
 
 # assert_bao_returned <old pod uid> <new pod uid> <seal state>
@@ -358,14 +359,18 @@ if [ "${1:-}" = "--selftest" ]; then
   expect_pass "a refused call after revoke" assert_call_refused '{"ok":false,"refused":true,"error":"permission_denied"}'
   expect_fail "a call that still answers after revoke" assert_call_refused '{"ok":true,"output":"grp/proj"}'
   expect_fail "a probe that died for another reason" assert_call_refused '{"ok":false,"error":"connect failed"}'
-  ev='{"events":[{"actorId":"agent_principal:1","actorSource":"agent","targetObject":"component:connector/gitlab","details":{"mission_id":"m-0001abcd"}}]}'
-  expect_pass "an audit event naming the agent on the connector" assert_audit_names_agent "$ev" agent_principal:1 gitlab
-  expect_fail "an audit event by another actor" assert_audit_names_agent '{"events":[{"actorId":"user:9","actorSource":"user","targetObject":"component:connector/gitlab"}]}' agent_principal:1 gitlab
-  expect_fail "the reserved field names of before gibson#544" assert_audit_names_agent '{"events":[{"actorUserId":"agent_principal:1","targetResource":"component:connector/gitlab"}]}' agent_principal:1 gitlab
+  ev='{"events":[{"eventType":"connector.tool.call","actorId":"agent_principal:1","actorSource":"agent","targetObject":"connector:gitlab","details":{"tool":"mcp:gitlab:get_project","work_id":"w-1","mission_id":"m-0001abcd"}}]}'
+  expect_pass "a connector tool call record of the agent" assert_audit_names_agent "$ev" agent_principal:1 gitlab
+  expect_fail "a record of another actor" assert_audit_names_agent '{"events":[{"eventType":"connector.tool.call","actorId":"user:9","actorSource":"user","targetObject":"connector:gitlab"}]}' agent_principal:1 gitlab
+  expect_fail "another action" assert_audit_names_agent '{"events":[{"eventType":"connector.enabled","actorId":"agent_principal:1","actorSource":"agent","targetObject":"connector:gitlab"}]}' agent_principal:1 gitlab
+  expect_fail "another connector" assert_audit_names_agent "$ev" agent_principal:1 github
+  expect_fail "the old target field name" assert_audit_names_agent '{"events":[{"eventType":"connector.tool.call","actorId":"agent_principal:1","actorSource":"agent","targetResource":"component:connector/gitlab"}]}' agent_principal:1 gitlab
   expect_fail "an empty audit trail" assert_audit_names_agent '{"events":[]}' agent_principal:1 gitlab
-  expect_pass "an audit event with the mission id" assert_audit_names_mission "$ev" agent_principal:1 gitlab m-0001abcd
-  expect_fail "an audit event of another mission" assert_audit_names_mission "$ev" agent_principal:1 gitlab m-9999zzzz
-  expect_fail "an audit event with no mission id (a call outside a mission)" assert_audit_names_mission '{"events":[{"actorId":"agent_principal:1","actorSource":"agent","targetObject":"component:connector/gitlab","details":{}}]}' agent_principal:1 gitlab m-0001abcd
+  expect_pass "a record with the mission id, tool and work id" assert_audit_names_mission "$ev" agent_principal:1 gitlab m-0001abcd
+  expect_fail "a record of another mission" assert_audit_names_mission "$ev" agent_principal:1 gitlab m-9999zzzz
+  expect_fail "a record with no mission id (a call with no claimed work id)" assert_audit_names_mission '{"events":[{"eventType":"connector.tool.call","actorId":"agent_principal:1","actorSource":"agent","targetObject":"connector:gitlab","details":{"tool":"t"}}]}' agent_principal:1 gitlab m-0001abcd
+  expect_fail "a record with a mission id and no work id" assert_audit_names_mission '{"events":[{"eventType":"connector.tool.call","actorId":"agent_principal:1","actorSource":"agent","targetObject":"connector:gitlab","details":{"tool":"t","mission_id":"m-0001abcd"}}]}' agent_principal:1 gitlab m-0001abcd
+  expect_fail "the camel case key of the mission id" assert_audit_names_mission '{"events":[{"eventType":"connector.tool.call","actorId":"agent_principal:1","actorSource":"agent","targetObject":"connector:gitlab","details":{"tool":"t","work_id":"w","missionId":"m-0001abcd"}}]}' agent_principal:1 gitlab m-0001abcd
   expect_fail "an empty expected mission id" assert_audit_names_mission "$ev" agent_principal:1 gitlab ""
   expect_pass "a mission id" assert_mission_id 0198f0c2-aaaa-7bbb-8ccc-123456789abc
   expect_fail "an empty mission id" assert_mission_id ""
@@ -1123,7 +1128,7 @@ fi
 fi
 
 # ---------------------------------------------------------------------------
-# Step 10: the trail resolves the call to the agent and the person
+# Step 10: the trail resolves the call to the agent, the mission and the person
 # ---------------------------------------------------------------------------
 if runs_step 10; then
 log "step 10: the audit trail names the agent and the mission of step 9 on the connector, and the identity names the person"
@@ -1131,7 +1136,7 @@ step_result 10 FAIL
 AUDIT_JSON="{}"
 NAMED=""
 for _ in $(seq 1 12); do
-  AUDIT_JSON="$(grpc_call "$SCHEMA_DIR" gibson.tenant.v1.TenantService/ListAuditEvents "$(jq -n --arg t "$TENANT" --arg c "$CONNECTOR" '{tenant_id:$t,target_match:$c,page_size:100}')" 2>"${WORK}/audit.err" || true)"
+  AUDIT_JSON="$(grpc_call "$SCHEMA_DIR" gibson.tenant.v1.TenantService/ListAuditEvents "$(jq -n --arg t "$TENANT" --arg c "$CONNECTOR" '{tenant_id:$t,event_types:["connector.tool.call"],target_match:$c,page_size:100}')" 2>"${WORK}/audit.err" || true)"
   if assert_audit_names_mission "$AUDIT_JSON" "$PRINCIPAL_ID" "$CONNECTOR" "${MISSION_ID_9:-}"; then NAMED=yes; break; fi
   sleep 5
 done

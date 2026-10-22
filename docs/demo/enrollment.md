@@ -129,12 +129,17 @@ DEMO_GITLAB_PROJECT=group/project GIBSON_SRC=../gibson \
    and calls `get_project` (or `list_work_items`, or `search`) through
    `ComponentService.CallTool` against `DEMO_GITLAB_PROJECT`, with the work id
    of the dispatch. That work id puts the call inside the mission. The output
-   must name the project. A call with no work id is outside any mission, and
-   the probe refuses to make it.
+   must name the project. The probe claims the dispatch first: the agent
+   worker polls for work (`PollWork`) and calls the tool from the handler of the
+   claimed item. The daemon accepts `CallTool` only with a work id that the agent
+   claimed, or a task grant that names the run. A call with no work id is outside
+   any mission, and the probe refuses to make it.
 
-10. `TenantService.ListAuditEvents` must hold an event with `actor_source`
-    `agent`, `actor_id` equal to the agent principal, a `target_object` on the
-    connector, and the mission id of step 9 in `details`. The agent identity
+10. `TenantService.ListAuditEvents` must hold a record of the action
+    `connector.tool.call` (gibson#1288) with `actor_source` `agent`, `actor_id`
+    equal to the agent principal, `target_object` `connector:<id>`, and in
+    `details` the `tool`, the `work_id` that the agent claimed and the
+    `mission_id` of step 9. The agent identity
     must name the enrolling person, so the trail shows agent, mission and
     person. A call outside a mission has no mission id, and the run fails.
 

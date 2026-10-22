@@ -309,6 +309,9 @@ async function gitlab(sdk) {
 }
 
 // One call of the GitLab tool inside the mission that dispatched this work item.
+// startAgentWorker polls (PollWork) and claims the item before the handler runs,
+// so the work id below is one that this agent claimed. The daemon accepts a
+// connector call only with such a work id, or with a task grant for the run.
 async function callInMission(sdk, session, inv, project) {
   const workId = assertMissionWork(inv)
   const tools = toolsOf(await sdk.listGibsonTools(session.clients.component, workId))
