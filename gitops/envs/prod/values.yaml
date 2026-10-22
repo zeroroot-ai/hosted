@@ -71,8 +71,6 @@ gibson-workloads:
         memory: 2Gi
   global:
     domain: "zeroroot.ai"
-    imagePullSecrets:
-      - name: ghcr-credentials
   # -----------------------------------------------------------------------------
   # externalSecrets — the ClusterSecretStore reads the platform's own OpenBao.
   # -----------------------------------------------------------------------------
