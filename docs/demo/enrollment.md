@@ -94,7 +94,7 @@ password, enrolls TOTP) through the same driver
 
 ## The GitLab half (gibson#21)
 
-No workflow runs steps 8 to 11. GitLab refuses a personal access token on
+No workflow runs steps 8 to 13. GitLab refuses a personal access token on
 its MCP endpoint `https://gitlab.com/api/v4/mcp` (HTTP 403, run
 37355956639). The connector manifest says `auth: oauth`, and an OAuth grant
 needs a person at the GitLab consent page. A person runs the GitLab half in
@@ -120,24 +120,53 @@ DEMO_GITLAB_PROJECT=group/project GIBSON_SRC=../gibson \
    to the proxy on its refresh pass (every 5 minutes), and the connector
    reaches `Ready` with discovered tools. The wait is bounded at 12 minutes.
 
-9. The agent, on its host key, lists the tools through
-   `ComponentService.ListTools`, keeps the ones tagged `connector:gitlab`,
+9. A mission sends the agent to the connector. The first admin creates a
+   target for the GitLab project (`gibson target create`) and submits a
+   mission with one agent node that names the enrolled agent
+   (`gibson mission submit --detach`, which prints the mission id). The agent,
+   on its host key, claims the dispatch and lists the tools through
+   `ComponentService.ListTools`. It keeps the ones tagged `connector:gitlab`
    and calls `get_project` (or `list_work_items`, or `search`) through
-   `ComponentService.CallTool` against `DEMO_GITLAB_PROJECT`. The output
-   must name the project.
+   `ComponentService.CallTool` against `DEMO_GITLAB_PROJECT`, with the work id
+   of the dispatch. That work id puts the call inside the mission. The output
+   must name the project. The probe claims the dispatch first: the agent
+   worker polls for work (`PollWork`) and calls the tool from the handler of the
+   claimed item. The daemon accepts `CallTool` only with a work id that the agent
+   claimed, or a task grant that names the run. A call with no work id is outside
+   any mission, and the probe refuses to make it.
 
-10. `TenantService.ListAuditEvents` must hold an event whose actor is the
-    agent principal on the connector, and the agent identity must name the
-    enrolling person. A mission-less call carries no mission id, and the
-    run says so.
+10. `TenantService.ListAuditEvents` must hold a record of the action
+    `connector.tool.call` (gibson#1288) with `actor_source` `agent`, `actor_id`
+    equal to the agent principal, `target_object` `connector:<id>`, and in
+    `details` the `tool`, the `work_id` that the agent claimed and the
+    `mission_id` of step 9. The agent identity
+    must name the enrolling person, so the trail shows agent, mission and
+    person. A call outside a mission has no mission id, and the run fails.
+
+12. The test deletes the OpenBao pod (`gibson-openbao-0`), as a crash would.
+    This is the one change the test makes to the cluster. The pod must come
+    back as a new pod and report initialized and unsealed within
+    `BAO_RETURN_WAIT` seconds (default 300). No step unseals, restarts or
+    patches it: the static seal opens the new pod from the keyring.
+
+13. The next connector call works. A new mission sends the agent to the
+    connector again, and the call must answer and name the project. The run
+    tries up to three times, 30 seconds apart, and records the number of
+    tries.
 
 11. `RevokeConnectorGrant` must report a grant, `GetConnectorAuthStatus`
-    must report `UNAUTHORIZED`, and the agent's next call must be refused.
-    The proxy's credential is withdrawn on the daemon's next refresh pass
-    and the operator rechecks every 2 minutes, so the refusal is polled for
-    up to 7.5 minutes and the time it took is part of the record.
+    must report `UNAUTHORIZED`, and the agent's next call, in a new mission,
+    must be refused. The proxy's credential is withdrawn on the daemon's next
+    refresh pass and the operator rechecks every 2 minutes, so the refusal is
+    polled for up to 7.5 minutes and the time it took is part of the record.
 
-Steps 8 to 11 have not run yet: no run on main has held the token. The
+The gitlab phase runs the steps in this order: 8, 9, 10, 12, 13, 11. Step 12
+needs a live connector grant, so it runs in the same session as steps 8 to 11,
+with a person at the GitLab consent page. No workflow runs it, and nothing
+runs it on a schedule. This is the check for gibson#21: "Killing the OpenBao
+pod mid-demo does not break the platform, it returns unsealed on its own."
+
+Steps 8 to 13 have not run yet: no run on main has held the token. The
 assertions above are the design read against the code on main, not a
 record. The first gated run rewrites this section from what happened.
 

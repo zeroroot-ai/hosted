@@ -16,6 +16,12 @@
 //              tool against a project, print the result. Env:
 //              PROBE_GITLAB_PROJECT (group/project). Exits non-zero and prints
 //              ok:false when the call is refused, which step 11 expects.
+//   mission-gitlab  start as the dispatched agent of a mission, wait for the
+//              work item that the mission sends this agent, and call the same
+//              read-only GitLab tool with the work id of that item, so the call
+//              runs inside the mission (the audit trail then carries the mission
+//              id). Prints "[probe] worker ready" on stderr when it polls. Env:
+//              PROBE_GITLAB_PROJECT, PROBE_MISSION_WAIT_MS (default 300000).
 //   --selftest offline. Proves the assertions here can fail. No SDK, no
 //              network.
 //
@@ -28,6 +34,34 @@ import process from "node:process"
 // ---------------------------------------------------------------------------
 // Pure assertions (selftested)
 // ---------------------------------------------------------------------------
+
+/**
+ * The tool list of a discovery answer. The SDK returns {tools, unavailable};
+ * an older SDK returned the array. Both give the array, and a daemon that has
+ * no lister gives an error that names the reason, never an empty pass.
+ */
+export function toolsOf(discovery) {
+  if (Array.isArray(discovery)) return discovery
+  if (Array.isArray(discovery?.tools)) {
+    if (discovery.tools.length === 0 && discovery.unavailable) {
+      throw new Error(`tool discovery is unavailable: ${discovery.unavailable}`)
+    }
+    return discovery.tools
+  }
+  throw new Error(`the tool discovery answer has no tool list: ${JSON.stringify(discovery).slice(0, 200)}`)
+}
+
+/**
+ * A dispatched work item runs a call inside a mission only when it carries a
+ * work id: the harness scopes the call by it. No work id is a call outside any
+ * mission, and the check refuses it.
+ */
+export function assertMissionWork(inv) {
+  if (typeof inv?.workId !== "string" || inv.workId === "") {
+    throw new Error("the dispatched work item has no work id, so a call would run outside any mission")
+  }
+  return inv.workId
+}
 
 /** The shim's answer carries one non-empty assistant message, or this throws. */
 export function assertCompletion(body) {
@@ -110,6 +144,18 @@ function selftest() {
     const pick = pickGitlabTool(gl, "grp/proj")
     if (pick.name !== "mcp:gitlab:get_project" || pick.input.project_id !== "grp/proj") throw new Error(JSON.stringify(pick))
   }, false)
+  check("a discovery answer object gives its tools", () => {
+    if (toolsOf({ tools: [{ name: "a" }] }).length !== 1) throw new Error("not one tool")
+  })
+  check("an old array answer gives its tools", () => {
+    if (toolsOf([{ name: "a" }]).length !== 1) throw new Error("not one tool")
+  })
+  check("an unavailable discovery is refused", () => toolsOf({ tools: [], unavailable: "no lister" }), true)
+  check("a malformed discovery answer is refused", () => toolsOf({}), true)
+  check("a work item with a work id runs in a mission", () => {
+    if (assertMissionWork({ workId: "w-1" }) !== "w-1") throw new Error("wrong id")
+  })
+  check("a work item with no work id is refused", () => assertMissionWork({ workId: "" }), true)
   check("a list with no gitlab tool is refused", () => pickGitlabTool([{ name: "native:echo", tags: ["source:native"] }], "grp/proj"), true)
   check("a gitlab tool set with no project tool is refused", () => pickGitlabTool([{ name: "mcp:gitlab:create_issue", tags: ["connector:gitlab"] }], "grp/proj"), true)
   check("an output naming the project is accepted", () => assertNamesProject({ path_with_namespace: "grp/proj" }, "grp/proj"), false)
@@ -246,7 +292,7 @@ async function gitlab(sdk) {
   const { session, agentName } = await connect(sdk)
   const project = requireEnv("PROBE_GITLAB_PROJECT")
   try {
-    const tools = await sdk.listGibsonTools(session.clients.component)
+    const tools = toolsOf(await sdk.listGibsonTools(session.clients.component))
     const mine = tools.filter((t) => (t.tags ?? []).includes("connector:gitlab"))
     console.error(`[probe] ${tools.length} tools listed, ${mine.length} from the gitlab connector`)
     const pick = pickGitlabTool(tools, project)
@@ -262,15 +308,66 @@ async function gitlab(sdk) {
   }
 }
 
+// One call of the GitLab tool inside the mission that dispatched this work item.
+// startAgentWorker polls (PollWork) and claims the item before the handler runs,
+// so the work id below is one that this agent claimed. The daemon accepts a
+// connector call only with such a work id, or with a task grant for the run.
+async function callInMission(sdk, session, inv, project) {
+  const workId = assertMissionWork(inv)
+  const tools = toolsOf(await sdk.listGibsonTools(session.clients.component, workId))
+  const pick = pickGitlabTool(tools, project)
+  console.error(`[probe] work ${workId} (mission run ${inv.missionRunId}): calling ${pick.name} with ${JSON.stringify(pick.input)}`)
+  const result = await sdk.callGibsonTool(session.clients.component, { workId, name: pick.name, input: pick.input })
+  const base = { mode: "mission-gitlab", tool: pick.name, workId, missionRunId: inv.missionRunId }
+  if (result.error) {
+    return { ok: false, ...base, refused: true, error: `${result.error.code}: ${result.error.message}` }
+  }
+  const text = assertNamesProject(result.output, project)
+  return { ok: true, ...base, output: text.slice(0, 400) }
+}
+
+async function missionGitlab(sdk) {
+  const { session, agentName } = await connect(sdk)
+  const project = requireEnv("PROBE_GITLAB_PROJECT")
+  const waitMs = Number(process.env.PROBE_MISSION_WAIT_MS ?? 300_000)
+  let stop = () => {}
+  try {
+    const outcome = await new Promise((resolve, reject) => {
+      const timer = setTimeout(() => reject(new Error(`no work item was dispatched to ${agentName} within ${waitMs} ms`)), waitMs)
+      stop = sdk.startAgentWorker(session.clients.component, session.instance, {
+        onError: (e) => console.error(`[probe] worker error: ${e}`),
+        handler: async (inv) => {
+          let r
+          try {
+            r = await callInMission(sdk, session, inv, project)
+          } catch (e) {
+            clearTimeout(timer)
+            reject(e)
+            throw e
+          }
+          clearTimeout(timer)
+          resolve({ ...r, agentName })
+          return r.ok ? { success: true, output: { tool: r.tool } } : { success: false, output: { error: r.error } }
+        },
+      })
+      console.error("[probe] worker ready")
+    })
+    return outcome
+  } finally {
+    stop()
+    session.stop()
+  }
+}
+
 async function main() {
   const mode = process.argv[2]
   if (mode === "--selftest") {
     selftest()
     return
   }
-  const modes = { complete, finding, gitlab }
+  const modes = { complete, finding, gitlab, "mission-gitlab": missionGitlab }
   if (!modes[mode]) {
-    console.log(JSON.stringify({ ok: false, error: `unknown mode ${JSON.stringify(mode)}; want complete | finding | gitlab | --selftest` }))
+    console.log(JSON.stringify({ ok: false, error: `unknown mode ${JSON.stringify(mode)}; want complete | finding | gitlab | mission-gitlab | --selftest` }))
     process.exit(2)
   }
   // Resolved from /app, where the image deploys the agent and its SDK.
