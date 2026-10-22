@@ -51,7 +51,8 @@ for n, j in work.items():
     for s in j["steps"]:
         assert "MODE=wipe" not in s.get("run", "") or s.get("name", "").startswith("From zero"), \
             "a teardown step is in the job " + n + ": " + s.get("name", "")
-cred = [s for s in setup["runs"]["steps"] if "configure-aws-credentials" in s.get("uses", "")][0]
+# The credential of the job's own: the bringup role session (the keyring reader session is one hour and reads the keyring only).
+cred = [s for s in setup["runs"]["steps"] if "configure-aws-credentials" in s.get("uses", "") and "inputs.role-arn" in s["with"]["role-to-assume"]][0]
 duration = int(cred["with"]["role-duration-seconds"])
 ceiling = int(re.search(r"^self_terminate_after_minutes = (\d+)", tfvars, re.M).group(1))
 for n, j in jobs.items():
@@ -94,7 +95,7 @@ PY
 }
 
 @test "FAILING FIXTURE: a credential shorter than a job is refused" {
-  run check '[s for s in setup["runs"]["steps"] if "configure-aws-credentials" in s.get("uses", "")][0]["with"]["role-duration-seconds"] = 14400'
+  run check '[s for s in setup["runs"]["steps"] if "configure-aws-credentials" in s.get("uses", "") and "inputs.role-arn" in s["with"]["role-to-assume"]][0]["with"]["role-duration-seconds"] = 14400'
   [ "$status" -ne 0 ]
   [[ "$output" == *"the credential ends before the job"* ]]
 }
