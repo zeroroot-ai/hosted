@@ -1,5 +1,5 @@
 # STAGING, stage 0 of ADR-0083. Applied by `make substrate ENV=staging`,
-# which selects this file and the local state path from the one ENV. See
+# which selects this file and the state directory from the one ENV. See
 # README.md before a run by hand.
 
 environment    = "staging"
@@ -48,3 +48,12 @@ rotation_role_enabled = true
 
 # preflight.yml reads the keyring with this role (keyring-reader-role.tf).
 keyring_reader_role_enabled = true
+
+# The stage 0 state of staging, its key slots and its rotation record live in its
+# own durable bucket, zeroroot-ai-staging-durable-<account>, under tfstate/stage0/,
+# with S3 native lock files, as drill does (backend.tf, scripts/stage0-store.sh,
+# hosted#97). Its keyring lives in the Secrets Manager secret
+# zeroroot-ai/staging/keyring. The bucket policy lets two principals read and
+# write tfstate/stage0/: the key rotation role of staging and the operator role
+# below. The bringup role is not one of them.
+stage0_state_principal_role_names = ["OrganizationAccountAccessRole"]

@@ -179,14 +179,21 @@ The state of this workspace lives in the durable bucket it creates
 | `tfstate/stage0/key-slots.tfvars.json` | the active access key slot of each user |
 | `tfstate/stage0/key-rotation.json` | the time of the last switch of each user |
 
-An environment whose state is still on a workstation (or, for drill, in the old
-location of the prod state bucket) moves it once:
+An environment whose state is still on a workstation (staging and prod), or in
+the old location of the prod state bucket (drill), moves it once:
 
 ```bash
-scripts/stage0-store.sh migrate <env> <state-dir>
+scripts/stage0-store.sh migrate staging /bulk/substrate/staging
+scripts/stage0-store.sh migrate prod /bulk/substrate/prod
+scripts/stage0-store.sh migrate drill "$(mktemp -d)"
 ```
 
-The command refuses when the new key already holds a state. Until it ran,
+The command refuses when the new key already holds a state. Drill takes its
+state, key slots and rotation record from the old key only, so its command
+refuses a state directory that holds a copy of one of them. After the move, the
+command reads the state back from the bucket. When its lineage and serial are
+those of the source, it deletes `terraform.tfstate` and
+`terraform.tfstate.backup` of the state directory. Until the move ran,
 `stage0_init` refuses to start on the empty new key, because a plan from nothing
 would try to create every resource again.
 
@@ -268,12 +275,12 @@ each environment. It writes the new `substrate.env` into the keyring secret.
 
 ## Prod
 
-`envs/prod.tfvars` is code, not yet applied. The prod estate's state, and the
-state of `eks/apex-zone` and `eks/public-site`, still live in the old
-`zeroroot-ai-prod-tfstate-<account>-us-east-1` bucket with its DynamoDB lock
-table and KMS key. They move to `tfstate/` in the prod durable bucket when
-prod's stage 0 is applied, with `terraform init -migrate-state`. Until then
-that bucket, table and key stay, unmanaged by any workspace in this repo.
+Stage 0 of prod is applied. Its state moves to `tfstate/stage0/` of the prod
+durable bucket with the migrate command above, as the state of staging does
+(hosted#97). The state of `eks/apex-zone` and `eks/public-site` still lives in
+the old `zeroroot-ai-prod-tfstate-<account>-us-east-1` bucket with its DynamoDB
+lock table and KMS key. That bucket, table and key stay, unmanaged by any
+workspace in this repo.
 
 ## Terraform version
 
