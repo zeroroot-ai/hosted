@@ -104,10 +104,14 @@ own_loops() {
   # lost stream left no reason in the log.
   cat > "$TMP/bin/kubectl" <<'SH'
 #!/usr/bin/env bash
-echo "$$" >> "$PF_RECORD"
-echo "Forwarding from 127.0.0.1:18025 -> 8025"
-echo "E1023 portforward.go:413] an error occurred forwarding 18025 -> 8025: lost connection to pod" >&2
-exit 1
+case "$*" in
+  "-n gibson port-forward --address 127.0.0.1 svc/gibson-mailpit 18025:8025")
+    echo "$$" >> "$PF_RECORD"
+    echo "Forwarding from 127.0.0.1:18025 -> 8025"
+    echo "E1023 portforward.go:413] an error occurred forwarding 18025 -> 8025: lost connection to pod" >&2
+    exit 1 ;;
+  *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
+esac
 SH
   chmod +x "$TMP/bin/kubectl"
   PATH="$TMP/bin:$PATH"
