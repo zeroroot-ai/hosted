@@ -240,7 +240,7 @@ jobs:
         uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
-          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-arn: ${{ vars.DRILL_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-up-${{ github.run_id }}
           slots: "true"
 
@@ -367,7 +367,7 @@ jobs:
         uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
-          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-arn: ${{ vars.DRILL_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-restore-${{ github.run_id }}
           slots: "true"
 
@@ -451,7 +451,7 @@ jobs:
         uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
-          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-arn: ${{ vars.DRILL_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-rotation-${{ github.run_id }}
           slots: "true"
 
@@ -590,7 +590,7 @@ jobs:
         uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
-          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-arn: ${{ vars.DRILL_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-teardown-${{ github.run_id }}
           slots: "true"
 

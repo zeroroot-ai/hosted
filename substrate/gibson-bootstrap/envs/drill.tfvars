@@ -35,11 +35,16 @@ audit_lock_mode = "GOVERNANCE"
 
 # Drill keeps its stage 0 state, key slots and rotation record in its own durable
 # bucket under tfstate/stage0/, and its keyring in the Secrets Manager secret
-# zeroroot-ai/drill/keyring, as every environment does. Drill rotates its keys in
-# drill.yml as the bringup role, which therefore also reads tfstate/stage0/.
-stage0_state_principal_role_names = ["OrganizationAccountAccessRole", "eks-bringup"]
+# zeroroot-ai/drill/keyring, as every environment does. drill.yml runs as the
+# drill role drill-bringup (bootstrap/eks/aws-org/github-oidc-drill.tf) and
+# rotates the keys of drill, so that role also reads tfstate/stage0/.
+stage0_state_principal_role_names = ["OrganizationAccountAccessRole", "drill-bringup"]
 
-# The bringup role is a principal of the keyring secret of drill only. It trusts
-# every GitHub environment of the shared account, so it must not reach the
-# keyring of staging or prod.
-keyring_principal_role_names = ["OrganizationAccountAccessRole", "eks-bringup"]
+# The drill role is a principal of the keyring secret of drill only. Its
+# boundary takes away every resource of staging and prod.
+keyring_principal_role_names = ["OrganizationAccountAccessRole", "drill-bringup"]
+
+# The drill smoke reads the test inbox of drill, and the drill teardown and
+# recreate read and write the edge TLS secret of drill, both as drill-bringup.
+inbox_reader_role_name         = "drill-bringup"
+edge_cert_principal_role_names = ["drill-bringup"]

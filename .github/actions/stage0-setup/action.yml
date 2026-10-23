@@ -4,18 +4,19 @@ description: >-
   runner: the keyring and substrate.env of the environment read from the Secrets
   Manager secret zeroroot-ai/<env>/keyring (ADR-0083, amendment of 2026-10-22)
   with the keyring reader role of that environment, then a credential of the
-  job's own on the bringup role (OIDC, eks-bringup), the seal key masked,
-  Terraform, the Python requirements and the pinned cluster tools. The bringup
-  role is a principal of the keyring secret of drill only, so drill alone leaves
-  keyring-role-arn empty and reads with the bringup role, and drill alone sets
-  slots to true. Nothing comes from the disk of an earlier job, and the GitHub
+  job's own on the bringup role of the environment (OIDC: eks-bringup, or
+  drill-bringup for drill), the seal key masked,
+  Terraform, the Python requirements and the pinned cluster tools. Only the
+  drill role drill-bringup is a principal of a keyring secret (the one of
+  drill), so drill alone leaves keyring-role-arn empty and reads with its
+  bringup role, and drill alone sets slots to true. Nothing comes from the disk of an earlier job, and the GitHub
   Environment holds no keyring.
 inputs:
   env:
     description: The environment name.
     required: true
   role-arn:
-    description: The EKS_BRINGUP_ROLE_ARN variable.
+    description: The bringup role ARN variable. EKS_BRINGUP_ROLE_ARN for staging and prod, DRILL_BRINGUP_ROLE_ARN for drill.
     required: true
   session-name:
     description: The role session name, one for each job.
@@ -38,21 +39,24 @@ runs:
       shell: bash
       env:
         ROLE_ARN: ${{ inputs.role-arn }}
+        ENV: ${{ inputs.env }}
       run: |
         set -euo pipefail
         if [ -z "${ROLE_ARN}" ]; then
-          echo "::error::Repo variable EKS_BRINGUP_ROLE_ARN is not set." >&2
-          echo "The eks-bringup role is defined in bootstrap/eks/aws-org/github-oidc.tf." >&2
+          if [ "${ENV}" = drill ]; then var=DRILL_BRINGUP_ROLE_ARN role=drill-bringup file=github-oidc-drill.tf
+          else var=EKS_BRINGUP_ROLE_ARN role=eks-bringup file=github-oidc.tf; fi
+          echo "::error::Variable ${var} is not set." >&2
+          echo "The ${role} role is defined in bootstrap/eks/aws-org/${file}." >&2
           echo "Apply that workspace, then set the variable to the role ARN:" >&2
-          echo "  gh variable set EKS_BRINGUP_ROLE_ARN -R ${GITHUB_REPOSITORY} --body arn:aws:iam::<account-id>:role/eks-bringup" >&2
+          echo "  gh variable set ${var} -R ${GITHUB_REPOSITORY} --env ${ENV} --body arn:aws:iam::<account-id>:role/${role}" >&2
           exit 1
         fi
         echo "OK — role ARN is configured."
 
     # The keyring reader role of this environment reads the keyring and nothing
-    # else. The bringup role is not a principal of the keyring secret of staging
-    # or prod, because staging, prod and drill share one account and the bringup
-    # role trusts all three environments.
+    # else. eks-bringup is not a principal of the keyring secret of staging or
+    # prod: it trusts both of their GitHub environments, and staging has no
+    # required reviewer.
     - name: The keyring reader role must be set outside drill
       shell: bash
       env:
@@ -116,7 +120,7 @@ runs:
       shell: bash
       run: aws sts get-caller-identity
 
-    # Drill only: the bringup role reads the keyring (and the slot files).
+    # Drill only: drill-bringup reads the keyring (and the slot files).
     - name: Read the stage 0 files of drill from AWS
       if: ${{ inputs.keyring-role-arn == '' }}
       shell: bash

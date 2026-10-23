@@ -72,3 +72,8 @@ argocd_extra_cluster_resources = [
   { group = "node.k8s.io", kind = "RuntimeClass" },
   { group = "setec.zeroroot.ai", kind = "SandboxClass" },
 ]
+
+# The drill runs as drill-bringup, which may create a role only when the role
+# carries its boundary (bootstrap/eks/aws-org/github-oidc-drill.tf). So the node
+# role of drill carries it too.
+node_permissions_boundary_name = "PB-DrillBringup"
