@@ -79,19 +79,18 @@ locals {
   ]
 
   # job_workflow_ref pins the exact workflow file AND the ref it was loaded
-  # from. The bringup role names its four callers, which are the only
-  # workflows that drive `make recreate` / `make teardown` — drill.yml is the
-  # fourth (ADR-0095) and drives both in one run, against an environment that is
-  # destroyed at the end of it; the gitops apply
-  # workflow has no committed caller yet, so pinning a path there would be a
-  # guess that locks out the first real one.
+  # from. The bringup role names its three callers. drill.yml is not one: it
+  # runs as drill-bringup (github-oidc-drill.tf), so a drill run never holds the
+  # access of the prod verbs. The gitops apply workflow has no committed caller
+  # yet, so pinning a path there would be a guess that locks out the first real
+  # one.
   #
   # scripts/check-role-callers.py fails when a workflow assumes
   # EKS_BRINGUP_ROLE_ARN and this list does not name it, or the reverse. An
   # exit test that only reaches the nodes uses exit-test-node-access
   # (github-oidc-exit-tests.tf), never this administrator role (hosted#656).
   gh_bringup_job_workflow_refs = [
-    for w in ["recreate.yml", "teardown.yml", "promote-staging.yml", "drill.yml"] :
+    for w in ["recreate.yml", "teardown.yml", "promote-staging.yml"] :
     "${var.github_org}/${var.github_deploy_repo}/.github/workflows/${w}@refs/heads/main"
   ]
 }
@@ -213,10 +212,10 @@ resource "aws_iam_role_policy_attachment" "tf_apply_admin" {
 
 # eks-bringup: the role the bringup verbs run as (deploy#1746).
 #
-# Its four callers are recreate.yml, teardown.yml, promote-staging.yml and
-# drill.yml,
+# Its three callers are recreate.yml, teardown.yml and promote-staging.yml,
 # each workflow_dispatch-only off refs/heads/main, each running in the GitHub
-# environment its `env` input names. They drive `make recreate` and
+# environment its `env` input names. The drill has its own role,
+# drill-bringup (github-oidc-drill.tf). They drive `make recreate` and
 # `make teardown` — a full Terraform apply and destroy of EKS and the VPC —
 # so, like tf-apply-privileged, the role is admin-equivalent in the workload
 # account, bounded by PB-OperatorMaxPermissions.
@@ -276,14 +275,10 @@ resource "aws_iam_role" "eks_bringup" {
   provider = aws.prod
 
   name                 = "eks-bringup"
-  description          = "Privileged role the bringup verbs run as (deploy#1746). Assumed by zeroroot-ai/hosted's recreate.yml, teardown.yml and promote-staging.yml, workflow_dispatch-only off main, in the staging, drill or prod GitHub environment. Runs make recreate / make teardown."
+  description          = "Privileged role the bringup verbs run as (deploy#1746). Assumed by zeroroot-ai/hosted's recreate.yml, teardown.yml and promote-staging.yml, workflow_dispatch-only off main, in the staging or prod GitHub environment. Runs make recreate / make teardown. The drill runs as drill-bringup."
   assume_role_policy   = data.aws_iam_policy_document.eks_bringup_trust[0].json
   permissions_boundary = aws_iam_policy.operator_permission_boundary[0].arn
-  # 6 hours, the GitHub limit of one job. One job of drill.yml holds the
-  # recreate, the smoke and the restore half or the rotation test, and it
-  # stops at 345 minutes, so its one session must outlive 4 hours. The
-  # teardown is a job of its own with a session of its own (hosted#679,
-  # second drill sweep, row 19). Nothing needs more than one job.
+  # 6 hours, the GitHub limit of one job. Nothing needs more than one job.
   max_session_duration = 21600
 
   tags = local.common_tags

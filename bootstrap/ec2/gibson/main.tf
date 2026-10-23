@@ -133,9 +133,14 @@ data "aws_iam_policy_document" "assume_ec2" {
   }
 }
 
+locals {
+  node_permissions_boundary_arn = var.node_permissions_boundary_name == "" ? null : "arn:${data.aws_partition.current.partition}:iam::${data.aws_caller_identity.current.account_id}:policy/${var.node_permissions_boundary_name}"
+}
+
 resource "aws_iam_role" "node" {
-  name               = "${var.cluster_name}-node"
-  assume_role_policy = data.aws_iam_policy_document.assume_ec2.json
+  name                 = "${var.cluster_name}-node"
+  assume_role_policy   = data.aws_iam_policy_document.assume_ec2.json
+  permissions_boundary = local.node_permissions_boundary_arn
 }
 
 resource "aws_iam_role_policy_attachment" "ssm" {

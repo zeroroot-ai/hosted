@@ -10,7 +10,8 @@
 # account). Four kinds of principal read or write it:
 #
 #   - the roles of var.keyring_principal_role_names: the operator role that runs
-#     stage 0 from the workstation, and for drill only the bringup role;
+#     stage 0 from the workstation, and for drill only the drill role
+#     drill-bringup;
 #   - the key rotation role (rotation-role.tf): read and write, because the
 #     rotation changes the keyring;
 #   - the keyring reader role of the environment (keyring-reader-role.tf): read

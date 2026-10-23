@@ -50,9 +50,15 @@ variable "github_apply_environment" {
 }
 
 variable "github_bringup_environments" {
-  description = "GitHub Environment names in the deploy repo that the eks-bringup role is gated on (deploy#1198, deploy#1746). One per environment a bringup verb may target, and each must match the `environment:` a verb job declares, or the workflow can no longer assume the role. prod carries the required reviewer; staging and drill carry none (docs/bringup.md § Who may run what). drill is the throwaway environment of ADR-0095: it is destroyed after every run, so it needs the same verbs as staging and none of the protection, and it exists so the destroy-and-recreate drills stop needing staging."
+  description = "GitHub Environment names in the deploy repo that the eks-bringup role is gated on (deploy#1198, deploy#1746). One per environment a bringup verb may target, and each must match the `environment:` a verb job declares, or the workflow can no longer assume the role. prod carries the required reviewer; staging carries none (docs/bringup.md § Who may run what). drill is never one: drill.yml runs as drill-bringup (github-oidc-drill.tf), whose boundary takes away every resource of staging and prod. scripts/check-role-callers.py fails when this list names drill."
   type        = list(string)
-  default     = ["staging", "prod", "drill"]
+  default     = ["staging", "prod"]
+}
+
+variable "drill_zone_name" {
+  description = "The DNS sub-zone of drill. drill-bringup may change records only inside it (github-oidc-drill.tf)."
+  type        = string
+  default     = "drill.zeroroot.ai"
 }
 
 variable "platform_workspace_names" {
