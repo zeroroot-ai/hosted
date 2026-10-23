@@ -53,6 +53,16 @@ variable "platform_cluster_name" {
 # The instance.
 # ----------------------------------------------------------------------------
 
+variable "private_ip" {
+  description = "The fixed private address of the target, inside the platform public subnet. The Target record and the sandbox egress posture name this address, so a recreate must give the node the same one (gibson#498)."
+  type        = string
+
+  validation {
+    condition     = can(cidrhost("${var.private_ip}/32", 0))
+    error_message = "private_ip must be one IPv4 address, such as 10.60.0.66."
+  }
+}
+
 variable "instance_type" {
   description = "The instance the target cluster runs on. The default is 2 vCPU and 4 GB, which carries the goat's twelve workloads at 50 to 100 MiB each with room for k3s itself."
   type        = string
