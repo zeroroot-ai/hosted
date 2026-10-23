@@ -17,6 +17,13 @@ aws_account_id = "447184491447"
 # none of them.
 platform_cluster_name = "zeroroot-ai-staging"
 
+# The fixed private address of the node. The registered Target names
+# https://10.60.0.66:6443, and a recreate must keep that address, or the
+# Target points at nothing (gibson#498). It must sit inside the subnet
+# zeroroot-ai-staging-public (10.60.0.0/24), and the platform node must not
+# hold it.
+private_ip = "10.60.0.66"
+
 # 2 vCPU and 4 GB. The goat's twelve workloads take 50 to 100 MiB each, so this
 # leaves room for k3s itself and the image layers.
 instance_type  = "t3.medium"

@@ -42,7 +42,7 @@ The two machines share one VPC and one subnet, and nothing else:
 | Security group | One ingress rule: 6443 from the platform node's security group, by reference and never an address range. Nothing from the internet, on any port. |
 | Security group rules | The one ingress above, and egress everywhere so the node pulls k3s, helm, the scenario images and the repository. |
 | IAM role and instance profile | The SSM agent actions (`ssm:UpdateInstanceInformation` and four `ssmmessages` channel actions) and `ssm:GetParameters` on the one deploy token parameter. No managed policy, no other parameter, no KMS action. |
-| Instance | `t3.medium`, Amazon Linux 2023, a 30 GB encrypted gp3 root volume, IMDSv2 required with a hop limit of 1. |
+| Instance | `t3.medium`, Amazon Linux 2023, a 30 GB encrypted gp3 root volume, IMDSv2 required with a hop limit of 1. The private address is fixed by `private_ip` in `envs/<env>.tfvars`, so a recreate keeps the address that the Target names. |
 
 It builds **no** VPC, subnet, internet gateway, route table, Elastic IP, DNS
 record, certificate, bucket, Argo Application or Kubernetes resource. It joins
