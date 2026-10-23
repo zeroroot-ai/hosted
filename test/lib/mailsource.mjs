@@ -167,7 +167,9 @@ export function mailVerdict(text, senderDomain) {
   if (!want) return "no platform sender domain";
   if (!(fromDomain === want || fromDomain.endsWith(`.${want}`))) return `From ${from || "(none)"} is not on ${want}`;
   const ar = (headers["authentication-results"] ?? "").toLowerCase();
-  if (!ar.startsWith("amazonses.com")) return "no Authentication-Results header from amazonses.com";
+  // The authserv-id is the whole token before the first ";". A prefix match
+  // would also accept a host such as amazonses.com.example.
+  if (ar.split(";")[0].trim() !== "amazonses.com") return "no Authentication-Results header from amazonses.com";
   if (!/\bspf=pass\b/.test(ar)) return "SES did not see spf=pass";
   const aligned = [...ar.matchAll(/\bdkim=pass\b([^;]*)/g)].some((m) => {
     const d = (m[1].match(/header\.d=([a-z0-9.-]+)/) ?? m[1].match(/header\.i=[^@\s]*@([a-z0-9.-]+)/) ?? [])[1] ?? "";

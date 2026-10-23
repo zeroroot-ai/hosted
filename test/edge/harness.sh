@@ -111,8 +111,10 @@ up() {
 
   # RATELIMIT_IMAGE overrides the values' image for a LOCAL run before the
   # mirror carries a new tag. CI never sets it: the render's image is the test.
-  docker run -d --name gibson-ratelimit --network "$NET" \
-    --env-file "$WORK/ratelimit.env" \
+  # REDIS_AUTH comes from this environment, not from the env file, so the
+  # password is never written to disk or put on a command line.
+  REDIS_AUTH="$HARNESS_REDIS_PASSWORD" docker run -d --name gibson-ratelimit --network "$NET" \
+    --env-file "$WORK/ratelimit.env" -e REDIS_AUTH \
     -v "$WORK/ratelimit/config:/data/ratelimit/config:ro" \
     "${RATELIMIT_IMAGE:-$(json ratelimit_image)}" >/dev/null
 
