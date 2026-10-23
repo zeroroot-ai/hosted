@@ -251,6 +251,10 @@ jobs:
     if: ${{ vars.EXIT_TEST_DEMO_COMPLETION_ENABLED == 'true' }}
     env:
       EXIT_TEST_ANTHROPIC_API_KEY: ${{ secrets.EXIT_TEST_ANTHROPIC_API_KEY }}
+      # The key is an organization user key. Anthropic refuses it unless each
+      # call sends the header anthropic-workspace-id (hosted#96, the shape of
+      # exit-test-bank.yml in gibson).
+      EXIT_TEST_ANTHROPIC_WORKSPACE_ID: ${{ vars.EXIT_TEST_ANTHROPIC_WORKSPACE_ID }}
     steps:
       # The variable says the test is on. If the key is missing, the test
       # cannot run, and saying so with a failure is the honest report.
@@ -260,7 +264,11 @@ jobs:
             echo "::error title=exit-test-demo-enrollment cannot run the completion::EXIT_TEST_DEMO_COMPLETION_ENABLED is true but the repository secret EXIT_TEST_ANTHROPIC_API_KEY is empty. Add the key under Settings > Secrets and variables > Actions, or unset the variable (hosted#123)."
             exit 1
           fi
-          echo "the key is set"
+          if [ -z "${EXIT_TEST_ANTHROPIC_WORKSPACE_ID}" ]; then
+            echo "::error title=exit-test-demo-enrollment cannot run the completion::EXIT_TEST_DEMO_COMPLETION_ENABLED is true but the repository variable EXIT_TEST_ANTHROPIC_WORKSPACE_ID is empty. The key works only with the header anthropic-workspace-id. Add the workspace id under Settings > Secrets and variables > Actions > Variables (hosted#96)."
+            exit 1
+          fi
+          echo "the key and the workspace id are set"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
 

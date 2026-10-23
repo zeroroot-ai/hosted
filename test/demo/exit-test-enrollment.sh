@@ -69,6 +69,12 @@
 #   GIBSON_BIN    the adk CLI binary               (default: gibson)
 #   GIBSON_SRC    a zeroroot-ai/gibson checkout, for the tenant proto (step 6)
 #   EXIT_TEST_ANTHROPIC_API_KEY  the provider key step 6 registers
+#   EXIT_TEST_ANTHROPIC_WORKSPACE_ID  the workspace of that key, wrkspc_...
+#                    The key is an organization user key. Anthropic refuses
+#                    it unless each call sends "anthropic-workspace-id". Step 6
+#                    sends the id on its own key check and as the field
+#                    custom_headers of the provider, which the daemon sends on
+#                    each model call (gibson#1285, gibson v0.162.0).
 #   DEMO_GITLAB_PROJECT the GitLab project, group/project (step 9)
 #   GITLAB_INSTANCE_URL the GitLab instance  (default: https://gitlab.com)
 #   AUTH_WAIT_SECONDS   how long step 8 waits for the consent (default: 900)
@@ -253,6 +259,14 @@ assert_mission_id() {
   [[ "$1" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{7,}$ ]]
 }
 
+# workspace_header <workspace id> prints the custom_headers value of the
+# anthropic provider, or nothing when the id does not have the form the
+# daemon accepts (gibson internal/engine/llm/custom_headers.go).
+workspace_header() {
+  [[ "${1:-}" =~ ^wrkspc_[A-Za-z0-9]{1,64}$ ]] || return 1
+  printf 'anthropic-workspace-id: %s' "$1"
+}
+
 # assert_host_key_kept <sha before> <sha after>
 assert_host_key_kept() {
   [ -n "$1" ] && [ "$1" = "$2" ]
@@ -382,6 +396,13 @@ if [ "${1:-}" = "--selftest" ]; then
   expect_fail "a new pod that is sealed" assert_bao_returned uid-1 uid-2 sealed
   expect_fail "a new pod with an unknown state" assert_bao_returned uid-1 uid-2 unknown
   expect_fail "no new pod yet" assert_bao_returned uid-1 "" unsealed
+
+  log "workspace header"
+  hv="$(workspace_header wrkspc_01AbC 2>/dev/null || true)"
+  [ "$hv" = "anthropic-workspace-id: wrkspc_01AbC" ] || { failures=$((failures + 1)); echo "SELFTEST FAIL: workspace_header gave '${hv}'" >&2; }
+  expect_fail "an empty workspace id" workspace_header ""
+  expect_fail "a workspace id with no wrkspc_ prefix" workspace_header 01AbC
+  expect_fail "a workspace id that carries a second header" workspace_header $'wrkspc_01AbC\nx-api-key: k'
 
   log "host key kept"
   expect_pass "the same key" assert_host_key_kept abc abc
@@ -981,15 +1002,18 @@ step_result 6 FAIL
 # platform that sends a different value (a defect). The key goes in a 0600
 # header file, never on a command line. Only the HTTP status is kept.
 KEY_STATUS=""
-if [ -n "${EXIT_TEST_ANTHROPIC_API_KEY:-}" ]; then
+WORKSPACE_HEADER="$(workspace_header "${EXIT_TEST_ANTHROPIC_WORKSPACE_ID:-}" || true)"
+if [ -n "${EXIT_TEST_ANTHROPIC_API_KEY:-}" ] && [ -n "$WORKSPACE_HEADER" ]; then
   KEY_HDR="${WORK}/anthropic-key.hdr"
-  ( umask 077; printf 'x-api-key: %s\nanthropic-version: 2023-06-01\n' "$EXIT_TEST_ANTHROPIC_API_KEY" > "$KEY_HDR" )
+  ( umask 077; printf 'x-api-key: %s\nanthropic-version: 2023-06-01\n%s\n' "$EXIT_TEST_ANTHROPIC_API_KEY" "$WORKSPACE_HEADER" > "$KEY_HDR" )
   KEY_STATUS="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 -H @"$KEY_HDR" https://api.anthropic.com/v1/models 2>/dev/null || true)"
   rm -f "$KEY_HDR"
   echo "step 6: Anthropic answers HTTP ${KEY_STATUS:-none} to the key in EXIT_TEST_ANTHROPIC_API_KEY"
 fi
 if [ -z "${EXIT_TEST_ANTHROPIC_API_KEY:-}" ]; then
   fail "step 6: EXIT_TEST_ANTHROPIC_API_KEY is empty. The baseline profile ships no model slot, so the completion needs a provider key in this repository's Actions secrets (hosted#123)"
+elif [ -z "$WORKSPACE_HEADER" ]; then
+  fail "step 6: EXIT_TEST_ANTHROPIC_WORKSPACE_ID is empty or not of the form wrkspc_<letters and digits>. The key is an organization user key and works only with the header anthropic-workspace-id (hosted#96)"
 elif [ "$KEY_STATUS" = 401 ] || [ "$KEY_STATUS" = 403 ]; then
   fail "step 6: Anthropic refuses the key in EXIT_TEST_ANTHROPIC_API_KEY with HTTP ${KEY_STATUS}, before the platform uses it. The key is revoked or wrong. An owner sets a valid key in this repository's Actions secrets (hosted#659)"
 elif [ -z "${GIBSON_SRC:-}" ] || [ ! -f "${GIBSON_SRC}/internal/server/daemon/api/gibson/tenant/v1/provider.proto" ]; then
@@ -1002,8 +1026,10 @@ else
   # command line (grpc_call_file).
   CREATE_BODY="${WORK}/create-provider.json"
   # jq reads the key from its environment (env.K), not from an argument.
-  ( umask 077; K="$EXIT_TEST_ANTHROPIC_API_KEY" jq -n --arg n "$PROVIDER_NAME" \
-    '{input:{name:$n,type:"anthropic",default_model:"claude-haiku-4-5",credentials:{api_key:env.K},set_as_default:true,capabilities:["CAPABILITY_CHAT"]}}' > "$CREATE_BODY" )
+  # custom_headers carries the workspace header. The daemon sends it on each
+  # call to the provider (gibson#1285).
+  ( umask 077; K="$EXIT_TEST_ANTHROPIC_API_KEY" jq -n --arg n "$PROVIDER_NAME" --arg h "$WORKSPACE_HEADER" \
+    '{input:{name:$n,type:"anthropic",default_model:"claude-haiku-4-5",credentials:{api_key:env.K,custom_headers:$h},set_as_default:true,capabilities:["CAPABILITY_CHAT"]}}' > "$CREATE_BODY" )
   CREATE_OUT="$(grpc_call_file "$SCHEMA_DIR" gibson.tenant.v1.ProviderService/CreateProvider "$CREATE_BODY" 2>&1 || true)"
   rm -f "$CREATE_BODY"
   if ! jq -e '.provider.name' <<<"$CREATE_OUT" >/dev/null 2>&1 && ! grep -q -i 'already exists' <<<"$CREATE_OUT"; then
