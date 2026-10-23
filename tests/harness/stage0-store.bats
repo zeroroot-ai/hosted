@@ -1,8 +1,8 @@
 #!/usr/bin/env bats
 #
 # stage0-store.bats: the stage 0 state, key slots and rotation record of every
-# environment live in the durable bucket under tfstate/stage0/. Only drill
-# keeps its keyring in Secrets Manager (ADR-0083 amendment of 2026-10-21,
+# environment live in the durable bucket under tfstate/stage0/, and its keyring
+# in Secrets Manager (ADR-0083 amendments of 2026-10-21 and 2026-10-22,
 # scripts/stage0-store.sh).
 #
 # Offline. terraform and aws are stubs that record their arguments.
@@ -20,6 +20,8 @@ setup() {
   cat > "$BIN/terraform" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "$REC/terraform.args"
+# The state in the bucket, as `state pull` reads it back: $REC/remote.tfstate.
+if [ "${2:-}" = state ] && [ "${3:-}" = pull ]; then cat "$REC/remote.tfstate" 2>/dev/null || exit 1; fi
 exit 0
 SH
   cat > "$BIN/aws" <<'SH'
@@ -40,7 +42,12 @@ case "$*" in
     f="${*: -1}"; cp "${f#file://}" "$REC/sm.json"; echo "$4" > "$REC/sm.id"; exit 0 ;;
   "s3 cp --only-show-errors "*)
     # A copy down from the old drill key, or a copy up of a slot file.
-    case "$4" in s3://*) mkdir -p "$(dirname "$5")"; echo '{}' > "$5" ;; *) echo "up $5" >> "$REC/uploads" ;; esac
+    # A copy down takes the content of $REC/obj/<bucket>/<key> when it has one.
+    case "$4" in
+      s3://*) mkdir -p "$(dirname "$5")"; src="$REC/obj/${4#s3://}"
+              if [ -s "$src" ]; then cp "$src" "$5"; else echo '{}' > "$5"; fi ;;
+      *) echo "up $5" >> "$REC/uploads" ;;
+    esac
     exit 0 ;;
 esac
 echo "aws stub: undeclared call: $*" >&2; exit 1
@@ -140,10 +147,19 @@ SH
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
-@test "the migrate command of drill also copies the key slots and the rotation record from substrate/drill/" {
+STATE_JSON='{"version":4,"lineage":"lin-1","serial":7}'
+
+# old_drill_state: the old key of drill in the prod state bucket holds a state.
+old_drill_state() {
   ob=zeroroot-ai-prod-tfstate-447184491447-us-east-1
   mkdir -p "$REC/obj/$ob/substrate/drill"
-  for f in terraform.tfstate key-slots.tfvars.json key-rotation.json; do : > "$REC/obj/$ob/substrate/drill/$f"; done
+  printf '%s\n' "$STATE_JSON" > "$REC/obj/$ob/substrate/drill/terraform.tfstate"
+  printf '%s\n' "$STATE_JSON" > "$REC/remote.tfstate"
+}
+
+@test "the migrate command of drill also copies the key slots and the rotation record from substrate/drill/" {
+  old_drill_state
+  for f in key-slots.tfvars.json key-rotation.json; do : > "$REC/obj/$ob/substrate/drill/$f"; done
   run "$REPO_ROOT/scripts/stage0-store.sh" migrate drill "$BATS_TEST_TMPDIR/state"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   grep -qx -- '-migrate-state' "$REC/terraform.args"
@@ -152,20 +168,47 @@ SH
 }
 
 @test "FAILING FIXTURE: the migrate command of drill with no old slot files uploads none" {
-  ob=zeroroot-ai-prod-tfstate-447184491447-us-east-1
-  mkdir -p "$REC/obj/$ob/substrate/drill"; : > "$REC/obj/$ob/substrate/drill/terraform.tfstate"
+  old_drill_state
   run "$REPO_ROOT/scripts/stage0-store.sh" migrate drill "$BATS_TEST_TMPDIR/state"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ ! -e "$REC/uploads" ]
 }
 
-@test "the migrate command moves a local state to the new key, and the slot files with it" {
-  mkdir -p "$BATS_TEST_TMPDIR/state"; echo '{"version":4}' > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
+@test "FAILING FIXTURE: the migrate command of drill refuses a local state, key slot or rotation file, which may be older than the old key" {
+  for f in terraform.tfstate key-slots.tfvars.json key-rotation.json; do
+    rm -rf "$BATS_TEST_TMPDIR/state" "$REC/terraform.args"; old_drill_state
+    mkdir -p "$BATS_TEST_TMPDIR/state"; echo '{}' > "$BATS_TEST_TMPDIR/state/$f"
+    run "$REPO_ROOT/scripts/stage0-store.sh" migrate drill "$BATS_TEST_TMPDIR/state"
+    [ "$status" -eq 2 ] || { echo "$f: $output"; false; }
+    [[ "$output" == *"empty state directory"* ]]
+    [ ! -e "$REC/terraform.args" ]
+  done
+}
+
+@test "the migrate command moves a local state to the new key, the slot files with it, and keeps no local copy" {
+  mkdir -p "$BATS_TEST_TMPDIR/state"; printf '%s\n' "$STATE_JSON" > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
+  echo '{}' > "$BATS_TEST_TMPDIR/state/terraform.tfstate.backup"
   echo '{}' > "$BATS_TEST_TMPDIR/state/key-slots.tfvars.json"
+  printf '%s\n' "$STATE_JSON" > "$REC/remote.tfstate"
   run "$REPO_ROOT/scripts/stage0-store.sh" migrate staging "$BATS_TEST_TMPDIR/state"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   grep -qx -- '-migrate-state' "$REC/terraform.args"
   grep -q "key-slots.tfvars.json" "$REC/uploads"
+  [ ! -e "$BATS_TEST_TMPDIR/state/terraform.tfstate" ]
+  [ ! -e "$BATS_TEST_TMPDIR/state/terraform.tfstate.backup" ]
+  [ -e "$BATS_TEST_TMPDIR/state/key-slots.tfvars.json" ]
+}
+
+@test "FAILING FIXTURE: the migrate command keeps the local state when the state in the bucket is another one" {
+  for remote in '{"version":4,"lineage":"lin-1","serial":6}' '{"version":4,"lineage":"lin-2","serial":7}' ''; do
+    rm -rf "$BATS_TEST_TMPDIR/state" "$REC/remote.tfstate"
+    mkdir -p "$BATS_TEST_TMPDIR/state"; printf '%s\n' "$STATE_JSON" > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
+    [ -z "$remote" ] || printf '%s\n' "$remote" > "$REC/remote.tfstate"
+    run "$REPO_ROOT/scripts/stage0-store.sh" migrate prod "$BATS_TEST_TMPDIR/state"
+    [ "$status" -eq 2 ] || { echo "$remote: $output"; false; }
+    [[ "$output" == *"The local state stays"* ]]
+    [ -s "$BATS_TEST_TMPDIR/state/terraform.tfstate" ]
+  done
 }
 
 @test "FAILING FIXTURE: the migrate command refuses when the new key already holds a state" {

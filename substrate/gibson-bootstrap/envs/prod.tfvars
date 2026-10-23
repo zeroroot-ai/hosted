@@ -1,7 +1,5 @@
 # PRODUCTION, stage 0 of ADR-0083. Applied by `make substrate ENV=prod`,
-# which selects this file and the local state path from the one ENV. Not yet
-# applied: the prod estate still keeps its state in the old
-# zeroroot-ai-prod-tfstate bucket (README.md § Prod).
+# which selects this file and the state directory from the one ENV.
 
 environment    = "prod"
 aws_account_id = "447184491447"
@@ -38,3 +36,12 @@ rotation_role_enabled = true
 
 # preflight.yml reads the keyring with this role (keyring-reader-role.tf).
 keyring_reader_role_enabled = true
+
+# The stage 0 state of prod, its key slots and its rotation record live in its
+# own durable bucket, zeroroot-ai-prod-durable-<account>, under tfstate/stage0/,
+# with S3 native lock files, as drill does (backend.tf, scripts/stage0-store.sh,
+# hosted#97). Its keyring lives in the Secrets Manager secret
+# zeroroot-ai/prod/keyring. The bucket policy lets two principals read and
+# write tfstate/stage0/: the key rotation role of prod and the operator role
+# below. The bringup role is not one of them.
+stage0_state_principal_role_names = ["OrganizationAccountAccessRole"]

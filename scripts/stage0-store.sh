@@ -214,9 +214,13 @@ stage0_push() {
 
 # stage0_migrate_old <env> <state-dir>: the one-time move of an existing state
 # into tfstate/stage0/ (scripts/stage0-store.sh migrate <env> <state-dir>).
-# It refuses when the new key already holds a state. The sources are the local
-# file of the state directory and, for drill, the old key in the prod state
-# bucket. The key slots and the rotation record move with the state.
+# It refuses when the new key already holds a state. The source of staging and
+# prod is the local file of the state directory. The source of drill is the old
+# key in the prod state bucket, and drill refuses a state directory that holds
+# a local copy. The key slots and the rotation record move with the state. When
+# the state in the bucket has the lineage and the serial of the source, the
+# command deletes terraform.tfstate and terraform.tfstate.backup of the state
+# directory.
 stage0_migrate_old() {
   local env="$1" state="$2" bucket rc=0 f tf="$STAGE0_TF_DIR"
   bucket="$(stage0_bucket "$env")" || die "could not read the AWS account"
@@ -225,9 +229,16 @@ stage0_migrate_old() {
   _stage0_head "$bucket" "${STAGE0_PREFIX}/terraform.tfstate" || rc=$?
   [ "$rc" -eq 1 ] || { [ "$rc" -eq 0 ] && die "s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate already holds a state. Nothing to migrate"; die "could not read s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate"; }
   ( umask 077; mkdir -p "$state" )
-  if [ ! -s "${state}/terraform.tfstate" ] && [ "$env" = drill ]; then
+  # The source of drill is the old key in the prod state bucket: the drill runs
+  # wrote there, and a file on a workstation is older. So drill takes no local
+  # state, key slots or rotation record.
+  if [ "$env" = drill ]; then
+    for f in terraform.tfstate key-slots.tfvars.json key-rotation.json; do
+      [ ! -e "${state}/${f}" ] \
+        || die "${state}/${f} exists. The stage 0 state of drill moves from the old key in the prod state bucket, which the drill runs wrote, and a local copy may be older. Run the migrate with an empty state directory: scripts/stage0-store.sh migrate drill \"\$(mktemp -d)\""
+    done
     local acct; acct="$(aws sts get-caller-identity --query Account --output text)" || die "could not read the AWS account"
-    aws s3 cp --only-show-errors "s3://zeroroot-ai-prod-tfstate-${acct}-${STAGE0_REGION}/substrate/drill/terraform.tfstate" "${state}/terraform.tfstate" \
+    ( umask 077; aws s3 cp --only-show-errors "s3://zeroroot-ai-prod-tfstate-${acct}-${STAGE0_REGION}/substrate/drill/terraform.tfstate" "${state}/terraform.tfstate" ) \
       || die "could not read the old state of drill"
   fi
   # Drill also keeps its key slots and rotation record in the old location.
@@ -235,7 +246,6 @@ stage0_migrate_old() {
     local oacct ob; oacct="$(aws sts get-caller-identity --query Account --output text)" || die "could not read the AWS account"
     ob="zeroroot-ai-prod-tfstate-${oacct}-${STAGE0_REGION}"
     for f in key-slots.tfvars.json key-rotation.json; do
-      [ -f "${state}/${f}" ] && continue
       if _stage0_head "$ob" "substrate/drill/${f}"; then
         aws s3 cp --only-show-errors "s3://${ob}/substrate/drill/${f}" "${state}/${f}" \
           || die "could not read the old ${f} of drill"
@@ -259,6 +269,19 @@ stage0_migrate_old() {
     aws s3 cp --only-show-errors "${state}/${f}" "s3://${bucket}/${STAGE0_PREFIX}/${f}" \
       || die "could not write s3://${bucket}/${STAGE0_PREFIX}/${f}"
   done
+  # The state in the bucket must be the local state: the same lineage and the
+  # same serial. Then no local copy of the state stays. The state holds the
+  # access keys in clear text, and a second copy is a second place to read
+  # them and a second state to apply from by mistake.
+  ( umask 077; terraform -chdir="$tf" state pull > "${state}/.stage0-remote.tfstate" ) \
+    || { rm -f "${state}/.stage0-remote.tfstate"; die "could not read back the state from s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate. The local state stays in ${state}"; }
+  python3 - "${state}/terraform.tfstate" "${state}/.stage0-remote.tfstate" <<'PY' \
+    || { rm -f "${state}/.stage0-remote.tfstate"; die "the state in s3://${bucket}/${STAGE0_PREFIX}/terraform.tfstate is not the local state ${state}/terraform.tfstate. The local state stays. Read both before the next apply"; }
+import json, sys
+a, b = (json.load(open(p)) for p in sys.argv[1:3])
+sys.exit(0 if (a.get("lineage"), a.get("serial")) == (b.get("lineage"), b.get("serial")) and a.get("lineage") else 1)
+PY
+  rm -f "${state}/.stage0-remote.tfstate" "${state}/terraform.tfstate" "${state}/terraform.tfstate.backup"
 }
 
 if [ "${BASH_SOURCE[0]}" = "$0" ]; then
