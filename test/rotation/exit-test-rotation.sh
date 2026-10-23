@@ -590,7 +590,7 @@ bootstrap_ready() {
 SERVICE_TOKEN_SECRETS="gibson-platform-operator-vault gibson-tenant-operator-vault"
 # The Job token Secrets. The two approle ones exist only when cert-manager
 # reads OpenBao.
-JOB_TOKEN_SECRETS="gibson-openbao-iam-admin-escrow gibson-openbao-jwt-auth-init gibson-openbao-approle-init gibson-openbao-approle-reader"
+JOB_TOKEN_SECRETS="gibson-openbao-jwt-auth-init gibson-openbao-approle-init gibson-openbao-approle-reader"
 
 # bao_token_status TOKEN: "ok" when OpenBao accepts TOKEN, "denied" when it
 # answers 403, and "error: <text>" for any other result (no answer, a TLS
