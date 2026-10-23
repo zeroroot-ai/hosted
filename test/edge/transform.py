@@ -26,7 +26,6 @@ Writes: <outdir>/envoy.yaml, <outdir>/ratelimit/config/config.yaml,
 from __future__ import annotations
 
 import json
-import os
 import pathlib
 import sys
 
@@ -95,8 +94,12 @@ def main(src: str, out: str) -> int:
     # Under Docker there is no sidecar; the Docker network is the boundary.
     env["GRPC_HOST"] = "0.0.0.0"
     changes.append("ratelimit env: GRPC_HOST 127.0.0.1 -> 0.0.0.0 (no sidecar under Docker)")
-    env["REDIS_AUTH"] = os.environ.get("HARNESS_REDIS_PASSWORD", "harness")
-    changes.append("ratelimit env: REDIS_AUTH from the Secret -> the harness password")
+    # The render reads REDIS_AUTH from a Secret. The env file holds no
+    # password: harness.sh passes REDIS_AUTH from its own environment
+    # (docker run -e REDIS_AUTH), so the password is never on disk.
+    from_secret = [e for e in rlc["env"] if e["name"] == "REDIS_AUTH" and "secretKeyRef" in e.get("valueFrom", {})]
+    assert len(from_secret) == 1, "the ratelimit container no longer reads REDIS_AUTH from a Secret; update this script and harness.sh"
+    changes.append("ratelimit env: REDIS_AUTH from the Secret -> the harness password, passed by harness.sh from its environment")
     (outdir / "ratelimit.env").write_text("".join(f"{k}={v}\n" for k, v in env.items()))
 
     # --- what the harness needs to know ---

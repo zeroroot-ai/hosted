@@ -996,6 +996,12 @@ check-stub-names: ## Every kubectl stub of tests/harness answers only the object
 	@python3 scripts/check-stub-names.py
 check: check-stub-names
 
+.PHONY: check-charts-ref
+check-charts-ref: ## An exit test installs only chart code of a branch, a tag or main of zeroroot-ai/charts, never a pull request ref
+	@printf "$(GREEN)▶$(NC) check-charts-ref...\n"
+	@bats tests/harness/charts-ref.bats
+check: check-charts-ref
+
 .PHONY: check-install-terraform
 check-install-terraform: ## The one Terraform installer fails closed: a corrupted zip, a SHA256SUMS with no line for the zip, a binary that reports another version (blocker 1, run 35563392735)
 	@printf "$(GREEN)▶$(NC) check-install-terraform...\n"

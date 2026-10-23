@@ -34,11 +34,19 @@ runs:
   steps:
     # The chart source. A dispatch names the ref; push and schedule install
     # charts main: the exit test measures the platform as it ships today.
+    # The ref resolves to a commit of a branch or a tag of the charts
+    # repository first. A pull request ref is refused.
+    - name: Resolve the charts ref
+      id: charts
+      uses: ./.github/actions/charts-ref
+      with:
+        ref: ${{ inputs.charts_ref }}
+
     - name: Check out zeroroot-ai/charts
       uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7
       with:
         repository: zeroroot-ai/charts
-        ref: ${{ inputs.charts_ref }}
+        ref: ${{ steps.charts.outputs.sha }}
         path: charts
 
     - name: Record the chart source under test

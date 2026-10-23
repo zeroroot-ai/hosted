@@ -126,8 +126,10 @@ async function fillUntilHeld(locator, value, label, opts = {}) {
     last = await locator.inputValue();
     if (last === value) return;
   } while (Date.now() < deadline);
+  // The message names lengths only. The field can be a password, so the typed
+  // text and the text that the field holds never reach a log.
   throw new Error(
-    `the ${label} field never held its value: typed ${JSON.stringify(value)}, it reads ${JSON.stringify(last)}`,
+    `the ${label} field never held its value: typed ${value.length} characters, it holds ${last.length}${last.length === 0 ? " (empty)" : ""}`,
   );
 }
 
@@ -270,6 +272,8 @@ async function selftest() {
     ["a forged Authentication-Results below the SES one is not read",
       "From: no-reply@staging.zeroroot.ai\r\nAuthentication-Results: amazonses.com; spf=pass; dkim=pass header.i=@attacker.example;\r\n" +
       "Authentication-Results: amazonses.com; spf=pass; dkim=pass header.d=zeroroot.ai;\r\n\r\nbody"],
+    ["an authserv-id that only starts with amazonses.com is ignored",
+      mail("amazonses.com.attacker.example; spf=pass; dkim=pass header.d=zeroroot.ai;", "no-reply@staging.zeroroot.ai")],
     ["a message with two From headers is ignored",
       `From: x@attacker.example\r\n${"From: no-reply@staging.zeroroot.ai"}\r\nAuthentication-Results: ${goodAR}\r\n\r\nbody`],
   ]) {
@@ -327,6 +331,20 @@ async function selftest() {
       }),
     true,
   );
+  {
+    let msg = "";
+    try {
+      await fillUntilHeld(fakeField(Infinity), "s3cr3t-pass", "password", { sleep: noSleep, timeoutMs: 0 });
+    } catch (e) {
+      msg = String(e?.message ?? e);
+    }
+    if (!msg || msg.includes("s3cr3t-pass")) {
+      failures += 1;
+      console.error(`SELFTEST FAIL: the error of a field that never holds its value shows the typed text: ${msg ? "it does" : "no error"}`);
+    } else {
+      console.log("selftest ok: the error of a field that never holds its value shows no typed text");
+    }
+  }
 
   if (failures > 0) {
     console.error(`selftest: ${failures} assertion(s) cannot fail correctly`);
