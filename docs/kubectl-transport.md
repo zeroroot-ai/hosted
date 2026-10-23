@@ -15,7 +15,7 @@ A tool that links client-go opens its own stream and ignores the variable.
 | Terraform providers `kubernetes`, `kubectl`, `helm` | `bootstrap/`, `substrate/` | No. They read and write objects. | Not applicable. |
 | cmctl | `test/rotation/exit-test-rotation.sh` | No. `cmctl renew` sets a condition on a Certificate. | Not applicable. |
 | velero | inside the Velero pod, run by `kubectl exec` | Through kubectl, so the variable covers it. | The describe output is empty. `backup_resource_list` refuses a list that does not name the release namespace. |
-| kubectl port-forward | `scripts/lib/port-forward-loop.sh` | Yes, a port stream. It has its own variable, `KUBECTL_PORT_FORWARD_WEBSOCKETS`, and the repository does not set it. | The probe through the forward gets a connection error, and the loop or the probe retries or fails by name. Whether it needs the same gate is open in [hosted#57](https://github.com/zeroroot-ai/hosted/issues/57). |
+| kubectl port-forward | `scripts/lib/port-forward-loop.sh` | Yes, a port stream. It has its own variable, `KUBECTL_PORT_FORWARD_WEBSOCKETS`, and the repository leaves it at the kubectl default. It needs no gate: no caller reads the exit code of a port-forward, and each caller reads a framed HTTP answer through it ([hosted#57](https://github.com/zeroroot-ai/hosted/issues/57)). | The probe through the forward gets a connection error or a short body and fails by name. The loop prints each error line of kubectl and each end of kubectl on stderr, with the target. |
 | session-manager-plugin | `scripts/lib/ssm-forward.sh` | No. It carries the API port to the EC2 node. | The API call fails. `ec2_cluster_connect` waits for `kubectl cluster-info` and fails after 120 seconds. |
 
 ## Callers that send a secret on stdin
