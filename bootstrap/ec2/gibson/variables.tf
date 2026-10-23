@@ -175,3 +175,9 @@ variable "service_cidr" {
   type        = string
   default     = "172.20.0.0/16"
 }
+
+variable "node_permissions_boundary_name" {
+  description = "The name of the managed policy that bounds the node role, or empty for none. Drill sets PB-DrillBringup: the drill role may create a role only with that boundary (bootstrap/eks/aws-org/github-oidc-drill.tf)."
+  type        = string
+  default     = ""
+}

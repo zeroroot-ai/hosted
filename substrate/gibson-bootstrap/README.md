@@ -194,7 +194,7 @@ The state holds the IAM access keys in clear text. So the bucket policy
 (`bucket.tf`, `DenyStage0StateToEveryoneElse`) denies this prefix to every
 principal except the key rotation role (`rotation-role.tf`) and the roles in
 `stage0_state_principal_role_names` (the operator role of the workstation, and
-for drill the bringup role). `bucket.tf` also sets `prevent_destroy` on the
+for drill the drill role `drill-bringup`). `bucket.tf` also sets `prevent_destroy` on the
 bucket, because the bucket holds its own state.
 
 ## The key rotation role
@@ -219,13 +219,14 @@ no GitHub App, and no file on a workstation.
 | Reader or writer | How | Rights |
 |---|---|---|
 | `make substrate ENV=<env>` | the operator role `OrganizationAccountAccessRole` | read and write |
-| `drill.yml` | the bringup role `eks-bringup`, for drill only | read and write |
+| `drill.yml` | the drill role `drill-bringup` (`bootstrap/eks/aws-org/github-oidc-drill.tf`), for drill only | read and write |
 | `preflight.yml`, `recreate.yml`, `teardown.yml` | the keyring reader role of the environment (`keyring-reader-role.tf`), assumable only from that GitHub environment and only from these three files, off `main` | read that one secret, and nothing else |
 | `rotate-credentials.yml` | the key rotation role (`rotation-role.tf`) | read and write, and nothing else |
 
-The bringup role is not a principal of the keyring secret of staging or prod:
-staging, prod and drill share one AWS account, and the bringup role trusts all
-three GitHub environments. The resource policy of the secret denies every other
+The bringup role `eks-bringup` is not a principal of a keyring secret. It
+trusts the GitHub environments of staging and prod, and staging has no required
+reviewer. The drill role trusts only the drill environment, and its boundary
+takes away every resource of staging and prod. The resource policy of the secret denies every other
 principal. `scripts/check-keyring-secret.py` fails if any other role can read a
 keyring, or if a trust policy lets one environment assume the role of another. A rotation
 writes the new keyring through `scripts/keyring-writeback.sh`. A step that fails
