@@ -52,23 +52,6 @@ locals {
   ]
 
   drill_boundary_name = "PB-DrillBringup"
-  drill_boundary_arn  = "arn:aws:iam::${var.prod_account_id}:policy/${local.drill_boundary_name}"
-  # The ARN patterns of each named resource of staging and prod, by service.
-  drill_other_environments = ["staging", "prod"]
-  drill_denied_name_patterns = flatten([for e in local.drill_other_environments : [
-    "arn:aws:secretsmanager:*:*:secret:zeroroot-ai/${e}/*",
-    "arn:aws:ssm:*:*:parameter/zeroroot-ai/${e}/*",
-    "arn:aws:ecr:*:*:repository/zeroroot-ai-${e}-*",
-    "arn:aws:kms:*:*:alias/zeroroot-ai-${e}-*",
-  ]])
-  # The AWS buckets that the SSM agent reads (the policy
-  # AmazonSSMManagedInstanceCore, the documentation of the SSM agent).
-  drill_node_aws_buckets = [
-    "aws-ssm-${var.aws_region}", "aws-windows-downloads-${var.aws_region}",
-    "amazon-ssm-${var.aws_region}", "amazon-ssm-packages-${var.aws_region}",
-    "${var.aws_region}-birdwatcher-prod", "aws-ssm-distributor-file-${var.aws_region}",
-    "aws-ssm-document-attachments-${var.aws_region}", "patch-baseline-snapshot-${var.aws_region}",
-  ]
 }
 
 data "aws_iam_policy_document" "drill_bringup_trust" {
@@ -115,194 +98,26 @@ data "aws_iam_policy_document" "drill_bringup_trust" {
   }
 }
 
-data "aws_iam_policy_document" "drill_boundary" {
-  count = length(var.prod_account_id) > 0 ? 1 : 0
-
-  # The boundary allows only the services that drill uses: stage 0 and stage 1
-  # of drill, the drill scripts, the users of drill stage 0 and the SSM agent of
-  # the drill node. Every other service (CloudTrail, Organizations, DynamoDB,
-  # Lambda, SNS, CloudFront and the rest) is denied, because nothing allows it.
-  statement {
-    sid = "AllowTheServicesOfDrill"
-    actions = [
-      "ec2:*", "ec2messages:*", "ssmmessages:*", "ssm:*", "iam:*", "s3:*",
-      "route53:*", "secretsmanager:*", "ses:*", "ecr:*", "sts:*", "tag:*", "kms:*",
-    ]
-    resources = ["*"]
-  }
-
-  # The denies of PB-OperatorMaxPermissions in the services above. Its bucket
-  # and IAM user statements are covered below: the drill touches only drill
-  # buckets and drill users.
-  statement {
-    sid    = "DenyTheOperatorBoundaryActions"
-    effect = "Deny"
-    actions = [
-      "kms:ScheduleKeyDeletion", "kms:DisableKey", "kms:DisableKeyRotation",
-      "iam:CreateLoginProfile", "iam:UpdateLoginProfile",
-    ]
-    resources = ["*"]
-  }
-
-  statement {
-    sid    = "DenyIamWritesOutsideDrill"
-    effect = "Deny"
-    actions = [
-      "iam:Add*", "iam:Attach*", "iam:Change*", "iam:Create*", "iam:Deactivate*",
-      "iam:Delete*", "iam:Detach*", "iam:Enable*", "iam:PassRole", "iam:Put*",
-      "iam:Remove*", "iam:Reset*", "iam:Resync*", "iam:Set*", "iam:Tag*",
-      "iam:Untag*", "iam:Update*", "iam:Upload*",
-    ]
-    not_resources = [
-      "arn:aws:iam::${var.prod_account_id}:role/zeroroot-ai-drill-*",
-      "arn:aws:iam::${var.prod_account_id}:instance-profile/zeroroot-ai-drill-*",
-      "arn:aws:iam::${var.prod_account_id}:policy/zeroroot-ai-drill-*",
-      "arn:aws:iam::${var.prod_account_id}:user/substrate/zeroroot-ai-drill-*",
-      "arn:aws:iam::${var.prod_account_id}:role/aws-service-role/*",
-    ]
-  }
-
-  # Each IAM user and role of drill carries this boundary (stage 0 and stage 1
-  # set it), so a policy on one of them cannot reach past it.
-  statement {
-    sid    = "DenyAnIdentityWithoutThisBoundary"
-    effect = "Deny"
-    actions = [
-      "iam:CreateRole", "iam:CreateUser", "iam:PutRolePermissionsBoundary",
-      "iam:PutUserPermissionsBoundary", "iam:PutRolePolicy", "iam:AttachRolePolicy",
-      "iam:PutUserPolicy", "iam:AttachUserPolicy",
-    ]
-    resources = ["*"]
-    condition {
-      test     = "StringNotEquals"
-      variable = "iam:PermissionsBoundary"
-      values   = [local.drill_boundary_arn]
-    }
-  }
-
-  statement {
-    sid       = "DenyRemovingTheBoundary"
-    effect    = "Deny"
-    actions   = ["iam:DeleteRolePermissionsBoundary", "iam:DeleteUserPermissionsBoundary"]
-    resources = ["*"]
-  }
-
-  statement {
-    sid           = "DenyAssumingAnotherRole"
-    effect        = "Deny"
-    actions       = ["sts:AssumeRole"]
-    not_resources = ["arn:aws:iam::${var.prod_account_id}:role/zeroroot-ai-drill-*"]
-  }
-
-  # The drill buckets, and the AWS buckets that the SSM agent of the drill node
-  # reads (AmazonSSMManagedInstanceCore).
-  statement {
-    sid     = "DenyBucketsOutsideDrill"
-    effect  = "Deny"
-    actions = ["s3:*"]
-    not_resources = concat(
-      # The bucket pattern also matches each object of a drill bucket.
-      ["arn:aws:s3:::zeroroot-ai-drill-*"],
-      [for b in local.drill_node_aws_buckets : "arn:aws:s3:::${b}/*"],
-    )
-  }
-
-  # Every resource of staging or prod whose ARN carries its name, in each
-  # allowed service where an ARN carries a name. IAM requires a literal service
-  # in a resource ARN. Buckets, IAM, Route 53 and SES have their own statements,
-  # and an EC2 ARN carries an id, so the tag statement fences EC2.
-  statement {
-    sid       = "DenyResourcesNamedForAnotherEnvironment"
-    effect    = "Deny"
-    actions   = ["*"]
-    resources = local.drill_denied_name_patterns
-  }
-
-  # Every resource tagged with another Environment, in every service that
-  # authorizes by tag. Route 53 reads the apex zone (Environment=prod) for the
-  # drill delegation, so it is fenced by record name below instead.
-  statement {
-    sid         = "DenyResourcesTaggedWithAnotherEnvironment"
-    effect      = "Deny"
-    not_actions = ["route53:*"]
-    resources   = ["*"]
-    condition {
-      test     = "Null"
-      variable = "aws:ResourceTag/Environment"
-      values   = ["false"]
-    }
-    condition {
-      test     = "StringNotEquals"
-      variable = "aws:ResourceTag/Environment"
-      values   = [local.drill_environment]
-    }
-  }
-
-  # A volume or snapshot with no Environment tag is not the drill's. The drill
-  # makes its volumes with RunInstances and never acts on one by itself.
-  statement {
-    sid    = "DenyVolumesAndSnapshotsOutsideDrill"
-    effect = "Deny"
-    actions = [
-      "ec2:AttachVolume", "ec2:DetachVolume", "ec2:DeleteVolume", "ec2:ModifyVolume*",
-      "ec2:CreateVolume", "ec2:CreateSnapshot*", "ec2:CopySnapshot", "ec2:DeleteSnapshot",
-      "ec2:ModifySnapshot*", "ec2:ResetSnapshotAttribute", "ec2:EnableFastSnapshotRestores",
-    ]
-    resources = ["arn:aws:ec2:*:*:volume/*", "arn:aws:ec2:*::snapshot/*"]
-    condition {
-      test     = "StringNotEquals"
-      variable = "aws:ResourceTag/Environment"
-      values   = [local.drill_environment]
-    }
-  }
-
-  # SSM names the tags of a target instance with its own key.
-  statement {
-    sid       = "DenyCommandsOnInstancesOutsideDrill"
-    effect    = "Deny"
-    actions   = ["ssm:SendCommand", "ssm:StartSession"]
-    resources = ["arn:aws:ec2:*:${var.prod_account_id}:instance/*"]
-    condition {
-      test     = "StringNotEquals"
-      variable = "ssm:resourceTag/Environment"
-      values   = [local.drill_environment]
-    }
-  }
-
-  statement {
-    sid       = "DenyRecordsOutsideTheDrillZone"
-    effect    = "Deny"
-    actions   = ["route53:ChangeResourceRecordSets"]
-    resources = ["*"]
-    condition {
-      test     = "ForAnyValue:StringNotLike"
-      variable = "route53:ChangeResourceRecordSetsNormalizedRecordNames"
-      values   = [var.drill_zone_name, "*.${var.drill_zone_name}"]
-    }
-  }
-
-  statement {
-    sid    = "DenyZoneDeletes"
-    effect = "Deny"
-    actions = [
-      "route53:DeleteHostedZone", "route53:DisableHostedZoneDNSSEC",
-      "route53:DeactivateKeySigningKey", "route53:DeleteKeySigningKey", "route53domains:*",
-    ]
-    resources = ["*"]
-  }
-
-  # The SES identities and the one active receipt rule set are shared by every
-  # environment, and substrate/apex-zone owns the rule set.
-  statement {
-    sid    = "DenySharedMailWrites"
-    effect = "Deny"
-    actions = [
-      "ses:Clone*", "ses:Create*", "ses:Delete*", "ses:Put*", "ses:Reorder*",
-      "ses:Set*", "ses:Update*", "ses:Verify*",
-    ]
-    resources = ["*"]
-  }
-}
+# The boundary is one JSON template, policies/permission-boundary-drill.json.tftpl,
+# so scripts/check-iam-arn-service.py can render it with no AWS credentials and
+# fail when its compact size reaches the IAM limit of 6144 characters. Its
+# statements, by Sid, in the order of the list in the header:
+#
+#   AllowTheServicesOfDrill            the services of drill, and no other
+#   DenyTheOperatorBoundaryActions     the KMS and login denies of the operator
+#   DenyIamWritesOutsideDrill          IAM writes on drill names only
+#   DenyAnIdentityWithoutThisBoundary  a new or changed identity carries it
+#   DenyRemovingTheBoundary            the boundary cannot be removed
+#   DenyAssumingAnotherRole            no assume of a role that is not drill's
+#   DenyBucketsOutsideDrill            the drill buckets and the SSM agent buckets
+#   DenyResourcesNamedForAnotherEnvironment  secrets, parameters, registries
+#                                      and key aliases of staging and prod
+#   DenyResourcesTaggedWithAnotherEnvironment  every service but Route 53
+#   DenyVolumesAndSnapshotsOutsideDrill  untagged volumes and snapshots
+#   DenyCommandsOnInstancesOutsideDrill  SSM on drill instances only
+#   DenyRecordsOutsideTheDrillZone     DNS records in the drill zone only
+#   DenyZoneDeletes                    no zone delete, no DNSSEC change
+#   DenySharedMailWrites               no write of the shared SES setup
 
 resource "aws_iam_policy" "drill_boundary" {
   count    = length(var.prod_account_id) > 0 ? 1 : 0
@@ -310,7 +125,11 @@ resource "aws_iam_policy" "drill_boundary" {
 
   name        = local.drill_boundary_name
   description = "Permission boundary of drill-bringup and of each identity it makes: the operator boundary, and no resource of staging or prod (ADR-0095)."
-  policy      = data.aws_iam_policy_document.drill_boundary[0].json
+  policy = templatefile("${path.module}/policies/permission-boundary-drill.json.tftpl", {
+    account_id      = var.prod_account_id
+    region          = var.aws_region
+    drill_zone_name = var.drill_zone_name
+  })
 
   # Environment=drill: the tag fence of the boundary lets the drill read its
   # own role and boundary. The IAM fence still keeps it from changing them.

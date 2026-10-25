@@ -1,0 +1,229 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "tag:*",
+        "sts:*",
+        "ssmmessages:*",
+        "ssm:*",
+        "ses:*",
+        "secretsmanager:*",
+        "s3:*",
+        "route53:*",
+        "kms:*",
+        "iam:*",
+        "ecr:*",
+        "ec2messages:*",
+        "ec2:*"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "AllowTheServicesOfDrill"
+    },
+    {
+      "Action": [
+        "kms:ScheduleKeyDeletion",
+        "kms:DisableKeyRotation",
+        "kms:DisableKey",
+        "iam:UpdateLoginProfile",
+        "iam:CreateLoginProfile"
+      ],
+      "Effect": "Deny",
+      "Resource": "*",
+      "Sid": "DenyTheOperatorBoundaryActions"
+    },
+    {
+      "Action": [
+        "iam:Upload*",
+        "iam:Update*",
+        "iam:Untag*",
+        "iam:Tag*",
+        "iam:Set*",
+        "iam:Resync*",
+        "iam:Reset*",
+        "iam:Remove*",
+        "iam:Put*",
+        "iam:PassRole",
+        "iam:Enable*",
+        "iam:Detach*",
+        "iam:Delete*",
+        "iam:Deactivate*",
+        "iam:Create*",
+        "iam:Change*",
+        "iam:Attach*",
+        "iam:Add*"
+      ],
+      "Effect": "Deny",
+      "NotResource": [
+        "arn:aws:iam::${account_id}:user/substrate/zeroroot-ai-drill-*",
+        "arn:aws:iam::${account_id}:role/zeroroot-ai-drill-*",
+        "arn:aws:iam::${account_id}:role/aws-service-role/*",
+        "arn:aws:iam::${account_id}:policy/zeroroot-ai-drill-*",
+        "arn:aws:iam::${account_id}:instance-profile/zeroroot-ai-drill-*"
+      ],
+      "Sid": "DenyIamWritesOutsideDrill"
+    },
+    {
+      "Action": [
+        "iam:PutUserPolicy",
+        "iam:PutUserPermissionsBoundary",
+        "iam:PutRolePolicy",
+        "iam:PutRolePermissionsBoundary",
+        "iam:CreateUser",
+        "iam:CreateRole",
+        "iam:AttachUserPolicy",
+        "iam:AttachRolePolicy"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::${account_id}:policy/PB-DrillBringup"
+        }
+      },
+      "Effect": "Deny",
+      "Resource": "*",
+      "Sid": "DenyAnIdentityWithoutThisBoundary"
+    },
+    {
+      "Action": [
+        "iam:DeleteUserPermissionsBoundary",
+        "iam:DeleteRolePermissionsBoundary"
+      ],
+      "Effect": "Deny",
+      "Resource": "*",
+      "Sid": "DenyRemovingTheBoundary"
+    },
+    {
+      "Action": "sts:AssumeRole",
+      "Effect": "Deny",
+      "NotResource": "arn:aws:iam::${account_id}:role/zeroroot-ai-drill-*",
+      "Sid": "DenyAssumingAnotherRole"
+    },
+    {
+      "Action": "s3:*",
+      "Effect": "Deny",
+      "NotResource": [
+        "arn:aws:s3:::zeroroot-ai-drill-*",
+        "arn:aws:s3:::${region}-birdwatcher-prod/*",
+        "arn:aws:s3:::patch-baseline-snapshot-${region}/*",
+        "arn:aws:s3:::aws-windows-downloads-${region}/*",
+        "arn:aws:s3:::aws-ssm-${region}/*",
+        "arn:aws:s3:::aws-ssm-document-attachments-${region}/*",
+        "arn:aws:s3:::aws-ssm-distributor-file-${region}/*",
+        "arn:aws:s3:::amazon-ssm-${region}/*",
+        "arn:aws:s3:::amazon-ssm-packages-${region}/*"
+      ],
+      "Sid": "DenyBucketsOutsideDrill"
+    },
+    {
+      "Action": "*",
+      "Effect": "Deny",
+      "Resource": [
+        "arn:aws:ssm:*:*:parameter/zeroroot-ai/staging/*",
+        "arn:aws:ssm:*:*:parameter/zeroroot-ai/prod/*",
+        "arn:aws:secretsmanager:*:*:secret:zeroroot-ai/staging/*",
+        "arn:aws:secretsmanager:*:*:secret:zeroroot-ai/prod/*",
+        "arn:aws:kms:*:*:alias/zeroroot-ai-staging-*",
+        "arn:aws:kms:*:*:alias/zeroroot-ai-prod-*",
+        "arn:aws:ecr:*:*:repository/zeroroot-ai-staging-*",
+        "arn:aws:ecr:*:*:repository/zeroroot-ai-prod-*"
+      ],
+      "Sid": "DenyResourcesNamedForAnotherEnvironment"
+    },
+    {
+      "Condition": {
+        "Null": {
+          "aws:ResourceTag/Environment": "false"
+        },
+        "StringNotEquals": {
+          "aws:ResourceTag/Environment": "drill"
+        }
+      },
+      "Effect": "Deny",
+      "NotAction": "route53:*",
+      "Resource": "*",
+      "Sid": "DenyResourcesTaggedWithAnotherEnvironment"
+    },
+    {
+      "Action": [
+        "ec2:ResetSnapshotAttribute",
+        "ec2:ModifyVolume*",
+        "ec2:ModifySnapshot*",
+        "ec2:EnableFastSnapshotRestores",
+        "ec2:DetachVolume",
+        "ec2:DeleteVolume",
+        "ec2:DeleteSnapshot",
+        "ec2:CreateVolume",
+        "ec2:CreateSnapshot*",
+        "ec2:CopySnapshot",
+        "ec2:AttachVolume"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "aws:ResourceTag/Environment": "drill"
+        }
+      },
+      "Effect": "Deny",
+      "Resource": [
+        "arn:aws:ec2:*::snapshot/*",
+        "arn:aws:ec2:*:*:volume/*"
+      ],
+      "Sid": "DenyVolumesAndSnapshotsOutsideDrill"
+    },
+    {
+      "Action": [
+        "ssm:StartSession",
+        "ssm:SendCommand"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "ssm:resourceTag/Environment": "drill"
+        }
+      },
+      "Effect": "Deny",
+      "Resource": "arn:aws:ec2:*:${account_id}:instance/*",
+      "Sid": "DenyCommandsOnInstancesOutsideDrill"
+    },
+    {
+      "Action": "route53:ChangeResourceRecordSets",
+      "Condition": {
+        "ForAnyValue:StringNotLike": {
+          "route53:ChangeResourceRecordSetsNormalizedRecordNames": [
+            "${drill_zone_name}",
+            "*.${drill_zone_name}"
+          ]
+        }
+      },
+      "Effect": "Deny",
+      "Resource": "*",
+      "Sid": "DenyRecordsOutsideTheDrillZone"
+    },
+    {
+      "Action": [
+        "route53domains:*",
+        "route53:DisableHostedZoneDNSSEC",
+        "route53:DeleteKeySigningKey",
+        "route53:DeleteHostedZone",
+        "route53:DeactivateKeySigningKey"
+      ],
+      "Effect": "Deny",
+      "Resource": "*",
+      "Sid": "DenyZoneDeletes"
+    },
+    {
+      "Action": [
+        "ses:Verify*",
+        "ses:Update*",
+        "ses:Set*",
+        "ses:Reorder*",
+        "ses:Put*",
+        "ses:Delete*",
+        "ses:Create*",
+        "ses:Clone*"
+      ],
+      "Effect": "Deny",
+      "Resource": "*",
+      "Sid": "DenySharedMailWrites"
+    }
+  ],
+  "Version": "2012-10-17"
+}
