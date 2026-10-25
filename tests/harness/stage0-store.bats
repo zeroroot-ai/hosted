@@ -20,8 +20,14 @@ setup() {
   cat > "$BIN/terraform" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$@" >> "$REC/terraform.args"
-# The state in the bucket, as `state pull` reads it back: $REC/remote.tfstate.
-if [ "${2:-}" = state ] && [ "${3:-}" = pull ]; then cat "$REC/remote.tfstate" 2>/dev/null || exit 1; fi
+# A migrate writes $REC/remote.tfstate (what terraform writes, a new lineage
+# and serial 1) to the state key of the bucket that its backend names.
+case " $* " in *" -migrate-state "*)
+  b=""; for a in "$@"; do case "$a" in -backend-config=bucket=*) b="${a#-backend-config=bucket=}" ;; esac; done
+  if [ -n "$b" ] && [ -s "$REC/remote.tfstate" ]; then
+    mkdir -p "$REC/obj/$b/tfstate/stage0"; cp "$REC/remote.tfstate" "$REC/obj/$b/tfstate/stage0/terraform.tfstate"
+  fi ;;
+esac
 exit 0
 SH
   cat > "$BIN/aws" <<'SH'
@@ -147,14 +153,19 @@ SH
   [ "$status" -eq 0 ] || { echo "$output"; false; }
 }
 
-STATE_JSON='{"version":4,"lineage":"lin-1","serial":7}'
+RES='"resources":[{"type":"aws_s3_bucket","name":"durable","instances":[{"attributes":{"id":"b"}}]}]'
+OUT='"outputs":{"bucket_name":{"value":"b","type":"string"}}'
+# The local state, and the copy that terraform init -migrate-state writes: a new
+# lineage and serial 1, with the same resources and outputs.
+STATE_JSON="{\"version\":4,\"lineage\":\"lin-1\",\"serial\":7,${RES},${OUT}}"
+MIGRATED_JSON="{\"version\":4,\"lineage\":\"lin-new\",\"serial\":1,${OUT},${RES}}"
 
 # old_drill_state: the old key of drill in the prod state bucket holds a state.
 old_drill_state() {
   ob=zeroroot-ai-prod-tfstate-447184491447-us-east-1
   mkdir -p "$REC/obj/$ob/substrate/drill"
   printf '%s\n' "$STATE_JSON" > "$REC/obj/$ob/substrate/drill/terraform.tfstate"
-  printf '%s\n' "$STATE_JSON" > "$REC/remote.tfstate"
+  printf '%s\n' "$MIGRATED_JSON" > "$REC/remote.tfstate"
 }
 
 @test "the migrate command of drill also copies the key slots and the rotation record from substrate/drill/" {
@@ -185,11 +196,11 @@ old_drill_state() {
   done
 }
 
-@test "the migrate command moves a local state to the new key, the slot files with it, and keeps no local copy" {
+@test "the migrate command moves a local state to the new key, the slot files with it, and keeps no local copy, though the copy has a new lineage and serial" {
   mkdir -p "$BATS_TEST_TMPDIR/state"; printf '%s\n' "$STATE_JSON" > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
   echo '{}' > "$BATS_TEST_TMPDIR/state/terraform.tfstate.backup"
   echo '{}' > "$BATS_TEST_TMPDIR/state/key-slots.tfvars.json"
-  printf '%s\n' "$STATE_JSON" > "$REC/remote.tfstate"
+  printf '%s\n' "$MIGRATED_JSON" > "$REC/remote.tfstate"
   run "$REPO_ROOT/scripts/stage0-store.sh" migrate staging "$BATS_TEST_TMPDIR/state"
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   grep -qx -- '-migrate-state' "$REC/terraform.args"
@@ -199,9 +210,12 @@ old_drill_state() {
   [ -e "$BATS_TEST_TMPDIR/state/key-slots.tfvars.json" ]
 }
 
-@test "FAILING FIXTURE: the migrate command keeps the local state when the state in the bucket is another one" {
-  for remote in '{"version":4,"lineage":"lin-1","serial":6}' '{"version":4,"lineage":"lin-2","serial":7}' ''; do
-    rm -rf "$BATS_TEST_TMPDIR/state" "$REC/remote.tfstate"
+@test "FAILING FIXTURE: the migrate command keeps the local state when the copy in the bucket holds other resources or outputs" {
+  for remote in \
+      "{\"version\":4,\"lineage\":\"lin-new\",\"serial\":1,${OUT},\"resources\":[{\"type\":\"aws_s3_bucket\",\"name\":\"durable\",\"instances\":[{\"attributes\":{\"id\":\"other\"}}]}]}" \
+      "{\"version\":4,\"lineage\":\"lin-new\",\"serial\":1,${RES},\"outputs\":{}}" \
+      ''; do
+    rm -rf "$BATS_TEST_TMPDIR/state" "$REC/remote.tfstate" "$REC/obj"
     mkdir -p "$BATS_TEST_TMPDIR/state"; printf '%s\n' "$STATE_JSON" > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
     [ -z "$remote" ] || printf '%s\n' "$remote" > "$REC/remote.tfstate"
     run "$REPO_ROOT/scripts/stage0-store.sh" migrate prod "$BATS_TEST_TMPDIR/state"
@@ -211,13 +225,28 @@ old_drill_state() {
   done
 }
 
-@test "FAILING FIXTURE: the migrate command refuses when the new key already holds a state" {
+@test "a second migrate after a move moves nothing, checks the copy, and deletes the local state" {
+  mkdir -p "$REC/obj/zeroroot-ai-staging-durable-447184491447/tfstate/stage0"
+  printf '%s\n' "$MIGRATED_JSON" > "$REC/obj/zeroroot-ai-staging-durable-447184491447/tfstate/stage0/terraform.tfstate"
+  mkdir -p "$BATS_TEST_TMPDIR/state"; printf '%s\n' "$STATE_JSON" > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
+  echo '{}' > "$BATS_TEST_TMPDIR/state/key-slots.tfvars.json"
+  run "$REPO_ROOT/scripts/stage0-store.sh" migrate staging "$BATS_TEST_TMPDIR/state"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ ! -e "$REC/terraform.args" ]
+  grep -q "key-slots.tfvars.json" "$REC/uploads"
+  [ ! -e "$BATS_TEST_TMPDIR/state/terraform.tfstate" ]
+}
+
+@test "FAILING FIXTURE: the migrate command refuses when the new key already holds another state" {
   remote_state staging
-  mkdir -p "$BATS_TEST_TMPDIR/state"; echo '{"version":4}' > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
+  printf '%s\n' '{"version":4,"lineage":"x","serial":3,"resources":[],"outputs":{}}' \
+    > "$REC/obj/zeroroot-ai-staging-durable-447184491447/tfstate/stage0/terraform.tfstate"
+  mkdir -p "$BATS_TEST_TMPDIR/state"; printf '%s\n' "$STATE_JSON" > "$BATS_TEST_TMPDIR/state/terraform.tfstate"
   run "$REPO_ROOT/scripts/stage0-store.sh" migrate staging "$BATS_TEST_TMPDIR/state"
   [ "$status" -eq 2 ]
-  [[ "$output" == *"already holds a state"* ]]
+  [[ "$output" == *"The local state stays"* ]]
   [ ! -e "$REC/terraform.args" ]
+  [ -s "$BATS_TEST_TMPDIR/state/terraform.tfstate" ]
 }
 
 @test "FAILING FIXTURE: the migrate command refuses when there is no state to move" {
