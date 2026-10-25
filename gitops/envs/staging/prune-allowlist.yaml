@@ -62,4 +62,25 @@ resources:
     name: gibson-gibson-workloads-provider-catalogue
     retiredBy: charts#710
     reason: the daemon reads model lists from each provider's API, and nothing mounts the catalogue
-    observed: "2026-10-15"
+    observed: "2026-10-25"
+  # charts#758 (chart 0.154.0) removed the login-client Secret writer of the
+  # Zitadel chart. The upstream chart then renders no Role with a Secret verb
+  # for the Zitadel ServiceAccount, and no RoleBinding for it. The removal is
+  # on purpose: that Role let the Zitadel ServiceAccount write Secrets. The
+  # golden renders at v0.154.4 hold no Role or RoleBinding gibson-zitadel. On
+  # 2026-10-25 staging ran chart 0.154.4, and the Application listed both as
+  # OutOfSync with requiresPruning.
+  - group: rbac.authorization.k8s.io
+    kind: Role
+    namespace: gibson
+    name: gibson-zitadel
+    retiredBy: charts#758
+    reason: the Zitadel ServiceAccount no longer writes Secrets, so its Secret write Role leaves on purpose
+    observed: "2026-10-25"
+  - group: rbac.authorization.k8s.io
+    kind: RoleBinding
+    namespace: gibson
+    name: gibson-zitadel
+    retiredBy: charts#758
+    reason: it binds the retired Role gibson-zitadel to the Zitadel ServiceAccount
+    observed: "2026-10-25"
