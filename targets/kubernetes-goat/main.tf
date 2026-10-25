@@ -175,6 +175,7 @@ resource "aws_instance" "goat" {
   ami                    = data.aws_ssm_parameter.al2023.value
   instance_type          = var.instance_type
   subnet_id              = data.aws_subnet.platform_public.id
+  private_ip             = var.private_ip
   vpc_security_group_ids = [aws_security_group.goat.id]
   iam_instance_profile   = aws_iam_instance_profile.goat.name
 
