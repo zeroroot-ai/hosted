@@ -12,8 +12,9 @@
 # same allow list as kind's MinIO policy in kind/substrate/substrate.sh, so
 # preflight proves one shape on both.
 resource "aws_iam_user" "platform" {
-  name = "zeroroot-ai-${var.environment}-platform"
-  path = "/substrate/"
+  name                 = "zeroroot-ai-${var.environment}-platform"
+  path                 = "/substrate/"
+  permissions_boundary = local.identity_permissions_boundary_arn
 }
 
 # One key for each slot in key_slots.platform.keep (variables.tf). Two slots
@@ -92,8 +93,9 @@ resource "aws_iam_user_policy" "platform" {
 resource "aws_iam_user" "smtp" {
   count = local.ses_relay ? 1 : 0
 
-  name = "zeroroot-ai-${var.environment}-smtp"
-  path = "/substrate/"
+  name                 = "zeroroot-ai-${var.environment}-smtp"
+  path                 = "/substrate/"
+  permissions_boundary = local.identity_permissions_boundary_arn
 }
 
 resource "aws_iam_access_key" "smtp" {
@@ -139,8 +141,9 @@ resource "aws_iam_user_policy" "smtp" {
 # so they are allowed on every zone; the writes are scoped to this zone.
 # GetChange polls a change batch by id, which is not zone-scoped either.
 resource "aws_iam_user" "dns" {
-  name = "zeroroot-ai-${var.environment}-dns"
-  path = "/substrate/"
+  name                 = "zeroroot-ai-${var.environment}-dns"
+  path                 = "/substrate/"
+  permissions_boundary = local.identity_permissions_boundary_arn
 }
 
 resource "aws_iam_access_key" "dns" {

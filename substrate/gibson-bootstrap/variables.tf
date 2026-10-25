@@ -229,3 +229,9 @@ variable "keyring_reader_role_enabled" {
   type        = bool
   default     = false
 }
+
+variable "identity_permissions_boundary_name" {
+  description = "The name of the managed policy that bounds each IAM user and role of stage 0, or empty for none. Drill sets PB-DrillBringup: drill-bringup may change a policy only on an identity with that boundary (bootstrap/eks/aws-org/github-oidc-drill.tf)."
+  type        = string
+  default     = ""
+}

@@ -83,6 +83,7 @@ resource "aws_iam_role" "keyring_reader" {
   name                 = local.keyring_reader_role_name
   description          = "Reads the keyring of ${var.environment} (ADR-0083). Assumed by ${var.github_repository} preflight.yml, recreate.yml and teardown.yml, off main, in the ${var.environment} GitHub environment only."
   assume_role_policy   = data.aws_iam_policy_document.keyring_reader_trust[0].json
+  permissions_boundary = local.identity_permissions_boundary_arn
   max_session_duration = 3600
 }
 

@@ -262,6 +262,7 @@ resource "aws_iam_role" "rotation" {
   name                 = local.rotation_role_name
   description          = "Rotates the access keys of the stage 0 IAM users of ${var.environment} (ADR-0083). Assumed by ${var.github_repository} rotate-credentials.yml, workflow_dispatch only, off main, in the ${var.environment} GitHub environment."
   assume_role_policy   = data.aws_iam_policy_document.rotation_trust[0].json
+  permissions_boundary = local.identity_permissions_boundary_arn
   max_session_duration = 21600
 }
 

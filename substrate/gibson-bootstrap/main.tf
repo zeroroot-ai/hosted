@@ -30,6 +30,9 @@ locals {
 
   is_subzone = var.zone_name != var.apex_zone_name
 
+  # The permission boundary of each IAM user and role of stage 0, or none.
+  identity_permissions_boundary_arn = var.identity_permissions_boundary_name == "" ? null : "arn:aws:iam::${var.aws_account_id}:policy/${var.identity_permissions_boundary_name}"
+
   ses_relay = var.smtp_user == ""
   smtp_host = var.smtp_host != "" ? var.smtp_host : "email-smtp.${var.aws_region}.amazonaws.com"
 

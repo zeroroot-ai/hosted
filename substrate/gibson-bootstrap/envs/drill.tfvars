@@ -48,3 +48,7 @@ keyring_principal_role_names = ["OrganizationAccountAccessRole", "drill-bringup"
 # recreate read and write the edge TLS secret of drill, both as drill-bringup.
 inbox_reader_role_name         = "drill-bringup"
 edge_cert_principal_role_names = ["drill-bringup"]
+
+# drill-bringup may change the policy of a user only when the user carries its
+# boundary, so each IAM user of drill stage 0 carries it.
+identity_permissions_boundary_name = "PB-DrillBringup"

@@ -77,8 +77,9 @@ resource "aws_ecr_lifecycle_policy" "setec_disks" {
 # substrate.sh puts the pair in the keyring. It rotates through two key
 # slots like the other substrate users (scripts/substrate-rotate.sh).
 resource "aws_iam_user" "setec_disk_builder" {
-  name = "zeroroot-ai-${var.environment}-setec-disk-builder"
-  path = "/substrate/"
+  name                 = "zeroroot-ai-${var.environment}-setec-disk-builder"
+  path                 = "/substrate/"
+  permissions_boundary = local.identity_permissions_boundary_arn
 }
 
 # One key for each slot in key_slots["setec-disk-builder"].keep
