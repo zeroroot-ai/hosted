@@ -98,3 +98,31 @@ own_loops() {
   run own_loops "$TMP/multi.sh"; [ "$status" -eq 0 ]
   run own_loops "$TMP/one.sh"; [ "$status" -eq 0 ]
 }
+
+@test "a dropped port-forward shows on stderr with its target and its exit code" {
+  # hosted#57: the loop used to send the error of kubectl to /dev/null, so a
+  # lost stream left no reason in the log.
+  cat > "$TMP/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-n gibson port-forward --address 127.0.0.1 svc/gibson-mailpit 18025:8025")
+    echo "$$" >> "$PF_RECORD"
+    echo "Forwarding from 127.0.0.1:18025 -> 8025"
+    echo "E1023 portforward.go:413] an error occurred forwarding 18025 -> 8025: lost connection to pod" >&2
+    exit 1 ;;
+  *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$TMP/bin/kubectl"
+  PATH="$TMP/bin:$PATH"
+  . "$LIB"
+  pf_loop gibson svc/gibson-mailpit 18025:8025 2>"$TMP/loop.err"
+  wait_for_kubectl
+  sleep 0.5
+  pf_stop_all
+  grep -F 'port-forward gibson/svc/gibson-mailpit: E1023 portforward.go:413] an error occurred forwarding 18025 -> 8025: lost connection to pod' "$TMP/loop.err" \
+    || { echo "no kubectl error line: $(cat "$TMP/loop.err")"; false; }
+  grep -F 'port-forward gibson/svc/gibson-mailpit ended (kubectl exit 1)' "$TMP/loop.err" \
+    || { echo "no end line: $(cat "$TMP/loop.err")"; false; }
+  ! grep -F 'Forwarding from' "$TMP/loop.err" || { echo "stdout of kubectl reached stderr"; false; }
+}
