@@ -43,4 +43,4 @@ concurrency:
 
 jobs:
   adr-citations:
-    uses: zeroroot-ai/.github/.github/workflows/adr-citations.yml@58931387de5d0f2925ee29fa9781822b1e3a100d # v0.20.0
+    uses: zeroroot-ai/.github/.github/workflows/adr-citations.yml@4bf8d348295c9a501b97cc2ffbdc0873c285b6f2 # v0.21.1
