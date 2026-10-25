@@ -1,0 +1,28 @@
+name: charts-ref
+description: >-
+  Resolve the charts ref of a dispatch to one commit of zeroroot-ai/charts
+  that a writer of that repository pushed: a branch, a tag, or a commit on
+  main. A pull request ref or a commit that no branch holds is refused, so an
+  exit test never runs chart code that only a fork holds. The checkout that
+  follows names the commit this action prints. The offline suite is
+  tests/harness/charts-ref.bats.
+inputs:
+  ref:
+    description: The zeroroot-ai/charts ref to install (branch, tag or SHA)
+    required: false
+    default: main
+outputs:
+  sha:
+    description: The commit of zeroroot-ai/charts that the ref names
+    value: ${{ steps.resolve.outputs.sha }}
+runs:
+  using: composite
+  steps:
+    - name: Resolve the charts ref to a commit of a branch or a tag
+      id: resolve
+      shell: bash
+      env:
+        CHARTS_REF: ${{ inputs.ref }}
+      run: |
+        sha="$("$GITHUB_ACTION_PATH/resolve.sh" "$CHARTS_REF")"
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
