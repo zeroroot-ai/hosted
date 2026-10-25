@@ -50,18 +50,29 @@
 #   restore 1 (openbao)     21 s
 #   wait_eso                133 s (11 ExternalSecrets)
 #   wait_priority_classes   under 1 s
-#   restore 2 (builtins)    415 s (9 volumes)          -> 840 s
+#   restore 2 (builtins)    415 s (9 volumes, when it still moved the data)
 #                           Since hosted#790 restore 2 moves no data. The
 #                           pods Restore moves it and keeps the 840 s, and
 #                           the statefulsets Restore after it gets 600 s.
+#                           Restore 2 gets its own bound (hosted#6), see the
+#                           EC2 measurement below.
 #   wait_tenant_webhook     under 1 s
 #   restore 3 (tenants)     11 s
 #   wait_tenant_namespace_labels   NO MEASUREMENT: the step is new, so it
 #                           keeps the old 40 minutes until a run measures it
 #
 # Every other wait is under five minutes measured, so it gets the floor.
-# No restore has reached these steps on an EC2 env yet. When one does, read
-# its log and set each bound to twice that time.
+#
+# The first EC2 measurement: drill run 39448187284 (2026-10-20, ENV=drill,
+# main 205ac12). Each Restore of restore 2 ended Completed. The run stopped
+# later, on a volume with no class, not in a wait.
+#
+#   restore 2 (builtins)    11 s, no data              -> 600 s (the floor)
+#   restore 2 (pods)        61 s, the data             -> 840 s (kept: kind
+#                           took 415 s for the same data on 2026-10-05)
+#
+# When a later restore on an EC2 env reaches a wait that has no measurement,
+# read its log and set that bound to twice the time, with the floor.
 #
 # restore_bound <default-seconds> — the bound, or RESTORE_TIMEOUT when set.
 # ---------------------------------------------------------------------------
@@ -72,6 +83,7 @@ RESTORE_STORE_TIMEOUT=600
 RESTORE_REDIS_TIMEOUT=900
 RESTORE_ESO_TIMEOUT=600
 RESTORE_CLASSES_TIMEOUT=600
+RESTORE_BUILTINS_TIMEOUT=600
 RESTORE_DATA_TIMEOUT=840
 RESTORE_WEBHOOK_TIMEOUT=600
 RESTORE_TENANTS_TIMEOUT=600
@@ -1219,7 +1231,7 @@ $(excluded_namespaces_yaml)
     - persistentvolumeclaims
     - persistentvolumes
 YAML
-  wait_restore "$builtins" "$RESTORE_DATA_TIMEOUT"
+  wait_restore "$builtins" "$RESTORE_BUILTINS_TIMEOUT"
 
   # THE PODS THAT CARRY DATA, AND NO OTHER POD (drill run 39189378263). The
   # backup holds each pod of the release, the pods of the Deployments too.
