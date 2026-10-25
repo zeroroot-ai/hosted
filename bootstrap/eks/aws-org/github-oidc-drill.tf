@@ -13,10 +13,13 @@
 # The access: AdministratorAccess inside the permission boundary
 # PB-DrillBringup. The drill applies stage 1 (a VPC, an instance, its node role)
 # and rotates the access keys of the drill IAM users through stage 0, so it
-# needs wide access to the resources of drill. The boundary takes away each
-# resource of another environment and each path out of the boundary:
+# needs wide access to the resources of drill. The boundary allows only the
+# services that drill uses (EC2, SSM, IAM, S3, Route 53, Secrets Manager, SES,
+# ECR, STS, KMS and the tagging API), so every other service is denied. In
+# those services it takes away each resource of another environment and each
+# path out of the boundary:
 #
-#   - every statement of PB-OperatorMaxPermissions;
+#   - the KMS and login denies of PB-OperatorMaxPermissions;
 #   - an IAM write on anything but the drill names (zeroroot-ai-drill-*, the
 #     drill users under /substrate/, and the service-linked roles). So the role
 #     cannot change itself, its boundary, eks-bringup or any role of staging
@@ -24,10 +27,11 @@
 #   - a role or user that the role creates, or a policy that it puts on one,
 #     must carry this boundary. The boundary cannot be removed;
 #   - an assume of any role but the drill roles;
-#   - each S3 bucket but the drill buckets;
-#   - the secrets, registries and clusters of staging and prod, by name;
-#   - each resource tagged with another Environment, in the services that
-#     authorize by tag (EC2, SSM and the rest);
+#   - each S3 bucket but the drill buckets and the AWS buckets of the SSM agent;
+#   - the secrets, parameters, registries and key aliases of staging and prod,
+#     by name;
+#   - each resource tagged with another Environment, in every service but
+#     Route 53, and each volume or snapshot without the drill tag;
 #   - a DNS record outside the drill zone, and a delete of a hosted zone;
 #   - a write of the SES identities and of the receipt rules, which every
 #     environment shares.
@@ -49,17 +53,14 @@ locals {
 
   drill_boundary_name = "PB-DrillBringup"
   drill_boundary_arn  = "arn:aws:iam::${var.prod_account_id}:policy/${local.drill_boundary_name}"
-  # The ARN patterns of every resource of staging, prod and the organization
-  # that carries its name. "*" also matches the empty region and account of an
-  # S3 ARN.
-  drill_denied_name_patterns = [
-    "arn:aws:*:*:*:*zeroroot-ai-staging*",
-    "arn:aws:*:*:*:*zeroroot-ai-prod*",
-    "arn:aws:*:*:*:*zeroroot-ai/staging/*",
-    "arn:aws:*:*:*:*zeroroot-ai/prod/*",
-    "arn:aws:*:*:*:*zero-day-ai-*",
-    "arn:aws:*:*:*:*gibson-org*",
-  ]
+  # The ARN patterns of each named resource of staging and prod, by service.
+  drill_other_environments = ["staging", "prod"]
+  drill_denied_name_patterns = flatten([for e in local.drill_other_environments : [
+    "arn:aws:secretsmanager:*:*:secret:zeroroot-ai/${e}/*",
+    "arn:aws:ssm:*:*:parameter/zeroroot-ai/${e}/*",
+    "arn:aws:ecr:*:*:repository/zeroroot-ai-${e}-*",
+    "arn:aws:kms:*:*:alias/zeroroot-ai-${e}-*",
+  ]])
   # The AWS buckets that the SSM agent reads (the policy
   # AmazonSSMManagedInstanceCore, the documentation of the SSM agent).
   drill_node_aws_buckets = [
@@ -117,28 +118,27 @@ data "aws_iam_policy_document" "drill_bringup_trust" {
 data "aws_iam_policy_document" "drill_boundary" {
   count = length(var.prod_account_id) > 0 ? 1 : 0
 
-  # A boundary allows nothing by itself. The statements below take away.
+  # The boundary allows only the services that drill uses: stage 0 and stage 1
+  # of drill, the drill scripts, the users of drill stage 0 and the SSM agent of
+  # the drill node. Every other service (CloudTrail, Organizations, DynamoDB,
+  # Lambda, SNS, CloudFront and the rest) is denied, because nothing allows it.
   statement {
-    sid       = "AllowEverythingByDefault"
-    actions   = ["*"]
+    sid = "AllowTheServicesOfDrill"
+    actions = [
+      "ec2:*", "ec2messages:*", "ssmmessages:*", "ssm:*", "iam:*", "s3:*",
+      "route53:*", "secretsmanager:*", "ses:*", "ecr:*", "sts:*", "tag:*", "kms:*",
+    ]
     resources = ["*"]
   }
 
-  # The denies of PB-OperatorMaxPermissions that are not covered below. Its
-  # bucket and IAM user statements are: the drill touches only drill buckets
-  # and drill users.
+  # The denies of PB-OperatorMaxPermissions in the services above. Its bucket
+  # and IAM user statements are covered below: the drill touches only drill
+  # buckets and drill users.
   statement {
     sid    = "DenyTheOperatorBoundaryActions"
     effect = "Deny"
     actions = [
       "kms:ScheduleKeyDeletion", "kms:DisableKey", "kms:DisableKeyRotation",
-      "cloudtrail:StopLogging", "cloudtrail:DeleteTrail", "cloudtrail:UpdateTrail",
-      "cloudtrail:PutEventSelectors", "cloudtrail:PutInsightSelectors",
-      "organizations:*", "account:*",
-      "guardduty:DeleteDetector", "guardduty:DisassociateFromMasterAccount",
-      "guardduty:DisassociateMembers", "guardduty:UpdateDetector",
-      "config:DeleteConfigurationRecorder", "config:DeleteDeliveryChannel",
-      "config:StopConfigurationRecorder", "config:DeleteConfigRule",
       "iam:CreateLoginProfile", "iam:UpdateLoginProfile",
     ]
     resources = ["*"]
@@ -207,9 +207,10 @@ data "aws_iam_policy_document" "drill_boundary" {
     )
   }
 
-  # Every resource of another environment or of the organization whose ARN
-  # carries its name, in every service: a bucket, a table, a key alias, a
-  # secret, a registry, a cluster, a function.
+  # Every resource of staging or prod whose ARN carries its name, in each
+  # allowed service where an ARN carries a name. IAM requires a literal service
+  # in a resource ARN. Buckets, IAM, Route 53 and SES have their own statements,
+  # and an EC2 ARN carries an id, so the tag statement fences EC2.
   statement {
     sid       = "DenyResourcesNamedForAnotherEnvironment"
     effect    = "Deny"
@@ -246,9 +247,8 @@ data "aws_iam_policy_document" "drill_boundary" {
       "ec2:AttachVolume", "ec2:DetachVolume", "ec2:DeleteVolume", "ec2:ModifyVolume*",
       "ec2:CreateVolume", "ec2:CreateSnapshot*", "ec2:CopySnapshot", "ec2:DeleteSnapshot",
       "ec2:ModifySnapshot*", "ec2:ResetSnapshotAttribute", "ec2:EnableFastSnapshotRestores",
-      "ebs:*",
     ]
-    resources = ["arn:aws:ec2:*:*:volume/*", "arn:aws:ec2:*::snapshot/*", "arn:aws:ebs:*:*:snapshot/*"]
+    resources = ["arn:aws:ec2:*:*:volume/*", "arn:aws:ec2:*::snapshot/*"]
     condition {
       test     = "StringNotEquals"
       variable = "aws:ResourceTag/Environment"

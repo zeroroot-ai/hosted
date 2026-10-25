@@ -765,6 +765,12 @@ check-role-callers: ## Each workflow that assumes a pinned AWS role is named in 
 	@python3 scripts/check-role-callers.py --selftest
 	@python3 scripts/check-role-callers.py
 
+.PHONY: check-iam-arn-service
+check-iam-arn-service: ## Each ARN in an IAM policy names a literal service; IAM refuses a wildcard service only at apply (hosted#106)
+	@printf "$(GREEN)▶$(NC) check-iam-arn-service...\n"
+	@python3 scripts/check-iam-arn-service.py --selftest
+	@python3 scripts/check-iam-arn-service.py
+
 .PHONY: check-kind-terraform
 check-kind-terraform: ## The kind Terraform generates no credential and writes no Secret (ADR-0083, deploy#1732, deploy#1737)
 	@printf "$(GREEN)▶$(NC) check-kind-terraform...\n"
@@ -1366,7 +1372,7 @@ check-secret-contract: ## hosted vendors the chart's secret contract at the stag
 
 .PHONY: check
 
-check: verify-harness check-staging-not-ephemeral check-secret-contract check-exit-tests-off-pr check-role-callers check-overlay-oidc-client-roles check-apex-zone check-marketing-host check-no-retain check-no-operator-helm-release check-scp-attachments check-ec2-argocd-depends-on check-ec2-phase1-outputs check-drill-argocd-scope check-stage1-shape check-plain-cluster-edge check-blocker1-root check-kind-terraform check-2core-overlay check-kind-apiserver-cidrs check-apiserver-cidrs check-teardown check-verbs check-overlay-crd-releases check-overlay-monitoring-seam check-overlay-velero-bucket check-overlay-disk-repo check-overlay-belief-trainer check-overlay-values-read check-env-renders-at-pin check-keyring-members-exist check-values-files-are-named check-edge-exit-tests-run check-helm-paths-rooted check-install-terraform check-workflows check-promotion check-signup-exit-test check-demo-exit-test ## Run all deploy static gates
+check: verify-harness check-staging-not-ephemeral check-secret-contract check-exit-tests-off-pr check-role-callers check-iam-arn-service check-overlay-oidc-client-roles check-apex-zone check-marketing-host check-no-retain check-no-operator-helm-release check-scp-attachments check-ec2-argocd-depends-on check-ec2-phase1-outputs check-drill-argocd-scope check-stage1-shape check-plain-cluster-edge check-blocker1-root check-kind-terraform check-2core-overlay check-kind-apiserver-cidrs check-apiserver-cidrs check-teardown check-verbs check-overlay-crd-releases check-overlay-monitoring-seam check-overlay-velero-bucket check-overlay-disk-repo check-overlay-belief-trainer check-overlay-values-read check-env-renders-at-pin check-keyring-members-exist check-values-files-are-named check-edge-exit-tests-run check-helm-paths-rooted check-install-terraform check-workflows check-promotion check-signup-exit-test check-demo-exit-test ## Run all deploy static gates
 	@printf "$(GREEN)  ✓$(NC) [check] all deploy gates passed.\n"
 
 # The ADR citation guard (hosted#433, ADR-0068). The check is the shared
