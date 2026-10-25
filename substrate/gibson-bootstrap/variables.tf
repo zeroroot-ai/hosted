@@ -201,7 +201,7 @@ variable "edge_cert_principal_role_names" {
 }
 
 variable "keyring_principal_role_names" {
-  description = "The IAM roles that read and write the keyring secret: the operator role that runs stage 0 from the workstation. Drill adds the bringup role. Staging and prod never do: the bringup role trusts every environment of the shared account."
+  description = "The IAM roles that read and write the keyring secret: the operator role that runs stage 0 from the workstation. Drill adds its own role drill-bringup. Staging and prod add no role: eks-bringup trusts both of their GitHub environments."
   type        = list(string)
   default     = ["OrganizationAccountAccessRole"]
 }
@@ -219,7 +219,7 @@ variable "github_repository" {
 }
 
 variable "stage0_state_principal_role_names" {
-  description = "The IAM roles besides the rotation role that read and write tfstate/stage0/ of the durable bucket: the operator role that runs stage 0 from the workstation. Drill adds the bringup role, which rotates its keys in drill.yml."
+  description = "The IAM roles besides the rotation role that read and write tfstate/stage0/ of the durable bucket: the operator role that runs stage 0 from the workstation. Drill adds its own role drill-bringup, which rotates its keys in drill.yml."
   type        = list(string)
   default     = ["OrganizationAccountAccessRole"]
 }
@@ -228,4 +228,10 @@ variable "keyring_reader_role_enabled" {
   description = "Make the keyring reader role of this environment (keyring-reader-role.tf): preflight.yml reads the keyring with it. True for staging and prod."
   type        = bool
   default     = false
+}
+
+variable "identity_permissions_boundary_name" {
+  description = "The name of the managed policy that bounds each IAM user and role of stage 0, or empty for none. Drill sets PB-DrillBringup: drill-bringup may change a policy only on an identity with that boundary (bootstrap/eks/aws-org/github-oidc-drill.tf)."
+  type        = string
+  default     = ""
 }

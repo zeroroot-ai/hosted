@@ -26,7 +26,8 @@ member `GHCR_PULL_TOKEN` (step 3).
 ## 2. aws-org apply (once, management account)
 
 Profile `zeroroot-mgmt`. Creates the OIDC provider and the `eks-bringup` /
-`eks-plan-readonly` roles CI assumes. `bootstrap/eks/aws-org/terraform.tfvars`:
+`eks-plan-readonly` roles CI assumes, and the `drill-bringup` role of
+`drill.yml` with its boundary `PB-DrillBringup`. `bootstrap/eks/aws-org/terraform.tfvars`:
 
 | tfvar | value |
 |---|---|
@@ -75,6 +76,7 @@ member you just set (staging, 2026-09-10).
 | kind | name | source |
 |---|---|---|
 | var | `EKS_BRINGUP_ROLE_ARN` | `arn:aws:iam::000000000000:role/eks-bringup` |
+| var | `DRILL_BRINGUP_ROLE_ARN` | `arn:aws:iam::000000000000:role/drill-bringup`. `drill.yml` reads it, on the `drill` environment only |
 | var | `EKS_PLAN_READONLY_ROLE_ARN` | the read-only role |
 | var | `ARGOCD_GITHUB_APP_ID` | the App ID (step 1) |
 | var | `ARGOCD_GITHUB_APP_INSTALLATION_ID` | the installation ID (step 1) |

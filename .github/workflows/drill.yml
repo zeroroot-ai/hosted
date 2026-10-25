@@ -57,12 +57,12 @@ name: drill
 # whole point of the environment.
 #
 # Prerequisites: stage 0 applied for drill, which keeps its keyring and
-# substrate.env in the Secrets Manager secret zeroroot-ai/drill/keyring and
-# its state in the prod state bucket (ADR-0083, scripts/stage0-store.sh), the
-# drill.zeroroot.ai
-# delegation, and `drill` in var.github_bringup_environments plus drill.yml in
-# the job_workflow_ref allowlist (bootstrap/eks/aws-org/github-oidc.tf). Without
-# the last two the role refuses the token and the run cannot start.
+# substrate.env in the Secrets Manager secret zeroroot-ai/drill/keyring and its
+# state under tfstate/stage0/ of the drill durable bucket (ADR-0083,
+# scripts/stage0-store.sh), the drill.zeroroot.ai delegation, and the drill role
+# drill-bringup (bootstrap/eks/aws-org/github-oidc-drill.tf) in the variable
+# DRILL_BRINGUP_ROLE_ARN of the drill environment. That role trusts only the
+# drill environment and drill.yml. eks-bringup does not trust drill.
 
 on:
   workflow_dispatch:
@@ -240,7 +240,7 @@ jobs:
         uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
-          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-arn: ${{ vars.DRILL_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-up-${{ github.run_id }}
           slots: "true"
 
@@ -367,7 +367,7 @@ jobs:
         uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
-          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-arn: ${{ vars.DRILL_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-restore-${{ github.run_id }}
           slots: "true"
 
@@ -451,7 +451,7 @@ jobs:
         uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
-          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-arn: ${{ vars.DRILL_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-rotation-${{ github.run_id }}
           slots: "true"
 
@@ -590,7 +590,7 @@ jobs:
         uses: ./.github/actions/stage0-setup
         with:
           env: ${{ env.ENV }}
-          role-arn: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-arn: ${{ vars.DRILL_BRINGUP_ROLE_ARN }}
           session-name: gh-actions-drill-teardown-${{ github.run_id }}
           slots: "true"
 

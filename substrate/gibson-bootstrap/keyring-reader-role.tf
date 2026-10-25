@@ -8,10 +8,10 @@
 # environment), only off main, and only from those three workflow files. So a
 # run in another environment cannot assume it.
 #
-# Staging, prod and drill share one AWS account, and the bringup role trusts all
-# three GitHub environments. So the bringup role is NOT a principal of the
-# keyring secret of staging or prod: this role is how recreate and teardown read
-# it. The role can read one secret: the keyring of this environment. It cannot
+# Staging, prod and drill share one AWS account, and the bringup role trusts the
+# GitHub environments of staging and prod. So the bringup role is NOT a
+# principal of the keyring secret of staging or prod: this role is how recreate
+# and teardown read it. The role can read one secret: the keyring of this environment. It cannot
 # read the state under tfstate/stage0/, which the bucket policy keeps for the
 # rotation role and the operator roles.
 #
@@ -83,6 +83,7 @@ resource "aws_iam_role" "keyring_reader" {
   name                 = local.keyring_reader_role_name
   description          = "Reads the keyring of ${var.environment} (ADR-0083). Assumed by ${var.github_repository} preflight.yml, recreate.yml and teardown.yml, off main, in the ${var.environment} GitHub environment only."
   assume_role_policy   = data.aws_iam_policy_document.keyring_reader_trust[0].json
+  permissions_boundary = local.identity_permissions_boundary_arn
   max_session_duration = 3600
 }
 

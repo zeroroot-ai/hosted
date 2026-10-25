@@ -4,12 +4,12 @@
 
 The secret zeroroot-ai/<env>/keyring (substrate/gibson-bootstrap/
 keyring-secret.tf) holds the bringup keyring of an environment. Staging, prod
-and drill share one AWS account, and the bringup role (eks-bringup) trusts the
-GitHub environments of all three, so the bringup role must not reach the keyring
-of staging or prod. Who may reach it:
+and drill share one AWS account. The bringup role (eks-bringup) trusts the
+GitHub environments of staging and prod, and staging has no required reviewer,
+so no bringup role may reach the keyring of staging or prod. Who may reach it:
 
   - the operator role OrganizationAccountAccessRole, read and write;
-  - the bringup role, for drill only (envs/drill.tfvars);
+  - the drill role drill-bringup, for drill only (envs/drill.tfvars);
   - the key rotation role of the environment, read and write, from
     rotate-credentials.yml only (rotation-role.tf);
   - the keyring reader role of the environment, read only, from preflight.yml,
@@ -44,7 +44,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 TF = ROOT / "substrate" / "gibson-bootstrap"
 OPERATOR = "OrganizationAccountAccessRole"
-DRILL_WANT = sorted([OPERATOR, "eks-bringup"])
+DRILL_WANT = sorted([OPERATOR, "drill-bringup"])
 WORKFLOWS = {
     "rotation-role.tf": ("rotation_job_workflow_refs", ["rotate-credentials.yml"]),
     "keyring-reader-role.tf": ("keyring_reader_job_workflow_refs", ["preflight.yml", "recreate.yml", "teardown.yml"]),
@@ -76,7 +76,7 @@ def tfvars_findings(text: str, name: str) -> list[str]:
     if not m:
         return []
     if name != "envs/drill.tfvars":
-        return [f"{name} sets keyring_principal_role_names: only drill may add the bringup role"]
+        return [f"{name} sets keyring_principal_role_names: only drill may add a role, its own drill-bringup"]
     if strings(m.group(1)) != DRILL_WANT:
         return [f"{name} sets keyring_principal_role_names to {strings(m.group(1))}, not {DRILL_WANT}"]
     return []
@@ -189,7 +189,8 @@ locals {
         ("no operator role in the default", lambda: var_findings(good_var.replace('"OrganizationAccountAccessRole"', '"x"')), "not exactly"),
         ("staging adds the bringup role", lambda: tfvars_findings('keyring_principal_role_names = ["OrganizationAccountAccessRole", "eks-bringup"]\n', "envs/staging.tfvars"), "only drill may"),
         ("prod sets the list", lambda: tfvars_findings('keyring_principal_role_names = ["eks-bringup"]\n', "envs/prod.tfvars"), "only drill may"),
-        ("drill sets another list", lambda: tfvars_findings('keyring_principal_role_names = ["eks-bringup", "x"]\n', "envs/drill.tfvars"), "not ["),
+        ("drill sets another list", lambda: tfvars_findings('keyring_principal_role_names = ["drill-bringup", "x"]\n', "envs/drill.tfvars"), "not ["),
+        ("drill adds the bringup role of staging and prod", lambda: tfvars_findings('keyring_principal_role_names = ["OrganizationAccountAccessRole", "eks-bringup"]\n', "envs/drill.tfvars"), "not ["),
         ("another principal in the secret policy", lambda: tf_findings(good_tf + 'identifiers = ["arn:aws:iam::1:role/x"]\n'), "something other than"),
         ("a sub that names another environment", lambda: trust_findings(good_trust.replace("${var.environment}", "staging"), rot), "sub condition"),
         ("a sub with a wildcard", lambda: trust_findings(good_trust.replace('"StringEquals"\n    variable = "token.actions.githubusercontent.com:sub"', '"StringLike"\n    variable = "token.actions.githubusercontent.com:sub"'), rot), "sub condition"),
@@ -201,7 +202,7 @@ locals {
         ("a reader that writes", lambda: grant_findings({"keyring-reader-role.tf": good_grant}), "reader role grants a write"),
     ]
     if (var_findings(good_var) or tf_findings(good_tf) or tfvars_findings('environment = "x"\n', "envs/x.tfvars")
-            or tfvars_findings('keyring_principal_role_names = ["OrganizationAccountAccessRole", "eks-bringup"]\n', "envs/drill.tfvars")
+            or tfvars_findings('keyring_principal_role_names = ["OrganizationAccountAccessRole", "drill-bringup"]\n', "envs/drill.tfvars")
             or trust_findings(good_trust, rot) or grant_findings({rot: good_grant})):
         print("check-keyring-secret: selftest: a good fixture failed", file=sys.stderr)
         return 2
@@ -231,7 +232,7 @@ def main() -> int:
     if got:
         print("check-keyring-secret:", *got, sep="\n  ", file=sys.stderr)
         return 1
-    print("✅ the keyring secret is reached by the operator role, the bringup role for drill only, and the two roles of its own environment")
+    print("✅ the keyring secret is reached by the operator role, the drill role for drill only, and the two roles of its own environment")
     return 0
 
 
