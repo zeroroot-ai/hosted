@@ -56,7 +56,14 @@ case "$args" in
   *'{.metadata.name}{"\t"}{.status.operationState.message}'*)
     printf 'gibson\t%s\n' "$(cat "$STATE/waitmsg" 2>/dev/null || true)"; exit 0 ;;
   *"get applications -o json"*)
-    cat "$STATE/apps.json" 2>/dev/null || printf '{"items":[]}'; exit 0 ;;
+    # As kubectl: managedFields only with --show-managed-fields.
+    case " $args " in
+      *" --show-managed-fields "*) cat "$STATE/apps.json" 2>/dev/null || printf '{"items":[]}' ;;
+      *) python3 -c 'import json,sys
+d=json.load(open(sys.argv[1]))
+for i in d.get("items",[]): (i.get("metadata") or {}).pop("managedFields",None)
+print(json.dumps(d))' "$STATE/apps.json" 2>/dev/null || printf '{"items":[]}' ;;
+    esac; exit 0 ;;
   *"get applications"*) printf 'gibson: sync=Synced health=Healthy\n'; exit 0 ;;
   *"get pods -A"*) cat "$STATE/pods.txt" 2>/dev/null || printf 'gibson gibson-0 1/1 Running 0 1m\n'; exit 0 ;;
   # ExternalSecrets (hosted#174). $STATE/es.txt holds the rows the jsonpath

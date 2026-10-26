@@ -27,7 +27,9 @@ argo_diag_save() {
     > "$dir/application-controller.log" 2>&1 || true
   kubectl -n argocd logs statefulset/argocd-application-controller --previous \
     > "$dir/application-controller.previous.log" 2>&1 || true
-  kubectl -n argocd get applications -o json 2>/dev/null \
+  # kubectl leaves managedFields out of -o json unless it is asked (drill run
+  # 40378003457 kept none).
+  kubectl -n argocd get applications -o json --show-managed-fields 2>/dev/null \
     | python3 "$ARGO_DIAG_LIB_DIR/argo-status-only.py" > "$dir/applications.json" 2>&1 || true
   printf '  the whole controller log and each Application are in %s\n' "$dir" >&2
 }
