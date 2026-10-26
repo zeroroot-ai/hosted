@@ -6,8 +6,9 @@ The source of an Argo Application can carry inline Helm values, and the values
 can carry a secret. The spec, the requested operation, and status fields such
 as sync.comparedTo, history and operationState.operation all hold a source. A
 run artifact of hosted is public, so this filter keeps the name of each
-Application and its status, and drops every key below that names a source or
-values, at any depth.
+Application, its managedFields (which manager wrote which field path, with no
+value) and its status, and drops every key of the status that names a source
+or values, at any depth.
 
 Usage: kubectl get applications -o json | argo-status-only.py
        argo-status-only.py --selftest
@@ -29,8 +30,19 @@ def scrub(v):
     return v
 
 
+def fields(entry: dict) -> dict:
+    """One managedFields entry: who wrote which field paths, and when. A path
+    names a field, never its value."""
+    return {k: entry.get(k) for k in ("manager", "operation", "subresource", "time", "fieldsV1")}
+
+
 def status_only(doc: dict) -> dict:
     return {"items": [{"name": (i.get("metadata") or {}).get("name"),
+                       # When the object was made and how often its spec
+                       # changed: a recreate shows as a new creation time.
+                       **{k: (i.get("metadata") or {}).get(k)
+                          for k in ("creationTimestamp", "generation", "resourceVersion")},
+                       "managedFields": [fields(m) for m in (i.get("metadata") or {}).get("managedFields") or []],
                        "status": scrub(i.get("status") or {})}
                       for i in doc.get("items", [])]}
 
@@ -43,7 +55,18 @@ def selftest() -> int:
                                  "history": [{"sources": [{"helm": {"valuesObject": {"password": "hunter2"}}}]}],
                                  "operationState": {"phase": "Running", "message": "waiting",
                                                     "operation": {"sync": {"source": {"helm": {"parameters": [{"value": "hunter2"}]}}}}}}}]}
+    doc["items"][0]["metadata"]["managedFields"] = [
+        {"manager": "argocd-controller", "operation": "Apply", "time": "t",
+         "fieldsV1": {"f:spec": {"f:sources": {}}}}]
     out = json.dumps(status_only(doc))
+    doc["items"][0]["metadata"]["creationTimestamp"] = "2026-10-26T17:00:00Z"
+    out = json.dumps(status_only(doc))
+    if '"creationTimestamp": "2026-10-26T17:00:00Z"' not in out:
+        print("argo-status-only: selftest: the creation time was lost", file=sys.stderr)
+        return 2
+    if '"manager": "argocd-controller"' not in out or '"f:sources"' not in out:
+        print("argo-status-only: selftest: the managedFields were lost", file=sys.stderr)
+        return 2
     if "hunter2" in out:
         print("argo-status-only: selftest: a value survived", file=sys.stderr)
         return 2
