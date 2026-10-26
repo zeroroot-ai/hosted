@@ -54,7 +54,7 @@ spec:
     # must never touch envs/staging/values.yaml in the same commit.
     - repoURL: ghcr.io/zeroroot-ai/charts
       chart: gibson
-      targetRevision: "0.154.5"
+      targetRevision: "0.154.6"
       helm:
         valueFiles:
           - $values/gitops/envs/drill/values.yaml
