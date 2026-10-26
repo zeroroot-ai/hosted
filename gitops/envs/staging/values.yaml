@@ -656,6 +656,21 @@ gibson-workloads:
     # umbrella pins keeps chart and image in lockstep.
     frontend:
       enabled: true
+    # The goat cluster is the demo target of staging (hosted#102), at
+    # 10.60.0.66 (targets/kubernetes-goat/envs/staging.tfvars). A tool
+    # Sandbox of a mission node bound to that Target must reach
+    # 10.60.0.66:6443, which is inside a reserved range (gibson#498).
+    # The exemption opens only this /32, for the tool class only, on
+    # staging only. The node's egress-allow-list still limits each Sandbox
+    # to the port of its bound target. specOverrides (setec 0.129.0,
+    # setec#353) replaces one key of one class, so this file does not copy
+    # the class list of the chart. scripts/check-target-egress-exemption.py
+    # fails when this address is not the private_ip of that tfvars.
+    sandboxClasses:
+      specOverrides:
+        tool:
+          egressExemptCIDRs:
+            - 10.60.0.66/32
   # -----------------------------------------------------------------------------
   # Docs — customer documentation (docs-site). No image override
   # (deploy#1403): the chart's digest pins apply. The old digest-clear +
