@@ -67,6 +67,7 @@ import {
   messagesFor,
   pickSetupLinkMessage,
 } from "../lib/mailbox.mjs";
+import { safeText, safeURL } from "../lib/redact.mjs";
 
 // ---------------------------------------------------------------------------
 // Pure helpers (selftested, no I/O)
@@ -95,14 +96,14 @@ export function extractSetupLink(body, issuerOrigin) {
     }
     if (u.pathname.endsWith("/ui/v2/login/invite")) {
       throw new Error(
-        `the setup link uses the retired /ui/v2/login/invite route, which Login v2 answers with a 404: ${raw}`,
+        `the setup link uses the retired /ui/v2/login/invite route, which Login v2 answers with a 404: ${safeURL(raw)}`,
       );
     }
     if (!u.pathname.endsWith("/ui/v2/login/verify")) continue;
     if (!u.searchParams.get("code") || !u.searchParams.get("userId")) continue;
     if (u.searchParams.get("invite") !== "true") {
       throw new Error(
-        `the setup link does not carry invite=true, so Login v2 verifies an email instead of redeeming an invite: ${raw}`,
+        `the setup link does not carry invite=true, so Login v2 verifies an email instead of redeeming an invite: ${safeURL(raw)}`,
       );
     }
     if (!raw.startsWith(issuerOrigin)) {
@@ -118,7 +119,7 @@ export function extractSetupLink(body, issuerOrigin) {
     };
   }
   throw new Error(
-    `no /ui/v2/login/verify setup link with userId+code found in the delivered mail:\n${body.slice(0, 2000)}`,
+    `no /ui/v2/login/verify setup link with userId+code found in the delivered mail:\n${safeText(body.slice(0, 2000))}`,
   );
 }
 
@@ -133,11 +134,12 @@ export function secretFromOtpauthURI(uri) {
   try {
     u = new URL(uri);
   } catch {
-    throw new Error(`the TOTP link is not a URI: ${uri}`);
+    throw new Error("the TOTP link is not a URI");
   }
   const secret = (u.searchParams.get("secret") ?? "").replace(/\s+/g, "").toUpperCase();
   if (u.protocol !== "otpauth:" || !/^[A-Z2-7]{16,}=*$/.test(secret)) {
-    throw new Error(`the TOTP link carries no base32 secret: ${uri}`);
+    // The URI holds the TOTP secret, so the error names only its scheme.
+    throw new Error(`the TOTP link (${u.protocol}) carries no base32 secret`);
   }
   return secret;
 }
@@ -173,8 +175,10 @@ export async function fillUntilHeld(locator, value, label, opts = {}) {
     last = await locator.inputValue();
     if (last === value) return;
   } while (Date.now() < deadline);
+  // The message reads nothing of either value. The field can be a password,
+  // so neither the text nor a property of it reaches a log.
   throw new Error(
-    `the ${label} field never held its value: it reads ${JSON.stringify(last)}`,
+    `the ${label} field never held its value: it holds ${last === "" ? "nothing" : "other text"}`,
   );
 }
 
@@ -286,7 +290,7 @@ async function signInThroughLanding(page, landingOrigin, { email, password, totp
       if (shown !== totpSecret) {
         totpSecret = shown;
         if (totpSecretOut) writeFileSync(totpSecretOut, totpSecret);
-        console.log(`enrolling TOTP with secret ${totpSecret.slice(0, 4)}...`);
+        console.log("enrolling TOTP with the secret of the otpauth link");
       }
       used = await freshTotpCode(totpSecret, used);
       await fillUntilHeld(code, used, "TOTP code");
@@ -497,6 +501,30 @@ async function selftest() {
     () => secretFromOtpauthURI("https://app.example.test/?secret=JBSWY3DPEHPK3PXP"),
     true,
   );
+  // hosted is public: no error or log line may carry a secret (hosted#47).
+  {
+    let msg = "";
+    try {
+      secretFromOtpauthURI("https://app.example.test/?secret=JBSWY3DPEHPK3PXP");
+    } catch (e) {
+      msg = String(e?.message ?? e);
+    }
+    if (!msg || msg.includes("JBSWY3DPEHPK3PXP")) {
+      failures += 1;
+      console.error("SELFTEST FAIL: the refusal of a TOTP link shows its secret");
+    } else {
+      console.log("selftest ok: the refusal of a TOTP link shows no secret");
+    }
+  }
+  {
+    const shown = safeText("open https://app.example.test/ui/v2/login/verify?userId=123456789&code=SECRETCODE#frag now");
+    if (shown.includes("SECRETCODE") || shown.includes("frag") || !shown.includes("code=SECR")) {
+      failures += 1;
+      console.error(`SELFTEST FAIL: safeText does not shorten a link in a text: ${shown}`);
+    } else {
+      console.log("selftest ok: safeText cuts each query value of a link to four characters");
+    }
+  }
 
   const fakeField = (resets) => {
     let v = "";
@@ -540,6 +568,23 @@ async function selftest() {
       }),
     true,
   );
+  {
+    // A field that holds other text: the error names neither the typed text
+    // nor the text in the field.
+    const other = { fill: async () => {}, inputValue: async () => "held-s3cr3t" };
+    let msg = "";
+    try {
+      await fillUntilHeld(other, "typed-s3cr3t", "password", { sleep: noSleep, timeoutMs: 0 });
+    } catch (e) {
+      msg = String(e?.message ?? e);
+    }
+    if (!msg || msg.includes("s3cr3t")) {
+      failures += 1;
+      console.error("SELFTEST FAIL: the error of a field that never holds its value shows a value");
+    } else {
+      console.log("selftest ok: the error of a field that never holds its value shows no value");
+    }
+  }
 
   const verdictCases = [
     ["a landing under /dashboard that shows the workspace passes",
@@ -692,7 +737,7 @@ async function drill() {
 
   const { browser, page } = await newPage(chromium, diagDir);
   try {
-    console.log(`opening the setup link: ${setupLink}`);
+    console.log(`opening the setup link: ${safeURL(setupLink)}`);
     await page.goto(setupLink);
 
     // Zitadel's Login v2 invite flow: verify the code, then a method chooser
@@ -722,7 +767,7 @@ async function drill() {
     if (await codeField.isVisible()) {
       const inviteCode = new URL(setupLink).searchParams.get("code");
       if (!inviteCode) {
-        throw new Error(`the verify page asks for a code, but the setup link carries none: ${setupLink}`);
+        throw new Error(`the verify page asks for a code, but the setup link carries none: ${safeURL(setupLink)}`);
       }
       await fillUntilHeld(codeField, inviteCode, "invite code");
       await submitFilled(page, [[codeField, inviteCode]], "invite code");
@@ -762,7 +807,7 @@ async function drill() {
     await otpauthLink.first().waitFor({ timeout: 30_000 });
     const totpSecret = secretFromOtpauthURI(await otpauthLink.first().getAttribute("href"));
     writeFileSync(requireEnv("TOTP_SECRET_OUT"), totpSecret);
-    console.log(`enrolling TOTP with secret ${totpSecret.slice(0, 4)}...`);
+    console.log("enrolling TOTP with the secret of the otpauth link");
 
     const code = totpCodeFor(totpSecret);
     const enrollCode = page.locator('[data-testid="code-text-input"]');
@@ -898,7 +943,7 @@ async function reset() {
         const full = await fetch(`${mailpitURL}/api/v1/message/${latest.ID}`).then((r) => r.json());
         const { link } = extractSetupLink(full.Text || full.HTML || "", issuerOrigin);
         if (link !== previousLink) {
-          console.log(`new setup link received after the generation bump: ${link}`);
+          console.log(`new setup link received after the generation bump: ${safeURL(link)}`);
           return;
         }
       }

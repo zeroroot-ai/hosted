@@ -61,6 +61,7 @@ import { findMessageFor } from "../lib/mailbox.mjs";
 // The mail of the run lands in Mailpit (kind) or in the test inbox of an AWS
 // environment (hosted#647). One reader, chosen by MAIL_SOURCE.
 import { decodeBody, mailSourceFromEnv, summary, trustedPlatformMail } from "../lib/mailsource.mjs";
+import { safeURL } from "../lib/redact.mjs";
 import process from "node:process";
 
 // ---------------------------------------------------------------------------
@@ -404,19 +405,6 @@ async function diagnose(page, diagDir, label) {
  * credential in their text: the session and step tokens live in httpOnly
  * cookies.
  */
-/** safeURL cuts the value of each query parameter to four characters. */
-function safeURL(raw) {
-  try {
-    const u = new URL(raw);
-    for (const [k, v] of u.searchParams) u.searchParams.set(k, v.length > 4 ? `${v.slice(0, 4)}…` : v);
-    // The fragment of a Checkout URL is an opaque state blob. It tells the
-    // reader nothing, so the driver never prints it.
-    u.hash = "";
-    return u.toString();
-  } catch {
-    return "<not a URL>";
-  }
-}
 
 async function describePage(page, label) {
   try {
