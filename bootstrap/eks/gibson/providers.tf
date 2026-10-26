@@ -47,11 +47,11 @@ provider "kubernetes" {
 }
 
 provider "helm" {
-  kubernetes {
+  kubernetes = {
     host                   = local.k8s_host
     cluster_ca_certificate = base64decode(local.k8s_ca)
 
-    exec {
+    exec = {
       api_version = "client.authentication.k8s.io/v1beta1"
       command     = "aws"
       args        = ["eks", "get-token", "--cluster-name", local.k8s_name, "--region", var.aws_region]
