@@ -266,6 +266,35 @@ resource "helm_release" "argocd" {
           effect   = "NoSchedule"
         }]
       }
+
+      global = {
+        # Every image from the org mirror, pinned by digest, as on kind
+        # (bootstrap/kind/gibson/operators.tf): the tags that argo-cd chart
+        # ${var.argocd_chart_version} ships. Moving the chart version means
+        # mirroring its new tags first (.github mirror-list.yaml).
+        image = {
+          repository = "ghcr.io/zeroroot-ai/mirror/argocd"
+          tag        = "v3.5.6@sha256:8e5cc5bb008df8a09dba439462e58c94c55b7735888d3ebde0c25fc05e4e5335"
+        }
+        # Chart 10 creates its own NetworkPolicies by default. This
+        # environment ran without them on chart 8, and the upgrade changes the
+        # Argo CD version only.
+        networkPolicy = {
+          create = false
+        }
+      }
+      dex = {
+        image = {
+          repository = "ghcr.io/zeroroot-ai/mirror/dex"
+          tag        = "v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab"
+        }
+      }
+      redis = {
+        image = {
+          repository = "ghcr.io/zeroroot-ai/mirror/redis"
+          tag        = "8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763"
+        }
+      }
     })
   ]
 
