@@ -5,8 +5,9 @@ Reads the JSON of `aws resourcegroupstaggingapi get-resources` on stdin and
 prints one integer: the resources that carry Environment=<env> and that a
 stage 1 teardown should have removed.
 
-Two kinds of tagged resource are NOT survivors, and the first live teardown of
-staging (2026-10-06) found both:
+Three kinds of tagged resource are NOT survivors. The first live teardown of
+staging (2026-10-06) found the first two. The drill of 2026-10-26 found the
+third (run 40323162603):
 
 1. Stage 0. The durable bucket and the delegated zone carry
    Environment=<env> too, and a teardown leaves them alone in both modes
@@ -19,6 +20,11 @@ staging (2026-10-06) found both:
    state. So an ARN of those types here is not counted again, and an ARN of a
    type that can exist only inside a VPC is not counted when the VPC count
    was zero.
+
+3. The org root. bootstrap/eks/aws-org tags the permission boundary of the
+   drill, PB-DrillBringup, with Environment=drill, so the drill can read its
+   own boundary. The org root owns it, not stage 1, and a teardown never
+   destroys it. The org root tags it Workspace=aws-org.
 
 Each other ARN is a survivor.
 
@@ -35,6 +41,8 @@ from __future__ import annotations
 import json
 import sys
 
+# The Workspace tag of bootstrap/eks/aws-org (locals.tf, common_tags).
+ORG_WORKSPACE = "aws-org"
 # Measured exactly by the describe calls of ec2-post-destroy-verify.sh.
 MEASURED = {"instance", "volume", "elastic-ip", "vpc"}
 # A resource of these types cannot exist when its VPC does not.
@@ -53,11 +61,11 @@ def ec2_type(arn: str) -> str:
 
 
 def survivors(doc: dict, env: str, vpcs: int) -> list[str]:
-    stage0 = f"zeroroot-ai-{env}-substrate"
+    durable = {f"zeroroot-ai-{env}-substrate", ORG_WORKSPACE}
     out = []
     for row in doc.get("ResourceTagMappingList", []):
         tags = {t.get("Key"): t.get("Value") for t in row.get("Tags", [])}
-        if tags.get("Workspace") == stage0:
+        if tags.get("Workspace") in durable:
             continue
         kind = ec2_type(row.get("ResourceARN", ""))
         if kind in MEASURED:
@@ -88,6 +96,17 @@ def selftest() -> int:
         ("an IAM role that the destroy missed",
          {"ResourceTagMappingList": gone["ResourceTagMappingList"]
           + [row("arn:aws:iam::1:role/zeroroot-ai-staging-node", "zeroroot-ai-staging")]}, 0, 1),
+        ("the drill boundary of the org root",
+         {"ResourceTagMappingList": gone["ResourceTagMappingList"]
+          + [row("arn:aws:iam::1:policy/PB-DrillBringup", ORG_WORKSPACE)]}, 0, 0),
+        ("the drill role and its boundary of the org root",
+         {"ResourceTagMappingList": gone["ResourceTagMappingList"]
+          + [row("arn:aws:iam::1:policy/PB-DrillBringup", ORG_WORKSPACE),
+             row("arn:aws:iam::1:role/drill-bringup", ORG_WORKSPACE)]}, 0, 0),
+        ("a missed role with a Workspace that only looks like the org root",
+         {"ResourceTagMappingList": [row("arn:aws:iam::1:role/x", ORG_WORKSPACE + "-x")]}, 0, 1),
+        ("a policy of stage 1, not of the org root",
+         {"ResourceTagMappingList": [row("arn:aws:iam::1:policy/PB-DrillBringup", "zeroroot-ai-staging")]}, 0, 1),
         ("a bucket of stage 1, not stage 0",
          {"ResourceTagMappingList": [row("arn:aws:s3:::x", "zeroroot-ai-staging")]}, 0, 1),
     ]
@@ -96,8 +115,8 @@ def selftest() -> int:
         if got != want:
             print(f"tagged-survivors: selftest: {name}: got {got}, want {want}", file=sys.stderr)
             return 2
-    print("✅ self-test: stage 0 and stale EC2 entries are not survivors; a missed role, a stage 1 bucket "
-          "and a rule in a live VPC are")
+    print("✅ self-test: stage 0, the org root and stale EC2 entries are not survivors; a missed role, "
+          "a stage 1 policy, a stage 1 bucket and a rule in a live VPC are")
     return 0
 
 
