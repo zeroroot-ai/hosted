@@ -115,3 +115,10 @@ smoke() {
   [[ "$output" == *"deleting Tenant CR smoke-gone"* ]]
   [[ "$output" != *"is still there"* ]]
 }
+
+@test "FAILING FIXTURE: a poll of 0 or a timeout that is not a number stops the smoke before it can loop for ever" {
+  run smoke SIGNUP_PROFILE=saas MAIL_SOURCE=s3 INBOX_BUCKET=bkt INBOX_DOMAIN=inbox.drill.example.test TEARDOWN_POLL=0
+  [ "$status" -eq 2 ]; [[ "$output" == *"TEARDOWN_POLL a whole number of at least 1"* ]]
+  run smoke SIGNUP_PROFILE=saas MAIL_SOURCE=s3 INBOX_BUCKET=bkt INBOX_DOMAIN=inbox.drill.example.test TEARDOWN_TIMEOUT=soon
+  [ "$status" -eq 2 ]; [[ "$output" == *"TEARDOWN_TIMEOUT must be a whole number"* ]]
+}

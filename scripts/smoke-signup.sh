@@ -111,6 +111,10 @@ TIMEOUT_TENANT="${TIMEOUT_TENANT:-120}"
 # looks (seconds).
 TEARDOWN_TIMEOUT="${TEARDOWN_TIMEOUT:-300}"
 TEARDOWN_POLL="${TEARDOWN_POLL:-5}"
+[[ "${TEARDOWN_TIMEOUT}" =~ ^[0-9]+$ && "${TEARDOWN_POLL}" =~ ^[1-9][0-9]*$ ]] || {
+  echo "smoke-signup: TEARDOWN_TIMEOUT must be a whole number of seconds and TEARDOWN_POLL a whole number of at least 1 (got ${TEARDOWN_TIMEOUT} and ${TEARDOWN_POLL})" >&2
+  exit 2
+}
 
 urlenc() {  # <value> -> the value, percent-encoded for a form body. Builtins only.
   # LC_ALL=C makes each step one byte, so a UTF-8 character becomes its bytes.
@@ -150,7 +154,7 @@ fi
 await_tenant_gone() {
   local slug="$1" waited=0 left=""
   while :; do
-    if ! capture left kubectl get tenant "${slug}" --ignore-not-found=true -o name; then
+    if ! capture left kubectl -n "${NAMESPACE}" --request-timeout=20s get tenant "${slug}" --ignore-not-found=true -o name; then
       warn "cannot read the Tenant ${slug}: ${PROBE_ERR}"
       return 1
     fi
@@ -181,7 +185,7 @@ cleanup() {
       # 500m Neo4j pod, until the node had no CPU left for the next smoke
       # (hosted#23). The smoke passed every time, because it never looked.
       local _state=""
-      capture _state kubectl get tenant "${SMOKE_SLUG}" -o 'jsonpath=deletionTimestamp={.metadata.deletionTimestamp} finalizers={.metadata.finalizers} phase={.status.phase}' || _state="unreadable: ${PROBE_ERR}"
+      capture _state kubectl -n "${NAMESPACE}" --request-timeout=20s get tenant "${SMOKE_SLUG}" -o 'jsonpath=deletionTimestamp={.metadata.deletionTimestamp} finalizers={.metadata.finalizers} phase={.status.phase}' || _state="unreadable: ${PROBE_ERR}"
       fail "the Tenant ${SMOKE_SLUG} is still there ${TEARDOWN_TIMEOUT}s after its delete (${_state}). It keeps its namespace and data-plane pods until the tenant-operator finishes the delete."
     fi
   fi
