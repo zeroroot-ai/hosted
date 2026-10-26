@@ -30,7 +30,10 @@ case "$*" in
     v=0.151.0; [ "$n" -gt "${STUB_OLD_PIN_READS:-0}" ] || v=0.150.0
     # STUB_OLD_PIN_AFTER: from this read on, the old pin again.
     [ -z "${STUB_OLD_PIN_AFTER:-}" ] || [ "$n" -lt "$STUB_OLD_PIN_AFTER" ] || v=0.150.0
-    printf '{"spec":{"sources":[{"repoURL":"ghcr.io/zeroroot-ai/charts","chart":"gibson","targetRevision":"%s"},{"repoURL":"https://github.com/zeroroot-ai/hosted","ref":"values"}]}}' "$v" ;;
+    # STUB_D91: the live source carries the recovery parameters of a restore.
+    h='"helm":{"parameters":[]}'
+    [ -z "${STUB_D91:-}" ] || h='"helm":{"parameters":[{"name":"platformPostgres.recovery.backupID","value":"x"}]}'
+    printf '{"spec":{"sources":[{"repoURL":"ghcr.io/zeroroot-ai/charts","chart":"gibson","targetRevision":"%s",%s},{"repoURL":"https://github.com/zeroroot-ai/hosted","ref":"values"}]}}' "$v" "$h" ;;
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
 esac
 SH
@@ -114,3 +117,20 @@ run_prove() {
   run grep -qx smoke "$TMP/order"
   [ "$status" -ne 0 ]
 }
+
+@test "FAILING FIXTURE: live D91 recovery parameters stop the proof at once, and name restore-settle" {
+  export STUB_LAND_FAILS=0 STUB_OLD_PIN_READS=100000 STUB_D91=1 LAND_WAIT=600
+  run_prove
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"carries the D91 recovery parameters"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"make restore-settle ENV=drill"* ]] || { echo "$output"; false; }
+  # One read, no wait for the deadline.
+  [ "$(cat "$TMP/reads")" -eq 1 ] || { cat "$TMP/reads"; false; }
+}
+
+@test "live D91 parameters at the pinned version do not stop the proof" {
+  export STUB_LAND_FAILS=0 STUB_OLD_PIN_READS=0 STUB_D91=1
+  run_prove
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
