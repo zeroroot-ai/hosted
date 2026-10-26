@@ -67,19 +67,12 @@ externalsecrets_unready() {
 # artifact. The log of a stuck operation starts long before the death: drill
 # run 40325488009 (hosted#24) kept an operation Running from 12:54, and the
 # 20000 last lines of the controller reached back only to 13:27.
+# shellcheck source=argo-diag.sh
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/argo-diag.sh"
+
 wait_apps_diagnose() {
     if [ -n "${WAIT_APPS_LOG_DIR:-}" ]; then
-      mkdir -p "$WAIT_APPS_LOG_DIR" || true
-      kubectl -n argocd logs statefulset/argocd-application-controller --since="${WAIT_APPS_LOG_SINCE:-3h}" \
-        > "$WAIT_APPS_LOG_DIR/application-controller.log" 2>&1 || true
-      kubectl -n argocd logs statefulset/argocd-application-controller --previous \
-        > "$WAIT_APPS_LOG_DIR/application-controller.previous.log" 2>&1 || true
-      # The source of an Application can hold inline Helm values, and the
-      # values can hold a secret. hosted is public, so each key that can carry
-      # a source goes before the file is written (argo-status-only.py).
-      kubectl -n argocd get applications -o json 2>/dev/null \
-        | python3 "$HERE/lib/argo-status-only.py" > "$WAIT_APPS_LOG_DIR/applications.json" 2>&1 || true
-      printf '  the whole controller log and each Application are in %s\n' "$WAIT_APPS_LOG_DIR" >&2
+      argo_diag_save "$WAIT_APPS_LOG_DIR"
     fi
     # All four fields the healthy test reads. Run 34315064565 (2026-09-09)
     # died here at 2/3 with every line reading sync=Synced health=Healthy:

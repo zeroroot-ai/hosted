@@ -431,6 +431,14 @@ jobs:
         timeout-minutes: 20
         run: make with-cluster ENV="${ENV}" CMD="test/dr/settle-probe.sh"
 
+      # The settle probe keeps no Argo state of its own, and the cluster goes
+      # with the teardown job. Drill run 40365075159 found the D91 parameters
+      # gone from the gibson Application, and nothing showed who removed
+      # them (hosted#94). The managedFields name the manager of each path.
+      - name: Keep the Argo state of a failed restore half
+        if: ${{ failure() && (steps.restore.outcome == 'failure' || steps.settle.outcome == 'failure') }}
+        run: make with-cluster ENV="${ENV}" CMD="scripts/argo-diag.sh ${RUNNER_TEMP}/argo-diag"
+
       - name: Keep the page the signup stopped on
         if: ${{ failure() && steps.restore.outcome == 'failure' }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
@@ -441,7 +449,7 @@ jobs:
           if-no-files-found: ignore
 
       - name: Keep the Argo controller log of a stuck restore
-        if: ${{ failure() && steps.restore.outcome == 'failure' }}
+        if: ${{ failure() && (steps.restore.outcome == 'failure' || steps.settle.outcome == 'failure') }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
         with:
           name: argo-diag-restore
