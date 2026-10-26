@@ -253,9 +253,12 @@ for sk in $SECRET_KEYS; do
   ns="${sk%%/*}"; rest="${sk#*/}"; sec="${rest%%/*}"
   clusters_json="$(kubectl -n "$ns" get clusters.postgresql.cnpg.io -o json)" \
     || die "cannot list the CNPG Clusters of $ns (the error is above), so a Postgres could keep the old key"
+  # The backup store and each restore source (externalClusters) of a Cluster
+  # can name the Secret. Both caches refresh on the same reconcile.
   mapfile -t cs < <(jq -r --arg s "$sec" '.items[]
-      | select((.spec.backup.barmanObjectStore.s3Credentials // {})
-               | (.accessKeyId.name == $s or .secretAccessKey.name == $s))
+      | select([(.spec.backup.barmanObjectStore.s3Credentials // empty),
+                (.spec.externalClusters[]?.barmanObjectStore.s3Credentials // empty)]
+               | any(.accessKeyId.name == $s or .secretAccessKey.name == $s))
       | .metadata.name' <<<"$clusters_json" | sort -u)
   for c in "${cs[@]}"; do
     kubectl -n "$ns" annotate clusters.postgresql.cnpg.io "$c" "cnpg.io/reloadedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite >/dev/null \

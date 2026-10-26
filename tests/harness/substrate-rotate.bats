@@ -198,6 +198,8 @@ J
         "secretAccessKey": {"name": "bringup-keyring", "key": "bucket-secret-key"}}}}}},
       {"metadata": {"name": "other-postgres"}, "spec": {"backup": {"barmanObjectStore": {"s3Credentials": {
         "accessKeyId": {"name": "other-secret", "key": "k"}}}}}},
+      {"metadata": {"name": "restore-only"}, "spec": {"externalClusters": [{"name": "src", "barmanObjectStore": {"s3Credentials": {
+        "accessKeyId": {"name": "bringup-keyring", "key": "bucket-access-key"}}}}]}},
       {"metadata": {"name": "no-backup"}, "spec": {}}]}' ;;
   "-n "*" annotate clusters.postgresql.cnpg.io "*" cnpg.io/reloadedAt="*" --overwrite")
     echo "reload $2/$5" >> "$D/log" ;;
@@ -579,6 +581,8 @@ smtp_relay_new() {
   rotate
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   grep -qx "reload gibson/platform-postgres" "$D/log" || { cat "$D/log"; false; }
+  # A Cluster that only restores from the bucket names the key in a restore source.
+  grep -qx "reload gibson/restore-only" "$D/log" || { cat "$D/log"; false; }
   run grep -q "reload gibson/other-postgres\|reload gibson/no-backup" "$D/log"
   [ "$status" -ne 0 ]
 }
