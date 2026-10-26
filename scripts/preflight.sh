@@ -127,8 +127,16 @@ fi
 # work. No shared credentials file, no profile, no instance metadata: the
 # only credential in play is the keyring's.
 # ---------------------------------------------------------------------------
-printf '[default]\ns3 =\n  addressing_style = path\n' > "$WORK/aws-config"
+# S3 answers a short fault with HTTP 500 InternalError. The CLI default of two
+# retries does not outlast one: drill run 40364197640 lost both jobs to about
+# 30 s of InternalError on GetBucketLifecycleConfiguration (hosted#94). The
+# standard retry mode backs off with jitter, and 8 attempts cover about a
+# minute. A refusal (403) is not retried, so a real miss still fails at once.
+printf '[default]\nretry_mode = standard\nmax_attempts = 8\ns3 =\n  addressing_style = path\n' > "$WORK/aws-config"
 export AWS_CONFIG_FILE="$WORK/aws-config"
+# The environment wins over the config file, so a caller that sets these
+# (for example the legacy mode) would undo the retries above. Pin them here.
+export AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=8
 export AWS_SHARED_CREDENTIALS_FILE=/dev/null
 export AWS_EC2_METADATA_DISABLED=true
 export AWS_PAGER=""
