@@ -658,6 +658,9 @@ assert params == [
     {"name": "platformPostgres.recovery.serverName", "value": os.environ["SOURCE_ARCHIVE"]},
     {"name": "platformPostgres.backup.serverName", "value": os.environ["RESTORE_ARCHIVE"]},
 ], params
+# The overlay holds the seam as an empty list (check-app-of-apps-ignore.py,
+# hosted#94), and the verb fills it.
+assert base["spec"]["sources"][0]["helm"].pop("parameters") == [], "the overlay has no empty parameters list"
 # Everything else is the overlay, unchanged.
 assert got == base, "the verb changed more than the parameters"
 PY

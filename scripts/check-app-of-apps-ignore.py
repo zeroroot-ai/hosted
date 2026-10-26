@@ -17,9 +17,13 @@ keeps it to that one path:
      Application of gitops/envs/<env>/root.yaml has one.
   3. The restore sets exactly the three parameter names of D91
      (RECOVERY_PARAMETERS in scripts/lib/restore-recovery.sh).
-  4. No env overlay gibson.yaml sets helm.parameters on that source. Git
-     values there would be ignored after the first apply, and that is a seam
-     nobody reviews.
+  4. Each env overlay gibson.yaml sets helm.parameters on that source to
+     exactly the empty list. A Git value there would be ignored after the
+     first apply, and that is a seam nobody reviews. The empty list itself is
+     required: Argo CD 3.4 and later (restoreNonIgnoredFields,
+     argoproj/argo-cd#27136) count `sources` as not ignored when the Git
+     target has no `parameters` key, and the sync then writes the restore's
+     parameters away (drill run 40378003457, hosted#94).
 
 The fixtures run first, on every invocation. A guard that cannot fail is
 worse than no guard.
@@ -157,9 +161,14 @@ def overlay_failures(apps: dict[str, str]) -> list[str]:
     for name, text in apps.items():
         doc = yaml.safe_load(text) or {}
         src = ((doc.get("spec") or {}).get("sources") or [None])[0] or {}
-        if (src.get("helm") or {}).get("parameters"):
+        helm = src.get("helm") or {}
+        if helm.get("parameters"):
             out.append("%s sets helm.parameters on the gibson chart source. That path is the restore seam that the "
                        "app-of-apps ignores, so Git values there are not reviewed after the first apply (D91)" % name)
+        elif helm.get("parameters", None) != []:
+            out.append("%s has no `parameters: []` on the gibson chart source. Without it, Argo CD 3.4 and later "
+                       "write the restore's recovery parameters away on the next sync of the app-of-apps "
+                       "(argoproj/argo-cd#27136, hosted#94)" % name)
     return out
 
 
@@ -218,6 +227,12 @@ def self_test() -> list[str]:
     if not overlay_failures({"gibson.yaml": "spec:\n  sources:\n    - chart: gibson\n      helm:\n"
                                             "        parameters:\n          - name: a\n            value: b\n"}):
         out.append("self-test: an overlay with helm.parameters on the gibson source passed")
+    if not overlay_failures({"gibson.yaml": "spec:\n  sources:\n    - chart: gibson\n      helm:\n"
+                                            "        valueFiles: [x]\n"}):
+        out.append("self-test: an overlay with no parameters key on the gibson source passed")
+    if overlay_failures({"gibson.yaml": "spec:\n  sources:\n    - chart: gibson\n      helm:\n"
+                                        "        valueFiles: [x]\n        parameters: []\n"}):
+        out.append("self-test: an overlay with `parameters: []` failed")
     return out
 
 
@@ -237,7 +252,7 @@ def main() -> int:
             print("::error::" + f)
         return 1
     print("ok: the app-of-apps ignores only /spec/sources/0/helm/parameters of Application gibson, the restore "
-          "sets only the three D91 parameters, and no overlay sets that path (%d envs)" % len(apps))
+          "sets only the three D91 parameters, and each overlay holds that path as an empty list (%d envs)" % len(apps))
     return 0
 
 
