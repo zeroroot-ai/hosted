@@ -140,6 +140,8 @@ for a in "$@"; do
   prev="$a"
 done
 echo "$op" >> "$CALLS"
+# The config that each call saw, for the retry test.
+[ -n "${AWS_CONFIG_FILE:-}" ] && [ -r "$AWS_CONFIG_FILE" ] && cp "$AWS_CONFIG_FILE" "$CALLS.config"
 case "$op" in
   put-object)
     cp "$body" "$CALLS.object"; echo '{"ETag": "\"stub\""}' ;;
@@ -384,6 +386,14 @@ set_dns_credential() {
   echo "$output"
   [ "$status" -eq 1 ]
   [[ "$output" == *"no enabled lifecycle rule for prefix tfstate/"* ]]
+}
+
+@test "FAILING FIXTURE: the bucket calls retry an S3 server fault with backoff, beyond the CLI default of two retries" {
+  run_preflight
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -qx 'retry_mode = standard' "$CALLS.config"
+  n="$(sed -n 's/^max_attempts = //p' "$CALLS.config")"
+  [ -n "$n" ] && [ "$n" -ge 8 ] || { cat "$CALLS.config"; false; }
 }
 
 @test "no lifecycle configuration at all: exit 1, lifecycle named" {
