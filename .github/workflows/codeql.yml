@@ -1,10 +1,15 @@
 # CodeQL is the only tool in CI that follows data flow through the code
 # (ADR-0018). hosted holds more than twenty Python guards, the bringup shell
-# scripts and the verb workflows, so it runs the one shared scan of the
-# organization (hosted#416). The shared workflow sets the suite
-# `security-extended`. This file sets the languages and the triggers only.
+# scripts, the verb workflows and the Node.js drivers of the exit tests
+# (test/**/*.mjs), so it runs the one shared scan of the organization
+# (hosted#416). The shared workflow sets the suite `security-extended`. This
+# file sets the languages and the triggers only.
 #
-# Check names: `codeql / CodeQL (python)` and `codeql / CodeQL (actions)`.
+# javascript-typescript covers the exit-test drivers. Until hosted#47 only the
+# default setup of 2026-10-19 had scanned them, and no later run read them.
+#
+# Check names: `codeql / CodeQL (python)`, `codeql / CodeQL (actions)` and
+# `codeql / CodeQL (javascript-typescript)`.
 # Alerts stay in the Security tab. No workflow opens an issue for an alert.
 
 name: codeql
@@ -30,4 +35,4 @@ jobs:
       security-events: write
     uses: zeroroot-ai/.github/.github/workflows/reusable-codeql.yml@4bf8d348295c9a501b97cc2ffbdc0873c285b6f2 # v0.21.1
     with:
-      languages: '["python","actions"]'
+      languages: '["python","actions","javascript-typescript"]'
