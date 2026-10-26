@@ -746,6 +746,13 @@ check-target-role-policy: ## The rendered instance role policy of a target node 
 	@python3 scripts/check-target-role-policy.py
 check: check-target-role-policy
 
+.PHONY: check-target-egress-exemption
+check-target-egress-exemption: ## The tool class egress exemption is the /32 of the demo target of its env (gibson#498)
+	@printf "$(GREEN)▶$(NC) check-target-egress-exemption...\n"
+	@python3 scripts/check-target-egress-exemption.py --selftest
+	@python3 scripts/check-target-egress-exemption.py
+check: check-target-egress-exemption
+
 .PHONY: check-bats-negation
 check-bats-negation: ## No bats test asserts with a bare `! command`, which never fails the test (hosted#12)
 	@printf "$(GREEN)▶$(NC) check-bats-negation...\n"
