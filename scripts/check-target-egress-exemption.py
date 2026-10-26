@@ -6,10 +6,12 @@ gitops/envs/<env>/values.yaml opens one /32 for the tool SandboxClass
 so that a tool Sandbox reaches the Kubernetes API of the demo target. The
 address of that target is private_ip in targets/kubernetes-goat/envs/<env>.tfvars.
 
-The guard fails when:
+Each override of a class spec is a security decision of the install, so the
+guard admits one override only: tool.egressExemptCIDRs. A new override needs
+a reviewed change to ALLOWED here. The guard fails when:
+  - an env overrides any other class or key;
   - an env sets the exemption and has no target tfvars with a private_ip;
-  - the exemption is not exactly ["<private_ip>/32"];
-  - an env with a target tfvars sets an exemption on a class other than tool.
+  - the exemption is not exactly ["<private_ip>/32"].
 
   check-target-egress-exemption.py             exit 1 on a finding, 0 when clean
   check-target-egress-exemption.py --selftest  prove that each fixture fails
@@ -25,6 +27,7 @@ import yaml
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 TARGET = "targets/kubernetes-goat/envs"
+ALLOWED = {("tool", "egressExemptCIDRs")}
 PRIVATE_IP = re.compile(r'^\s*private_ip\s*=\s*"([0-9.]+)"', re.M)
 
 
@@ -41,16 +44,17 @@ def findings(root: str) -> list[str]:
         if not os.path.isfile(path):
             continue
         over = overrides(yaml.safe_load(open(path)))
-        exempt = {cls: spec.get("egressExemptCIDRs") for cls, spec in over.items()
-                  if isinstance(spec, dict) and "egressExemptCIDRs" in spec}
-        if not exempt:
-            continue
         rel = os.path.relpath(path, root)
-        for cls in sorted(exempt):
-            if cls != "tool":
-                bad.append(f"{rel}: the class {cls!r} has an egress exemption; only the tool class reaches the demo target")
-        if "tool" not in exempt:
+        for cls, spec in sorted(over.items()):
+            keys = sorted(spec) if isinstance(spec, dict) else [repr(spec)]
+            for key in keys:
+                if (cls, key) not in ALLOWED:
+                    bad.append(f"{rel}: specOverrides.{cls}.{key} is not an allowed override; "
+                               "only tool.egressExemptCIDRs is (each override widens a class)")
+        exempt = (over.get("tool") or {}) if isinstance(over.get("tool"), dict) else {}
+        if "egressExemptCIDRs" not in exempt:
             continue
+        exempt = {"tool": exempt["egressExemptCIDRs"]}
         tfvars = os.path.join(root, TARGET, f"{env}.tfvars")
         found = PRIVATE_IP.findall(open(tfvars).read()) if os.path.isfile(tfvars) else []
         if len(found) != 1:
@@ -92,6 +96,11 @@ def selftest() -> int:
         "a second range beside the target": _tree(_values("tool", ["10.60.0.66/32", "10.0.0.0/8"]), tf),
         "an exemption on the agent class": _tree(_values("agent", ["10.60.0.66/32"]), tf),
         "an env with no target tfvars": _tree(_values("tool", ["10.60.0.66/32"]), None),
+        "a second key on the tool class": _tree(yaml.safe_dump({"gibson-workloads": {"setec": {"sandboxClasses": {
+            "specOverrides": {"tool": {"egressExemptCIDRs": ["10.60.0.66/32"],
+                                       "allowedNetworkModes": ["external-only"]}}}}}}), tf),
+        "a selector override on the connector class": _tree(yaml.safe_dump({"gibson-workloads": {"setec": {"sandboxClasses": {
+            "specOverrides": {"connector": {"egressAllowSelectors": [{"podSelector": {}}]}}}}}}), tf),
     }
     for what, root in cases.items():
         if not findings(root):
