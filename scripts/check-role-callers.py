@@ -12,10 +12,11 @@ For each role, the guard compares two sets, both ways:
   - a workflow that assumes the role and is not in the list cannot run;
   - a listed file that does not assume the role is trust with no caller.
 
-It also fails when eks-bringup trusts the drill environment
-(var.github_bringup_environments) or drill.yml. The drill runs as its own role,
-drill-bringup (github-oidc-drill.tf), so a drill run never holds the access of
-the prod verbs.
+It also fails when eks-bringup trusts the staging or the drill environment
+(var.github_bringup_environments), promote-staging.yml or drill.yml. Staging
+runs as its own role, staging-bringup (github-oidc-staging.tf), and the drill
+as drill-bringup (github-oidc-drill.tf). Neither environment has a required
+reviewer, so a run in either never holds the access of the prod verbs.
 
 Usage: scripts/check-role-callers.py            # the guard
        scripts/check-role-callers.py --selftest # prove it can fail
@@ -42,6 +43,7 @@ STAGE0_ROLES = [
 ROLES = [
     ("EKS_BRINGUP_ROLE_ARN", "gh_bringup_job_workflow_refs"),
     ("DRILL_BRINGUP_ROLE_ARN", "gh_drill_bringup_job_workflow_refs"),
+    ("STAGING_BRINGUP_ROLE_ARN", "gh_staging_bringup_job_workflow_refs"),
     ("EXIT_TEST_NODE_ROLE_ARN", "gh_exit_test_node_job_workflow_refs"),
 ]
 
@@ -73,16 +75,26 @@ def problems(tf_text: str, workflows: dict[str, str], roles=ROLES) -> list[str]:
     return bad
 
 
-def drill_problems(tf_text: str) -> list[str]:
-    """eks-bringup trusts neither the drill environment nor drill.yml."""
+# (environment that eks-bringup must not trust, its workflow, the role it runs as)
+OWN_ROLES = [
+    ("staging", "promote-staging.yml", "staging-bringup"),
+    ("drill", "drill.yml", "drill-bringup"),
+]
+
+
+def own_role_problems(tf_text: str) -> list[str]:
+    """eks-bringup trusts neither staging nor drill, nor their workflows."""
     bad = []
     m = re.search(r'variable\s+"github_bringup_environments"\s*\{.*?default\s*=\s*\[(?P<body>[^\]]*)\]', tf_text, re.S)
     if m is None:
         raise ValueError("github_bringup_environments default not found")
-    if "drill" in re.findall(r'"([^"]+)"', m.group("body")):
-        bad.append("github_bringup_environments names drill: the drill must run as drill-bringup, not as the role of the prod verbs")
-    if "drill.yml" in trusted(tf_text, "gh_bringup_job_workflow_refs"):
-        bad.append("gh_bringup_job_workflow_refs names drill.yml: the drill must run as drill-bringup, not as the role of the prod verbs")
+    envs = re.findall(r'"([^"]+)"', m.group("body"))
+    refs = trusted(tf_text, "gh_bringup_job_workflow_refs")
+    for env, workflow, role in OWN_ROLES:
+        if env in envs:
+            bad.append(f"github_bringup_environments names {env}: {env} must run as {role}, not as the role of the prod verbs")
+        if workflow in refs:
+            bad.append(f"gh_bringup_job_workflow_refs names {workflow}: {env} must run as {role}, not as the role of the prod verbs")
     return bad
 
 
@@ -126,14 +138,16 @@ def selftest() -> int:
         if bool(problems(tf, wfs, roles)) != want_bad:
             print(f"GUARD BROKEN: {label} gave the wrong result", file=sys.stderr)
             return 2
-    btf = ('variable "github_bringup_environments" {\n  type = list(string)\n  default = ["staging", "prod"]\n}\n'
+    btf = ('variable "github_bringup_environments" {\n  type = list(string)\n  default = ["prod"]\n}\n'
            'gh_bringup_job_workflow_refs = [\n  for w in ["recreate.yml"] :\n')
     for label, text, want_bad in (
-        ("the bringup role trusts the drill environment", btf.replace('"prod"]', '"prod", "drill"]'), True),
+        ("the bringup role trusts the drill environment", btf.replace('["prod"]', '["prod", "drill"]'), True),
         ("the bringup role trusts drill.yml", btf.replace('["recreate.yml"]', '["recreate.yml", "drill.yml"]'), True),
-        ("the bringup role trusts staging and prod only", btf, False),
+        ("the bringup role trusts the staging environment", btf.replace('["prod"]', '["staging", "prod"]'), True),
+        ("the bringup role trusts promote-staging.yml", btf.replace('["recreate.yml"]', '["recreate.yml", "promote-staging.yml"]'), True),
+        ("the bringup role trusts prod only", btf, False),
     ):
-        if bool(drill_problems(text)) != want_bad:
+        if bool(own_role_problems(text)) != want_bad:
             print(f"GUARD BROKEN: {label} gave the wrong result", file=sys.stderr)
             return 2
     try:
@@ -143,7 +157,7 @@ def selftest() -> int:
     else:
         print("GUARD BROKEN: a missing list was accepted", file=sys.stderr)
         return 2
-    print("✅ self-test: a caller on the wrong role, a trusted file with no caller and a bringup role that trusts drill are rejected")
+    print("✅ self-test: a caller on the wrong role, a trusted file with no caller and a bringup role that trusts staging or drill are rejected")
     return 0
 
 
@@ -153,7 +167,7 @@ def main(argv: list[str]) -> int:
     wfs = {p.name: p.read_text() for p in sorted(WORKFLOWS.glob("*.y*ml"))}
     tf = "\n".join(p.read_text() for p in sorted(TF_DIR.glob("*.tf")))
     try:
-        bad = problems(tf, wfs) + drill_problems(tf)
+        bad = problems(tf, wfs) + own_role_problems(tf)
         for var, path, local in STAGE0_ROLES:
             bad += stage0_problems(path.read_text(), wfs, var, local)
     except ValueError as e:

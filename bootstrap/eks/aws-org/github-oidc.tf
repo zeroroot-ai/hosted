@@ -28,10 +28,10 @@
 #   workflow may assume the role but do not add an approval step:
 #     - zeroroot-ai/hosted → Environment `aws-prod-apply`:
 #         required reviewers = platform owners; deployment branch rule = main
-#     - zeroroot-ai/hosted → Environments `staging` and `prod`:
-#         prod: required reviewers = platform owners; deployment branch rule
-#         = main. staging carries neither, on purpose
-#         (docs/bringup.md § Who may run what).
+#     - zeroroot-ai/hosted → Environment `prod`:
+#         required reviewers = platform owners; deployment branch rule = main.
+#         staging carries no required reviewer, so eks-bringup does not trust
+#         it. Staging runs as staging-bringup (github-oidc-staging.tf).
 #
 # This file lives in the aws-org workspace (rather than zeroroot-ai-prod) because:
 #   1. The OIDC IdP itself is account-scoped and there's value in owning it
@@ -72,16 +72,18 @@ locals {
 
   gh_apply_env_sub = "repo:${var.github_org}@*/${var.github_gitops_repo}@*:environment:${var.github_apply_environment}"
   # The bringup verbs run in the GitHub environment named by their `env`
-  # input, so the role is trusted for BOTH environment-shaped subs.
+  # input. That is prod only: staging runs as staging-bringup
+  # (github-oidc-staging.tf) and drill as drill-bringup (github-oidc-drill.tf).
   gh_bringup_env_subs = [
     for e in var.github_bringup_environments :
     "repo:${var.github_org}@*/${var.github_deploy_repo}@*:environment:${e}"
   ]
 
   # job_workflow_ref pins the exact workflow file AND the ref it was loaded
-  # from. The bringup role names its three callers. drill.yml is not one: it
-  # runs as drill-bringup (github-oidc-drill.tf), so a drill run never holds the
-  # access of the prod verbs. The gitops apply workflow has no committed caller
+  # from. The bringup role names its two callers. drill.yml is not one: it
+  # runs as drill-bringup (github-oidc-drill.tf). promote-staging.yml is not
+  # one: it runs as staging-bringup (github-oidc-staging.tf). So a run outside
+  # prod never holds the access of the prod verbs. The gitops apply workflow has no committed caller
   # yet, so pinning a path there would be a guess that locks out the first real
   # one.
   #
@@ -90,7 +92,7 @@ locals {
   # exit test that only reaches the nodes uses exit-test-node-access
   # (github-oidc-exit-tests.tf), never this administrator role (hosted#656).
   gh_bringup_job_workflow_refs = [
-    for w in ["recreate.yml", "teardown.yml", "promote-staging.yml"] :
+    for w in ["recreate.yml", "teardown.yml"] :
     "${var.github_org}/${var.github_deploy_repo}/.github/workflows/${w}@refs/heads/main"
   ]
 }
@@ -212,10 +214,11 @@ resource "aws_iam_role_policy_attachment" "tf_apply_admin" {
 
 # eks-bringup: the role the bringup verbs run as (deploy#1746).
 #
-# Its three callers are recreate.yml, teardown.yml and promote-staging.yml,
-# each workflow_dispatch-only off refs/heads/main, each running in the GitHub
-# environment its `env` input names. The drill has its own role,
-# drill-bringup (github-oidc-drill.tf). They drive `make recreate` and
+# Its two callers are recreate.yml and teardown.yml, each
+# workflow_dispatch-only off refs/heads/main, in the prod GitHub environment,
+# which has a required reviewer. The drill has its own role, drill-bringup
+# (github-oidc-drill.tf), and the staging promotion has its own role,
+# staging-bringup (github-oidc-staging.tf). They drive `make recreate` and
 # `make teardown` — a full Terraform apply and destroy of EKS and the VPC —
 # so, like tf-apply-privileged, the role is admin-equivalent in the workload
 # account, bounded by PB-OperatorMaxPermissions.
@@ -260,7 +263,7 @@ data "aws_iam_policy_document" "eks_bringup_trust" {
       values   = ["refs/heads/main"]
     }
 
-    # Only the three verb callers may assume this role — not any other
+    # Only the two verb callers may assume this role — not any other
     # workflow that happens to declare the same environment.
     condition {
       test     = "StringEquals"
@@ -275,7 +278,7 @@ resource "aws_iam_role" "eks_bringup" {
   provider = aws.prod
 
   name                 = "eks-bringup"
-  description          = "Privileged role the bringup verbs run as (deploy#1746). Assumed by zeroroot-ai/hosted's recreate.yml, teardown.yml and promote-staging.yml, workflow_dispatch-only off main, in the staging or prod GitHub environment. Runs make recreate / make teardown. The drill runs as drill-bringup."
+  description          = "Privileged role the bringup verbs run as (deploy#1746). Assumed by zeroroot-ai/hosted's recreate.yml and teardown.yml, workflow_dispatch-only off main, in the prod GitHub environment. Runs make recreate / make teardown. The drill runs as drill-bringup, the staging promotion as staging-bringup."
   assume_role_policy   = data.aws_iam_policy_document.eks_bringup_trust[0].json
   permissions_boundary = aws_iam_policy.operator_permission_boundary[0].arn
   # 6 hours, the GitHub limit of one job. Nothing needs more than one job.

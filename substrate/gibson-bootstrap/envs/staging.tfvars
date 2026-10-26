@@ -38,9 +38,13 @@ audit_lock_mode = "GOVERNANCE"
 
 # The edge TLS secret (edge-cert.tf). Staging is recreated from a workstation
 # (ADR-0095: `make recreate ENV=staging`) as OrganizationAccountAccessRole, so
-# that role runs the teardown and the bringup of staging, beside the CI
-# bringup role.
-edge_cert_principal_role_names = ["eks-bringup", "OrganizationAccountAccessRole"]
+# that role runs the teardown and the bringup of staging. No CI role runs
+# them: eks-bringup is the role of prod, and staging-bringup only promotes.
+edge_cert_principal_role_names = ["OrganizationAccountAccessRole"]
+
+# The test inbox (inbox.tf). The staging promotion reads it as staging-bringup
+# (bootstrap/eks/aws-org/github-oidc-staging.tf), not as eks-bringup.
+inbox_reader_role_name = "staging-bringup"
 
 # The key rotation role (rotation-role.tf): the access keys of this env rotate in
 # .github/workflows/rotate-credentials.yml.

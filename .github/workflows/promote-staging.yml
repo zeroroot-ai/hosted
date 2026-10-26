@@ -46,10 +46,11 @@ name: promote-staging
 # removes nothing from it.
 #
 # Prerequisites (deploy#1067): the `staging` GitHub Environment,
-# the OIDC role in vars.EKS_BRINGUP_ROLE_ARN (bootstrap/eks/aws-org github-oidc.tf,
-# eks_bringup). No Argo CD token: the Terraform variable argocd_github_pat is
+# the OIDC role in the staging environment variable STAGING_BRINGUP_ROLE_ARN
+# (bootstrap/eks/aws-org github-oidc-staging.tf, staging_bringup). It is not
+# eks-bringup, the role of the prod verbs. No Argo CD token: the Terraform variable argocd_github_pat is
 # retired (ADR-0083), and hosted is public. The role needs only read-only EC2 and SSM
-# here, because nothing applies. Formerly eks-acceptance.yml (deploy#930).
+# here, because nothing applies, and that is all staging-bringup grants. Formerly eks-acceptance.yml (deploy#930).
 
 on:
   workflow_dispatch:
@@ -107,15 +108,38 @@ jobs:
           fi
           echo "staging pins $CHART_VERSION"
 
+      # configure-aws-credentials treats an unset role-to-assume as "look for
+      # credentials elsewhere", which reads like a broken trust. Say which.
+      - name: The staging role ARN variable must be set
+        env:
+          ROLE_ARN: ${{ vars.STAGING_BRINGUP_ROLE_ARN }}
+        run: |
+          set -euo pipefail
+          if [ -z "${ROLE_ARN}" ]; then
+            echo "::error::Environment variable STAGING_BRINGUP_ROLE_ARN is not set for staging." >&2
+            echo "The staging-bringup role is defined in bootstrap/eks/aws-org/github-oidc-staging.tf." >&2
+            echo "Apply that workspace, then run:" >&2
+            echo "  gh variable set STAGING_BRINGUP_ROLE_ARN -R ${GITHUB_REPOSITORY} --env staging --body arn:aws:iam::<account-id>:role/staging-bringup" >&2
+            exit 1
+          fi
+
       - name: Configure AWS credentials (OIDC role assumption)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd  # v6
         with:
-          role-to-assume: ${{ vars.EKS_BRINGUP_ROLE_ARN }}
+          role-to-assume: ${{ vars.STAGING_BRINGUP_ROLE_ARN }}
           role-session-name: gh-actions-promote-staging-${{ github.run_id }}
           aws-region: us-east-1
           role-duration-seconds: 14400
+      # The session must be the staging role, never the role of the prod verbs.
       - name: Verify AWS credentials
-        run: aws sts get-caller-identity
+        run: |
+          set -euo pipefail
+          arn="$(aws sts get-caller-identity --query Arn --output text)"
+          echo "caller: ${arn}"
+          case "${arn}" in
+            *:assumed-role/staging-bringup/*) ;;
+            *) echo "::error::the session is ${arn}, not the staging-bringup role" >&2; exit 1 ;;
+          esac
 
       # Pinned by version and sha256 (.github/actions/install-cluster-tools).
       # `aws ssm start-session` calls the session-manager-plugin, and no

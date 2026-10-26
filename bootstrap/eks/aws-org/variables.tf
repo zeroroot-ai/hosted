@@ -50,9 +50,9 @@ variable "github_apply_environment" {
 }
 
 variable "github_bringup_environments" {
-  description = "GitHub Environment names in the deploy repo that the eks-bringup role is gated on (deploy#1198, deploy#1746). One per environment a bringup verb may target, and each must match the `environment:` a verb job declares, or the workflow can no longer assume the role. prod carries the required reviewer; staging carries none (docs/bringup.md § Who may run what). drill is never one: drill.yml runs as drill-bringup (github-oidc-drill.tf), whose boundary takes away every resource of staging and prod. scripts/check-role-callers.py fails when this list names drill."
+  description = "GitHub Environment names in the deploy repo that the eks-bringup role is gated on (deploy#1198, deploy#1746). It is prod only, and prod carries the required reviewer. The environment must match the `environment:` a verb job declares, or the workflow can no longer assume the role. staging is never one: staging has no required reviewer, and promote-staging.yml runs as staging-bringup (github-oidc-staging.tf), whose boundary takes away every resource of prod and drill. drill is never one: drill.yml runs as drill-bringup (github-oidc-drill.tf), whose boundary takes away every resource of staging and prod. scripts/check-role-callers.py fails when this list names staging or drill."
   type        = list(string)
-  default     = ["staging", "prod"]
+  default     = ["prod"]
 }
 
 variable "drill_zone_name" {
