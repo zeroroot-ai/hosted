@@ -17,7 +17,7 @@ variable "kubeconfig_path" {
 variable "argocd_version" {
   description = "ArgoCD Helm chart version."
   type        = string
-  default     = "8.1.3"
+  default     = "10.11.6"
 }
 
 # No other operator version lives here. cert-manager, external-secrets,

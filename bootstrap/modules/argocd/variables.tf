@@ -22,15 +22,18 @@ variable "route53_zone_name" {
 variable "argocd_chart_version" {
   description = "argo-cd Helm chart version (subchart of argo-helm)."
   type        = string
-  # 8.1.3 is the chart the kind dev cluster runs (bootstrap/kind/gibson,
+  # 10.11.6 is the chart the kind dev cluster runs (bootstrap/kind/gibson,
   # argocd_version), so every environment runs one Argo CD. It is Argo CD
-  # 3.0.x. 7.7.5 was Argo CD 2.13.1, whose ServerSideDiff broke on
+  # 3.5.6. Argo CD 3.0.x (chart 8.1.3) stranded a child Application at phase
+  # Running when its parent synced (argoproj/argo-cd#29253, fixed by #28201 in
+  # 3.4.4), and the drill failed on it (hosted#24). 7.7.5 was Argo CD 2.13.1,
+  # whose ServerSideDiff broke on
   # cert-manager Certificates: "error reverting webhook removed fields in
   # predicted live resource: .status.conditions: element 0: associative
   # list with keys may not have a null element" (argoproj/argo-cd#22375,
   # fixed in v2.14.8). The first staging recreate from fresh (2026-09-10)
   # spent every umbrella sync retry on exactly that ComparisonError.
-  default = "8.1.3"
+  default = "10.11.6"
 }
 
 

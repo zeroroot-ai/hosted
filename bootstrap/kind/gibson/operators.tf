@@ -86,21 +86,26 @@ resource "helm_release" "argocd" {
       # 2026-09-27 (hosted#235). The tags are the ones argo-cd chart
       # ${var.argocd_version} ships. Moving the chart version means mirroring
       # its new tags first (.github mirror-list.yaml).
+      # Chart 10 creates its own NetworkPolicies by default. kind ran without
+      # them on chart 8, and the upgrade changes the Argo CD version only.
+      networkPolicy = {
+        create = false
+      }
       image = {
         repository = "ghcr.io/zeroroot-ai/mirror/argocd"
-        tag        = "v3.0.11@sha256:1cb4ede2fc4a6332c128d9ba29d19e8cb5b76f9260dc47550a4b3b154269ff86"
+        tag        = "v3.5.6@sha256:8e5cc5bb008df8a09dba439462e58c94c55b7735888d3ebde0c25fc05e4e5335"
       }
     }
     dex = {
       image = {
         repository = "ghcr.io/zeroroot-ai/mirror/dex"
-        tag        = "v2.43.1@sha256:0881d3c9359b436d585b2061736ce271c100331e073be9178ef405ce5bf09557"
+        tag        = "v2.46.1@sha256:65b72ca0f4b0bf6d4ada84ec21da8851782563404ac7b8f926923d27ceced9ab"
       }
     }
     redis = {
       image = {
         repository = "ghcr.io/zeroroot-ai/mirror/redis"
-        tag        = "7.2.8-alpine@sha256:c88ea2979a49ca497bbf7d39241b237f86c98e58cb2f6b1bc2dd167621f819bb"
+        tag        = "8.6.4-alpine@sha256:2cc044fc5a07c9b701f8f1255a309ae9ad7856e694ac03513bf3648c01e40763"
       }
     }
   })]
