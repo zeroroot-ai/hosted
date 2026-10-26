@@ -126,10 +126,10 @@ async function fillUntilHeld(locator, value, label, opts = {}) {
     last = await locator.inputValue();
     if (last === value) return;
   } while (Date.now() < deadline);
-  // The message names lengths only. The field can be a password, so the typed
-  // text and the text that the field holds never reach a log.
+  // The message reads nothing of the typed value. The field can be a
+  // password, so neither the text nor a property of it reaches a log.
   throw new Error(
-    `the ${label} field never held its value: typed ${value.length} characters, it holds ${last.length}${last.length === 0 ? " (empty)" : ""}`,
+    `the ${label} field never held its value: it holds ${last === "" ? "nothing" : "other text"}`,
   );
 }
 
@@ -505,7 +505,9 @@ async function cardStep(page, email) {
     await page.waitForTimeout(1000);
   }
   await start.click();
-  await page.waitForURL(/checkout\.stripe\.com/, { timeout: 60_000 });
+  // The host, compared whole. A pattern match would also accept a URL that
+  // only names checkout.stripe.com in its path or in another host.
+  await page.waitForURL((u) => u.protocol === "https:" && u.hostname === "checkout.stripe.com", { timeout: 60_000 });
   refuseLiveCheckout(page.url());
   if (!/\bcs_test_/.test(page.url())) {
     throw new Error(`the signup step did not open a Stripe test Checkout session (url=${page.url().slice(0, 120)})`);
