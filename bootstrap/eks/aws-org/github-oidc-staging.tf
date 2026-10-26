@@ -16,7 +16,8 @@
 #
 #   - ec2:DescribeInstances, to find the instance by its Name tag
 #     (scripts/with-cluster.sh);
-#   - SSM commands and the port forward on the staging instance
+#   - SSM commands and the port forward on the staging cluster instance only,
+#     matched by its Environment and Name tags
 #     (scripts/lib/ec2-cluster-access.sh, scripts/lib/ssm-forward.sh);
 #   - the SES rule of the test inbox, and the mail in the inbox bucket of
 #     staging (scripts/prove-bringup.sh, test/lib/mailsource.mjs).
@@ -50,6 +51,9 @@ locals {
 
   staging_boundary_name = "PB-StagingBringup"
   staging_inbox_bucket  = "zeroroot-ai-staging-inbox-${var.prod_account_id}"
+  # The Name tag of the staging cluster instance (scripts/with-cluster.sh,
+  # CLUSTER_NAME zeroroot-ai-<env>).
+  staging_instance_name = "zeroroot-ai-${local.staging_environment}"
 }
 
 data "aws_iam_policy_document" "staging_bringup_trust" {
@@ -142,6 +146,14 @@ data "aws_iam_policy_document" "staging_bringup_access" {
       variable = "ssm:resourceTag/Environment"
       values   = [local.staging_environment]
     }
+    # The Environment tag alone also matches every other instance of staging,
+    # such as the kubernetes-goat instance. The promotion reaches the cluster
+    # instance only, which scripts/with-cluster.sh finds by this Name tag.
+    condition {
+      test     = "StringEquals"
+      variable = "ssm:resourceTag/Name"
+      values   = [local.staging_instance_name]
+    }
   }
 
   statement {
@@ -154,6 +166,9 @@ data "aws_iam_policy_document" "staging_bringup_access" {
     ]
   }
 
+  # No ssm:ListCommands or ssm:ListCommandInvocations. The promotion reads the
+  # result of its own command by its command id, and a list call would show
+  # the commands and output of every other caller in the account.
   statement {
     sid       = "ReadTheCommandResult"
     effect    = "Allow"
