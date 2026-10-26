@@ -187,6 +187,22 @@ case "$*" in
 ]}
 J
   ;;
+  # The CNPG Clusters of a namespace: platform-postgres archives with the
+  # bringup keyring, other-postgres with another Secret. CNPG_LIST_BROKEN: the
+  # list fails.
+  "-n "*" get clusters.postgresql.cnpg.io -o json")
+    [ -z "${CNPG_LIST_BROKEN:-}" ] || { echo "Unable to connect to the server" >&2; exit 1; }
+    printf '{"items": [
+      {"metadata": {"name": "platform-postgres"}, "spec": {"backup": {"barmanObjectStore": {"s3Credentials": {
+        "accessKeyId": {"name": "bringup-keyring", "key": "bucket-access-key"},
+        "secretAccessKey": {"name": "bringup-keyring", "key": "bucket-secret-key"}}}}}},
+      {"metadata": {"name": "other-postgres"}, "spec": {"backup": {"barmanObjectStore": {"s3Credentials": {
+        "accessKeyId": {"name": "other-secret", "key": "k"}}}}}},
+      {"metadata": {"name": "restore-only"}, "spec": {"externalClusters": [{"name": "src", "barmanObjectStore": {"s3Credentials": {
+        "accessKeyId": {"name": "bringup-keyring", "key": "bucket-access-key"}}}}]}},
+      {"metadata": {"name": "no-backup"}, "spec": {}}]}' ;;
+  "-n "*" annotate clusters.postgresql.cnpg.io "*" cnpg.io/reloadedAt="*" --overwrite")
+    echo "reload $2/$5" >> "$D/log" ;;
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
 esac
 SH
@@ -218,7 +234,8 @@ rotate() {
   for f in key-slots.tfvars.json key-rotation.json; do
     [ -f "$STATE/$f" ] && cp "$STATE/$f" "$D/s3/$f" || true
   done
-  run env E="${E:-staging}" D="$D" PATH="$D/bin:$PATH" SUBSTRATE_SH="$D/bin/substrate" K2C="$D/bin/k2c" SLEEP_SECS=0 RESTART_TIMEOUT=2 RESTART_PODS_POLL=0 \
+  run env E="${E:-staging}" D="$D" PATH="$D/bin:$PATH" SUBSTRATE_SH="$D/bin/substrate" K2C="$D/bin/k2c" SLEEP_SECS=0 RESTART_TIMEOUT=2 RESTART_PODS_POLL=0 CNPG_RELOAD_SECS=0 \
+    CNPG_LIST_BROKEN="${CNPG_LIST_BROKEN:-}" \
     STUB_TF_REQUIRE_INIT="${STUB_TF_REQUIRE_INIT:-}" STUB_TF_OUTPUT_FAIL="${STUB_TF_OUTPUT_FAIL:-}" WANT0="${WANT0:-}" WAIT_SECS="${WAIT_SECS:-0}" QUIET_SECS="${QUIET_SECS:-0}" U="${U:-platform}" TFRES="${TFRES:-}" APPLY_FAIL="${APPLY_FAIL:-}" \
     "$REPO/scripts/substrate-rotate.sh" "$STATE" "${E:-staging}" "${U:-platform}"
 }
@@ -555,3 +572,43 @@ smtp_relay_new() {
   [ "$status" -ne 0 ]
   [ ! -e "$STATE/.cluster-keyring-pushed" ]
 }
+
+# Drill rotation run 40402546442: CNPG cached the old platform key and used it
+# 38 minutes after the switch. The rotation reloads each CNPG Cluster that
+# archives with the rotated Secret, before the switch time.
+@test "FAILING FIXTURE: a platform rotation reloads the CNPG Cluster that archives with the bucket key, before the switch time" {
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  rotate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  grep -qx "reload gibson/platform-postgres" "$D/log" || { cat "$D/log"; false; }
+  # A Cluster that only restores from the bucket names the key in a restore source.
+  grep -qx "reload gibson/restore-only" "$D/log" || { cat "$D/log"; false; }
+  run grep -q "reload gibson/other-postgres\|reload gibson/no-backup" "$D/log"
+  [ "$status" -ne 0 ]
+}
+
+@test "the reload comes before the switch time in the output" {
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  rotate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  head="${output%%the cluster runs on the new key*}"
+  [[ "$head" == *"reloaded the CNPG Cluster gibson/platform-postgres"* ]] || { echo "$output"; false; }
+}
+
+@test "a dns rotation reloads no CNPG Cluster" {
+  export U=dns
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  rotate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  run grep -q "^reload " "$D/log"
+  [ "$status" -ne 0 ]
+}
+
+@test "FAILING FIXTURE: a CNPG Cluster list that fails stops the rotation before the switch time" {
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  CNPG_LIST_BROKEN=1 rotate
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"cannot list the CNPG Clusters of gibson"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"the cluster runs on the new key"* ]] || { echo "$output"; false; }
+}
+

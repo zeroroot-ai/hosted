@@ -237,6 +237,40 @@ for sk in $SECRET_KEYS; do
   [ "${#ws[@]}" -eq 0 ] || restart "$ns" "${ws[@]}"
 done
 
+# 3a. CNPG Postgres reads the bucket key through its Cluster, and no
+#     Deployment, StatefulSet or DaemonSet owns its pods, so readers() finds
+#     none. Its instance manager caches the archive credentials and reads them
+#     again only on a reconcile of the Cluster (CNPG 1.30,
+#     internal/management/controller/cache.go). A changed Secret starts none:
+#     drill rotation run 40402546442 found the old platform key in use 38
+#     minutes after the switch. `kubectl cnpg reload` sets the annotation
+#     cnpg.io/reloadedAt, and each instance reconciles at once. CNPG records
+#     no "reloaded" marker, so the switch time below comes CNPG_RELOAD_SECS
+#     after the annotation. No Postgres restarts (ADR-0171: no step stops the
+#     service).
+reloaded=0
+for sk in $SECRET_KEYS; do
+  ns="${sk%%/*}"; rest="${sk#*/}"; sec="${rest%%/*}"
+  clusters_json="$(kubectl -n "$ns" get clusters.postgresql.cnpg.io -o json)" \
+    || die "cannot list the CNPG Clusters of $ns (the error is above), so a Postgres could keep the old key"
+  # The backup store and each restore source (externalClusters) of a Cluster
+  # can name the Secret. Both caches refresh on the same reconcile.
+  # The guard check-secrets-off-argv refuses jq --arg in this script, so the
+  # Secret name goes in through the environment.
+  mapfile -t cs < <(CNPG_SECRET="$sec" jq -r 'env.CNPG_SECRET as $s | .items[]
+      | select([(.spec.backup.barmanObjectStore.s3Credentials // empty),
+                (.spec.externalClusters[]?.barmanObjectStore.s3Credentials // empty)]
+               | any(.accessKeyId.name == $s or .secretAccessKey.name == $s))
+      | .metadata.name' <<<"$clusters_json" | sort -u)
+  for c in "${cs[@]}"; do
+    kubectl -n "$ns" annotate clusters.postgresql.cnpg.io "$c" "cnpg.io/reloadedAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" --overwrite >/dev/null \
+      || die "could not reload the CNPG Cluster $ns/$c, so it keeps the old key"
+    say "reloaded the CNPG Cluster $ns/$c, which archives with $sec"
+    reloaded=1
+  done
+done
+[ "$reloaded" -eq 0 ] || sleep "${CNPG_RELOAD_SECS:-30}"
+
 if [ "$USER_NAME" = smtp ]; then
   # 3b. The Secret that the PlatformBootstrap names, then its readers, then
   #     the Zitadel SMTP provider.
