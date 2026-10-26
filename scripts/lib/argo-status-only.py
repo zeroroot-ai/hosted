@@ -38,6 +38,10 @@ def fields(entry: dict) -> dict:
 
 def status_only(doc: dict) -> dict:
     return {"items": [{"name": (i.get("metadata") or {}).get("name"),
+                       # When the object was made and how often its spec
+                       # changed: a recreate shows as a new creation time.
+                       **{k: (i.get("metadata") or {}).get(k)
+                          for k in ("creationTimestamp", "generation", "resourceVersion")},
                        "managedFields": [fields(m) for m in (i.get("metadata") or {}).get("managedFields") or []],
                        "status": scrub(i.get("status") or {})}
                       for i in doc.get("items", [])]}
@@ -55,6 +59,11 @@ def selftest() -> int:
         {"manager": "argocd-controller", "operation": "Apply", "time": "t",
          "fieldsV1": {"f:spec": {"f:sources": {}}}}]
     out = json.dumps(status_only(doc))
+    doc["items"][0]["metadata"]["creationTimestamp"] = "2026-10-26T17:00:00Z"
+    out = json.dumps(status_only(doc))
+    if '"creationTimestamp": "2026-10-26T17:00:00Z"' not in out:
+        print("argo-status-only: selftest: the creation time was lost", file=sys.stderr)
+        return 2
     if '"manager": "argocd-controller"' not in out or '"f:sources"' not in out:
         print("argo-status-only: selftest: the managedFields were lost", file=sys.stderr)
         return 2
