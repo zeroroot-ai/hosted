@@ -96,7 +96,7 @@ pins_chart_version() {
   # While the D91 recovery parameters of a restore are live, Argo keeps the
   # whole live sources list of the gibson Application, so the pin cannot move
   # (hosted#139). That is no wait: name the step and stop.
-  if jq -e '((.spec.sources[0].helm.parameters // []) | length) > 0' "/tmp/${APP}-app.json" >/dev/null 2>&1; then
+  if jq -e '((.spec.sources[0].helm.parameters // []) | length) > 0' "/tmp/${APP}-app.json" >/dev/null; then
     echo "prove-promotion: application/${APP} carries the D91 recovery parameters of a restore, so it stays at '${have:-nothing}' and cannot move to ${CHART_VERSION}. Run make restore-settle ENV=${ENV_NAME} first (D91)" >&2
     exit 1
   fi
