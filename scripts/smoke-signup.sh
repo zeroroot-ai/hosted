@@ -58,6 +58,9 @@
 #                INBOX_DOMAIN) (required, hosted#647)
 #   SMOKE_SLUG   tenant slug (DNS-safe)   (default: auto-generated timestamp-based)
 #   KEEP_TENANT  set "1" to skip cleanup  (default: 0)
+#   TEARDOWN_TIMEOUT  seconds cleanup waits for the deleted Tenant to be gone;
+#                a Tenant still there after that FAILS the smoke (default: 300)
+#   TEARDOWN_POLL  seconds between those reads (default: 5)
 #   TIMEOUT_TENANT  seconds to wait for   (default: 120)
 #     Tenant phase=Ready
 #
@@ -104,6 +107,10 @@ CURL_EXTRA=()
 [ -n "$CURL_RESOLVE" ] && CURL_EXTRA=(--resolve "$CURL_RESOLVE")
 KEEP_TENANT="${KEEP_TENANT:-0}"
 TIMEOUT_TENANT="${TIMEOUT_TENANT:-120}"
+# How long cleanup waits for the deleted Tenant to be gone, and how often it
+# looks (seconds).
+TEARDOWN_TIMEOUT="${TEARDOWN_TIMEOUT:-300}"
+TEARDOWN_POLL="${TEARDOWN_POLL:-5}"
 
 urlenc() {  # <value> -> the value, percent-encoded for a form body. Builtins only.
   # LC_ALL=C makes each step one byte, so a UTF-8 character becomes its bytes.
@@ -138,6 +145,22 @@ if [[ -z "${SMOKE_SLUG:-}" ]]; then
   SMOKE_SLUG="smoke-$(date +%s | tail -c 6)-$(openssl rand -hex 2)"
 fi
 
+# await_tenant_gone <slug>: 0 once the Tenant is gone, 1 when it is still there
+# after TEARDOWN_TIMEOUT seconds. A read that fails is a failure, never "gone".
+await_tenant_gone() {
+  local slug="$1" waited=0 left=""
+  while :; do
+    if ! capture left kubectl get tenant "${slug}" --ignore-not-found=true -o name; then
+      warn "cannot read the Tenant ${slug}: ${PROBE_ERR}"
+      return 1
+    fi
+    [[ -z "${left}" ]] && return 0
+    (( waited >= TEARDOWN_TIMEOUT )) && return 1
+    sleep "${TEARDOWN_POLL}"
+    waited=$(( waited + TEARDOWN_POLL ))
+  done
+}
+
 # Cleanup on exit (best-effort — finalizers handle Zitadel + FGA cleanup).
 cleanup() {
   local exit_code=$?
@@ -145,13 +168,21 @@ cleanup() {
   if [[ "${KEEP_TENANT:-0}" != "1" ]]; then
     printf "\n${CYN}--- cleanup ---%s\n" "${NC}"
     printf "  deleting Tenant CR %s (best-effort)...\n" "${SMOKE_SLUG}"
-    # --wait=false: the delete is requested, the finalizers run on their
-    # own time. A tenant whose data-plane deprovision fails keeps its
-    # finalizer (gibson#128), and a waiting delete never returns. The smoke hung on one
-    # for ten minutes on staging (2026-09-17).
+    # --wait=false: the delete is requested, and the wait below is bounded. A
+    # tenant whose data-plane deprovision fails keeps its finalizer (gibson#128),
+    # and a waiting delete never returns. The smoke hung on one for ten minutes
+    # on staging (2026-09-17).
     local _deleted=""
     if ! capture _deleted kubectl -n "${NAMESPACE}" delete tenant "${SMOKE_SLUG}" --ignore-not-found=true --wait=false; then
-      warn "the Tenant ${SMOKE_SLUG} was not deleted: ${PROBE_ERR}"
+      fail "the Tenant ${SMOKE_SLUG} was not deleted: ${PROBE_ERR}"
+    elif ! await_tenant_gone "${SMOKE_SLUG}"; then
+      # A delete that was requested is not a delete that happened. Two smoke
+      # tenants stayed in deletion for 13 days on staging, each holding a
+      # 500m Neo4j pod, until the node had no CPU left for the next smoke
+      # (hosted#23). The smoke passed every time, because it never looked.
+      local _state=""
+      capture _state kubectl get tenant "${SMOKE_SLUG}" -o 'jsonpath=deletionTimestamp={.metadata.deletionTimestamp} finalizers={.metadata.finalizers} phase={.status.phase}' || _state="unreadable: ${PROBE_ERR}"
+      fail "the Tenant ${SMOKE_SLUG} is still there ${TEARDOWN_TIMEOUT}s after its delete (${_state}). It keeps its namespace and data-plane pods until the tenant-operator finishes the delete."
     fi
   fi
   if [[ "${FAILED}" -gt 0 ]]; then
