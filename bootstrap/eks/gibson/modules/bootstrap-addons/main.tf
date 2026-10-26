@@ -25,45 +25,47 @@ resource "helm_release" "aws_lb_controller" {
   timeout    = 900
   wait       = true
 
-  set {
-    name  = "clusterName"
-    value = var.cluster_name
-  }
-  set {
-    name  = "serviceAccount.create"
-    value = "false"
-  }
-  set {
-    name  = "serviceAccount.name"
-    value = "aws-load-balancer-controller"
-  }
-  set {
-    name  = "region"
-    value = var.aws_region
-  }
-  # Launch template enforces IMDSv2 with hop limit 1 (SSRF protection), so
-  # pods can't auto-detect VPC ID via EC2 metadata. Pass it explicitly.
-  set {
-    name  = "vpcId"
-    value = var.vpc_id
-  }
+  set = [
+    {
+      name  = "clusterName"
+      value = var.cluster_name
+    },
+    {
+      name  = "serviceAccount.create"
+      value = "false"
+    },
+    {
+      name  = "serviceAccount.name"
+      value = "aws-load-balancer-controller"
+    },
+    {
+      name  = "region"
+      value = var.aws_region
+    },
+    # Launch template enforces IMDSv2 with hop limit 1 (SSRF protection), so
+    # pods can't auto-detect VPC ID via EC2 metadata. Pass it explicitly.
+    {
+      name  = "vpcId"
+      value = var.vpc_id
+    },
 
-  # Disable the cluster-wide service mutating webhook (mservice.elbv2.k8s.aws).
-  # With failurePolicy=Fail it intercepts EVERY Service create/update; during a
-  # cold standup the controller's pods aren't Ready yet (Karpenter still
-  # provisioning the node), so the webhook has no endpoints and any addon that
-  # creates a Service before the controller is up fails with "no endpoints
-  # available for service aws-load-balancer-webhook-service" — the velero addon
-  # (since removed, deploy#1193) hit this and aborted the full apply
-  # (deploy#899). The webhook's only function is to default the
-  # aws-load-balancer-type annotation on type:LoadBalancer services
-  # that omit it; our only such service (gibson envoy NLB) sets the annotation
-  # explicitly, so the mutator is unnecessary. Removing it eliminates the
-  # cluster-wide bootstrap race for every Service created during standup.
-  set {
-    name  = "enableServiceMutatorWebhook"
-    value = "false"
-  }
+    # Disable the cluster-wide service mutating webhook (mservice.elbv2.k8s.aws).
+    # With failurePolicy=Fail it intercepts EVERY Service create/update; during a
+    # cold standup the controller's pods aren't Ready yet (Karpenter still
+    # provisioning the node), so the webhook has no endpoints and any addon that
+    # creates a Service before the controller is up fails with "no endpoints
+    # available for service aws-load-balancer-webhook-service" — the velero addon
+    # (since removed, deploy#1193) hit this and aborted the full apply
+    # (deploy#899). The webhook's only function is to default the
+    # aws-load-balancer-type annotation on type:LoadBalancer services
+    # that omit it; our only such service (gibson envoy NLB) sets the annotation
+    # explicitly, so the mutator is unnecessary. Removing it eliminates the
+    # cluster-wide bootstrap race for every Service created during standup.
+    {
+      name  = "enableServiceMutatorWebhook"
+      value = "false"
+    },
+  ]
 }
 
 resource "kubernetes_service_account" "aws_lb_controller" {
