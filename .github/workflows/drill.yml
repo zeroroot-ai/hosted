@@ -266,6 +266,7 @@ jobs:
         timeout-minutes: 241
         env:
           # A stuck Argo operation keeps its whole controller log (hosted#24).
+          # The artifact is public: no Application may carry a secret inline.
           WAIT_APPS_LOG_DIR: ${{ runner.temp }}/argo-diag
         run: make recreate ENV="${ENV}" INSTANCE_TYPE="${INSTANCE_TYPE}" NODE_COUNT="${NODE_COUNT}"
 
@@ -401,6 +402,7 @@ jobs:
         id: restore
         env:
           # A stuck Argo operation keeps its whole controller log (hosted#24).
+          # The artifact is public: no Application may carry a secret inline.
           WAIT_APPS_LOG_DIR: ${{ runner.temp }}/argo-diag
         run: |
           set -euo pipefail
