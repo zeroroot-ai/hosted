@@ -38,6 +38,13 @@ spec:
       helm:
         valueFiles:
           - $values/gitops/envs/prod/values.yaml
+        # The restore seam of D91: a restore writes three recovery parameters
+        # here on the live Application, and the app-of-apps ignores this path.
+        # Git holds it as an empty list on purpose. Argo CD 3.4 and later keep
+        # an ignored live value only when the Git target has the key
+        # (argoproj/argo-cd#27136, hosted#94). scripts/check-app-of-apps-ignore.py
+        # requires the empty list.
+        parameters: []
     # source[1] — this repo as the $values ref (the prod env overlay).
     - repoURL: https://github.com/zeroroot-ai/hosted
       targetRevision: main
