@@ -1014,7 +1014,7 @@ check-install-terraform: ## The one Terraform installer fails closed: a corrupte
 	@bats tests/harness/install-terraform.bats
 
 .PHONY: check-stage0-store
-check-stage0-store: ## stage 0 state, key slots and rotation record live in the durable bucket; only drill keeps its keyring in AWS (ADR-0083, row 24)
+check-stage0-store: ## stage 0 state, key slots and rotation record live in the durable bucket; every environment keeps its keyring in the Secrets Manager secret zeroroot-ai/<env>/keyring (ADR-0083, row 24)
 	@printf "$(GREEN)▶$(NC) check-stage0-store...\n"
 	@bats tests/harness/stage0-store.bats
 	@bats tests/harness/rotate-credential.bats
