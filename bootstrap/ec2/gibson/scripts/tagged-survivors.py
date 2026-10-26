@@ -99,6 +99,12 @@ def selftest() -> int:
         ("the drill boundary of the org root",
          {"ResourceTagMappingList": gone["ResourceTagMappingList"]
           + [row("arn:aws:iam::1:policy/PB-DrillBringup", ORG_WORKSPACE)]}, 0, 0),
+        ("the drill role and its boundary of the org root",
+         {"ResourceTagMappingList": gone["ResourceTagMappingList"]
+          + [row("arn:aws:iam::1:policy/PB-DrillBringup", ORG_WORKSPACE),
+             row("arn:aws:iam::1:role/drill-bringup", ORG_WORKSPACE)]}, 0, 0),
+        ("a missed role with a Workspace that only looks like the org root",
+         {"ResourceTagMappingList": [row("arn:aws:iam::1:role/x", ORG_WORKSPACE + "-x")]}, 0, 1),
         ("a policy of stage 1, not of the org root",
          {"ResourceTagMappingList": [row("arn:aws:iam::1:policy/PB-DrillBringup", "zeroroot-ai-staging")]}, 0, 1),
         ("a bucket of stage 1, not stage 0",
