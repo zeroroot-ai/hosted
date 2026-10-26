@@ -12,7 +12,13 @@ staging (2026-10-06) found both:
    Environment=<env> too, and a teardown leaves them alone in both modes
    (ADR-0083). Stage 0 tags them Workspace=zeroroot-ai-<env>-substrate.
 
-2. EC2 resources that are already gone. The tagging API keeps returning a
+2. The organization workspace. bootstrap/eks/aws-org makes the drill role
+   drill-bringup and its boundary PB-DrillBringup, and tags both
+   Environment=drill so that the tag fence of the boundary lets the drill read
+   them (github-oidc-drill.tf). No teardown reaches them. They carry
+   Workspace=aws-org. The drill run of 2026-10-26 found the boundary.
+
+3. EC2 resources that are already gone. The tagging API keeps returning a
    terminated instance, its deleted volume and the rules of a deleted security
    group for a long time after the delete. The verify measures instances,
    volumes, addresses and VPCs exactly with the describe calls, which know the
@@ -35,6 +41,8 @@ from __future__ import annotations
 import json
 import sys
 
+# The workspace of bootstrap/eks/aws-org, which no teardown reaches.
+ORG_WORKSPACE = "aws-org"
 # Measured exactly by the describe calls of ec2-post-destroy-verify.sh.
 MEASURED = {"instance", "volume", "elastic-ip", "vpc"}
 # A resource of these types cannot exist when its VPC does not.
@@ -57,7 +65,7 @@ def survivors(doc: dict, env: str, vpcs: int) -> list[str]:
     out = []
     for row in doc.get("ResourceTagMappingList", []):
         tags = {t.get("Key"): t.get("Value") for t in row.get("Tags", [])}
-        if tags.get("Workspace") == stage0:
+        if tags.get("Workspace") in (stage0, ORG_WORKSPACE):
             continue
         kind = ec2_type(row.get("ResourceARN", ""))
         if kind in MEASURED:
@@ -90,14 +98,20 @@ def selftest() -> int:
           + [row("arn:aws:iam::1:role/zeroroot-ai-staging-node", "zeroroot-ai-staging")]}, 0, 1),
         ("a bucket of stage 1, not stage 0",
          {"ResourceTagMappingList": [row("arn:aws:s3:::x", "zeroroot-ai-staging")]}, 0, 1),
+        ("the drill role and its boundary of the organization workspace",
+         {"ResourceTagMappingList": gone["ResourceTagMappingList"]
+          + [row("arn:aws:iam::1:policy/PB-DrillBringup", "aws-org"),
+             row("arn:aws:iam::1:role/drill-bringup", "aws-org")]}, 0, 0),
+        ("a missed role with a Workspace that only looks like the organization one",
+         {"ResourceTagMappingList": [row("arn:aws:iam::1:role/x", "aws-org-x")]}, 0, 1),
     ]
     for name, doc, vpcs, want in cases:
         got = len(survivors(doc, "staging", vpcs))
         if got != want:
             print(f"tagged-survivors: selftest: {name}: got {got}, want {want}", file=sys.stderr)
             return 2
-    print("✅ self-test: stage 0 and stale EC2 entries are not survivors; a missed role, a stage 1 bucket "
-          "and a rule in a live VPC are")
+    print("✅ self-test: stage 0, the organization workspace and stale EC2 entries are not survivors; "
+          "a missed role, a stage 1 bucket and a rule in a live VPC are")
     return 0
 
 
