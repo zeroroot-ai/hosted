@@ -264,7 +264,20 @@ jobs:
       - name: Recreate from nothing
         id: up
         timeout-minutes: 241
+        env:
+          # A stuck Argo operation keeps its whole controller log (hosted#24).
+          # The artifact is public: no Application may carry a secret inline.
+          WAIT_APPS_LOG_DIR: ${{ runner.temp }}/argo-diag
         run: make recreate ENV="${ENV}" INSTANCE_TYPE="${INSTANCE_TYPE}" NODE_COUNT="${NODE_COUNT}"
+
+      - name: Keep the Argo controller log of a stuck bringup
+        if: ${{ failure() && steps.up.outcome == 'failure' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: argo-diag-up
+          path: ${{ runner.temp }}/argo-diag
+          retention-days: 7
+          if-no-files-found: ignore
 
       - name: Each node armed its own termination
         id: ceiling
@@ -387,6 +400,10 @@ jobs:
 
       - name: Preserve, then restore from that backup
         id: restore
+        env:
+          # A stuck Argo operation keeps its whole controller log (hosted#24).
+          # The artifact is public: no Application may carry a secret inline.
+          WAIT_APPS_LOG_DIR: ${{ runner.temp }}/argo-diag
         run: |
           set -euo pipefail
           # MODE=preserve prints the backup name a later recreate must carry, on
@@ -420,6 +437,15 @@ jobs:
         with:
           name: signup-diag-restore
           path: ${{ runner.temp }}/signup-diag
+          retention-days: 7
+          if-no-files-found: ignore
+
+      - name: Keep the Argo controller log of a stuck restore
+        if: ${{ failure() && steps.restore.outcome == 'failure' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9  # v7.0.2
+        with:
+          name: argo-diag-restore
+          path: ${{ runner.temp }}/argo-diag
           retention-days: 7
           if-no-files-found: ignore
 
