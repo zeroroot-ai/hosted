@@ -962,7 +962,7 @@ velero_failed_volumes() {
 
 # The name of the last backup that velero_backup made. velero_backup runs in a
 # command substitution, so it hands the name over in this file.
-VELERO_LAST_FILE="$(mktemp)"
+VELERO_LAST_FILE="${VELERO_LAST_FILE:-$(mktemp)}"
 
 # VELERO_PICKUP_WAIT: a new backup has a phase of the controller within this
 # time. A backup with no phase after it was never picked up, and it is no

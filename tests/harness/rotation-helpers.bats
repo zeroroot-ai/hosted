@@ -508,7 +508,7 @@ for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "vel
     if not m:
         sys.exit("no function %s in the script" % name)
     out.append(m.group(0))
-for const in ("VELERO_IN_FLIGHT_PHASES", "VELERO_READY_WAIT", "VELERO_PICKUP_WAIT", "VELERO_DELETE_WAIT", "VELERO_RESTARTED_AT"):
+for const in ("VELERO_IN_FLIGHT_PHASES", "VELERO_READY_WAIT", "VELERO_PICKUP_WAIT", "VELERO_DELETE_WAIT", "VELERO_RESTARTED_AT", "VELERO_LAST_FILE"):
     m = re.search(r'^%s=.*\n' % const, text, re.M)
     if not m:
         sys.exit("no %s in the script" % const)
@@ -565,7 +565,7 @@ SH
 
 run_velero() {
   PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c '
-    NS=gibson VELERO_QUEUE_WAIT="$2" VELERO_RUN_WAIT="${3:-900}" VELERO_PICKUP_WAIT=0 VELERO_READY_WAIT=0 VELERO_DELETE_WAIT=0 VELERO_RESTARTED_AT="${STUB_RESTARTED_AT-2026-10-20T13:00:00Z}"
+    NS=gibson VELERO_QUEUE_WAIT="$2" VELERO_RUN_WAIT="${3:-900}" VELERO_PICKUP_WAIT=0 VELERO_READY_WAIT=0 VELERO_DELETE_WAIT=0 VELERO_RESTARTED_AT="${STUB_RESTARTED_AT-2026-10-20T13:00:00Z}" VELERO_LAST_FILE="$STUB_DIR/last"
     sleep() { :; }
     . "$1"
     velero_backup' _ "$TMP/velero.sh" "$1" "${2:-900}"
@@ -579,6 +579,8 @@ run_velero() {
   [ "$output" = Completed ] || { echo "$output"; false; }
   [ "$(wc -l < "$TMP/reads")" -eq 4 ] || { cat "$TMP/reads"; false; }
   grep -q 'app.kubernetes.io/component: openbao' "$TMP/applied"
+  # The diagnostics after a failed backup read its name from this file.
+  grep -qE '^rotation-drill-[0-9]+-1$' "$TMP/last" || { cat "$TMP/last"; false; }
 }
 
 @test "FAILING FIXTURE: a queue that does not clear in VELERO_QUEUE_WAIT is a timeout, and no backup is created" {
