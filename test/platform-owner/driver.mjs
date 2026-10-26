@@ -298,7 +298,7 @@ async function signInThroughLanding(page, landingOrigin, { email, password, totp
     } else if (!totpSecret && (await totpChoice.count())) {
       await totpChoice.first().click({ noWaitAfter: true, timeout: 10_000 }).catch(() => {});
     } else if (onOtpPrompt && (await code.isVisible().catch(() => false))) {
-      if (!totpSecret) throw new Error(`Login v2 asks for a code at ${here}, and no TOTP secret is enrolled`);
+      if (!totpSecret) throw new Error(`Login v2 asks for a code at ${safeURL(here)}, and no TOTP secret is enrolled`);
       used = await freshTotpCode(totpSecret, used);
       if (await code.isVisible().catch(() => false)) {
         await fillUntilHeld(code, used, "TOTP code");
@@ -321,7 +321,7 @@ async function signInThroughLanding(page, landingOrigin, { email, password, totp
     }
     await page.waitForTimeout(1_000);
   }
-  throw new Error(`expected to land signed in at ${landingOrigin}, still at ${page.url()}`);
+  throw new Error(`expected to land signed in at ${landingOrigin}, still at ${safeURL(page.url())}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -658,7 +658,7 @@ async function diagnose(page, diagDir, label) {
   try {
     await page.screenshot({ path: `${diagDir}/${label}.png`, fullPage: true });
     writeFileSync(`${diagDir}/${label}.html`, await page.content());
-    console.error(`diagnostics written: ${diagDir}/${label}.{png,html} (url=${page.url()})`);
+    console.error(`diagnostics written: ${diagDir}/${label}.{png,html} (url=${safeURL(page.url())})`);
   } catch (e) {
     console.error(`diagnostics failed for ${label}: ${e}`);
   }
@@ -822,7 +822,7 @@ async function drill() {
       totpSecret,
       lastCode: code,
     });
-    console.log(`signed in: ${url}`);
+    console.log(`signed in: ${safeURL(url)}`);
   } catch (e) {
     await diagnose(page, diagDir, "drill-failure");
     throw e;
@@ -863,9 +863,9 @@ async function resignIn() {
     await page.waitForLoadState("networkidle");
     const url = page.url();
     if (/\/login|\/ui\/v2\/login/.test(url)) {
-      throw new Error(`re-sign-in did not land on the console, got ${url}`);
+      throw new Error(`re-sign-in did not land on the console, got ${safeURL(url)}`);
     }
-    console.log(`re-sign-in landed on the console: ${url}`);
+    console.log(`re-sign-in landed on the console: ${safeURL(url)}`);
   } catch (e) {
     await diagnose(page, diagDir, "resignin-failure");
     throw e;
