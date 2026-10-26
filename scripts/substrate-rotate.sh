@@ -255,7 +255,9 @@ for sk in $SECRET_KEYS; do
     || die "cannot list the CNPG Clusters of $ns (the error is above), so a Postgres could keep the old key"
   # The backup store and each restore source (externalClusters) of a Cluster
   # can name the Secret. Both caches refresh on the same reconcile.
-  mapfile -t cs < <(jq -r --arg s "$sec" '.items[]
+  # The guard check-secrets-off-argv refuses jq --arg in this script, so the
+  # Secret name goes in through the environment.
+  mapfile -t cs < <(CNPG_SECRET="$sec" jq -r 'env.CNPG_SECRET as $s | .items[]
       | select([(.spec.backup.barmanObjectStore.s3Credentials // empty),
                 (.spec.externalClusters[]?.barmanObjectStore.s3Credentials // empty)]
                | any(.accessKeyId.name == $s or .secretAccessKey.name == $s))
