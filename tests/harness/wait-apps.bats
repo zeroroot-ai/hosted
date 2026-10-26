@@ -37,7 +37,9 @@ case "$args" in
   *'{.metadata.name} {.status.sync.status}/'*) cat "$STATE/applist" 2>/dev/null; exit 0 ;;
   "-n argocd get app drill-root -o json") cat "$STATE/root.json"; exit 0 ;;
   "-n argocd get Application monitoring -o json") cat "$STATE/child.json"; exit 0 ;;
-  "-n argocd logs statefulset/argocd-application-controller --tail=20000") cat "$STATE/controller.log" 2>/dev/null; exit 0 ;;
+  "-n argocd logs statefulset/argocd-application-controller --since=3h") cat "$STATE/controller.log" 2>/dev/null; exit 0 ;;
+  "-n argocd logs statefulset/argocd-application-controller --previous") cat "$STATE/controller.previous.log" 2>/dev/null; exit 0 ;;
+  "-n argocd get applications -o yaml") printf 'items:\n- metadata:\n    name: gibson\n'; exit 0 ;;
   *"get applications"*"operationState.phase"*)
     q=$((q+1)); echo "$q" > "$STATE/queries"
     # "Running:2,Succeeded" = Running for the first 2 status queries, then Succeeded.
@@ -331,3 +333,26 @@ JSON
   [[ "$output" == *'msg="Initiated automated sync" app-namespace=argocd application=drill-root project'* ]] || { echo "$output"; false; }
   [[ "$output" != *"drill-root-other"* ]] || { echo "$output"; false; }
 }
+
+@test "FAILING FIXTURE: with WAIT_APPS_LOG_DIR a death keeps the whole controller log and each Application (hosted#24)" {
+  # Drill run 40325488009: gibson-velero kept its operation Running from 12:54,
+  # and the dump held only the controller lines from 13:27 on. The whole log of
+  # the window goes to a file, for the run artifact.
+  printf 'Running' > "$STATE/phase"
+  printf 'time="2026-10-26T12:54:56Z" level=info msg="Sync operation started" application=gibson-velero\ntime="2026-10-26T13:27:11Z" level=info msg="Skipping auto-sync" application=gibson-velero\n' > "$STATE/controller.log"
+  printf 'time="2026-10-26T12:00:00Z" level=info msg="the container before a restart"\n' > "$STATE/controller.previous.log"
+  run env WAIT_APPS_TIMEOUT=12 WAIT_APPS_LOG_DIR="$BATS_TEST_TMPDIR/argo-diag" bash "$BATS_TEST_TMPDIR/run.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the whole controller log and each Application are in $BATS_TEST_TMPDIR/argo-diag"* ]] || { echo "$output"; false; }
+  grep -q 'msg="Sync operation started" application=gibson-velero' "$BATS_TEST_TMPDIR/argo-diag/application-controller.log"
+  grep -q 'the container before a restart' "$BATS_TEST_TMPDIR/argo-diag/application-controller.previous.log"
+  grep -q 'name: gibson' "$BATS_TEST_TMPDIR/argo-diag/applications.yaml"
+}
+
+@test "with no WAIT_APPS_LOG_DIR a death writes no log file" {
+  printf 'Running' > "$STATE/phase"
+  run env WAIT_APPS_TIMEOUT=12 bash "$BATS_TEST_TMPDIR/run.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" != *"the whole controller log"* ]] || { echo "$output"; false; }
+}
+

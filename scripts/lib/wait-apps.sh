@@ -59,7 +59,23 @@ externalsecrets_unready() {
 #
 # A diagnostic NEVER changes the exit path: every command here ends in
 # `|| true`, and the caller dies after it, with the same message as before.
+#
+# When WAIT_APPS_LOG_DIR is set, the whole application controller log of the
+# last WAIT_APPS_LOG_SINCE (3h), the log of a controller container that
+# restarted, and the YAML of each Application go to files there, for a run
+# artifact. The log of a stuck operation starts long before the death: drill
+# run 40325488009 (hosted#24) kept an operation Running from 12:54, and the
+# 20000 last lines of the controller reached back only to 13:27.
 wait_apps_diagnose() {
+    if [ -n "${WAIT_APPS_LOG_DIR:-}" ]; then
+      mkdir -p "$WAIT_APPS_LOG_DIR" || true
+      kubectl -n argocd logs statefulset/argocd-application-controller --since="${WAIT_APPS_LOG_SINCE:-3h}" \
+        > "$WAIT_APPS_LOG_DIR/application-controller.log" 2>&1 || true
+      kubectl -n argocd logs statefulset/argocd-application-controller --previous \
+        > "$WAIT_APPS_LOG_DIR/application-controller.previous.log" 2>&1 || true
+      kubectl -n argocd get applications -o yaml > "$WAIT_APPS_LOG_DIR/applications.yaml" 2>&1 || true
+      printf '  the whole controller log and each Application are in %s\n' "$WAIT_APPS_LOG_DIR" >&2
+    fi
     # All four fields the healthy test reads. Run 34315064565 (2026-09-09)
     # died here at 2/3 with every line reading sync=Synced health=Healthy:
     # the third app's operation phase was what held it, and this dump did
@@ -184,7 +200,7 @@ for a in json.load(sys.stdin).get("items", []):
       # The controller log of this Application: why its operation stays
       # open (a sync timeout, a retry, a self-heal loop), with its times.
       printf '  --- the application controller log of %s, the last 40 lines:\n' "$app" >&2
-      kubectl -n argocd logs statefulset/argocd-application-controller --tail=20000 2>/dev/null \
+      kubectl -n argocd logs statefulset/argocd-application-controller --since="${WAIT_APPS_LOG_SINCE:-3h}" 2>/dev/null \
         | grep -E "application=\"?(argocd/)?${app}([\" ]|$)" | tail -n 40 | cut -c1-400 | sed 's/^/    /' >&2 || true
     done
 }
