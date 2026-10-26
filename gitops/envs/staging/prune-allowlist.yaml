@@ -45,42 +45,18 @@
 # retiredBy (the PR/issue that removed the source), reason, observed (the date
 # the orphan was verified live).
 
-resources:
-  # 2026-10-17 (hosted#748): six earlier entries (three gibson-grafana-*
-  # ConfigMaps, ExternalSecret gibson-db-secrets, and ClusterRole and
-  # ClusterRoleBinding gibson-dashboard-crd) were deleted. Their prune ran:
-  # the last green promote-staging run (38484395075, chart 0.148.0) reported
-  # no reviewed residue, so none of them was live.
-  # charts#710 (chart 0.150.0) deleted the provider catalogue: gibson v0.161.0
-  # reads every model list from the provider's own API (gibson#1194) and no
-  # longer reads GIBSON_PROVIDERS_CATALOGUE_PATH. The chart 0.150.0 render
-  # holds no provider-catalogue ConfigMap, and the daemon StatefulSet at that
-  # pin mounts no volume of that name.
-  - group: ""
-    kind: ConfigMap
-    namespace: gibson
-    name: gibson-gibson-workloads-provider-catalogue
-    retiredBy: charts#710
-    reason: the daemon reads model lists from each provider's API, and nothing mounts the catalogue
-    observed: "2026-10-25"
-  # charts#758 (chart 0.154.0) removed the login-client Secret writer of the
-  # Zitadel chart. The upstream chart then renders no Role with a Secret verb
-  # for the Zitadel ServiceAccount, and no RoleBinding for it. The removal is
-  # on purpose: that Role let the Zitadel ServiceAccount write Secrets. The
-  # golden renders at v0.154.4 hold no Role or RoleBinding gibson-zitadel. On
-  # 2026-10-25 staging ran chart 0.154.4, and the Application listed both as
-  # OutOfSync with requiresPruning.
-  - group: rbac.authorization.k8s.io
-    kind: Role
-    namespace: gibson
-    name: gibson-zitadel
-    retiredBy: charts#758
-    reason: the Zitadel ServiceAccount no longer writes Secrets, so its Secret write Role leaves on purpose
-    observed: "2026-10-25"
-  - group: rbac.authorization.k8s.io
-    kind: RoleBinding
-    namespace: gibson
-    name: gibson-zitadel
-    retiredBy: charts#758
-    reason: it binds the retired Role gibson-zitadel to the Zitadel ServiceAccount
-    observed: "2026-10-25"
+# 2026-10-17 (hosted#748): six earlier entries (three gibson-grafana-*
+# ConfigMaps, ExternalSecret gibson-db-secrets, and ClusterRole and
+# ClusterRoleBinding gibson-dashboard-crd) were deleted. Their prune ran:
+# the last green promote-staging run (38484395075, chart 0.148.0) reported
+# no reviewed residue, so none of them was live.
+#
+# 2026-10-26: three entries of hosted#114 were deleted. Their prune ran at
+# 2026-10-26T12:28:49Z, and the Application gibson then read Synced and
+# Healthy with no prune residue:
+#   - ConfigMap gibson-gibson-workloads-provider-catalogue, retired by
+#     charts#710 (chart 0.150.0)
+#   - Role and RoleBinding gibson-zitadel, retired by charts#758, which first
+#     shipped in chart v0.153.0 (hosted#114 said 0.154.0 in error). That Role
+#     let the Zitadel ServiceAccount write Secrets.
+resources: []
