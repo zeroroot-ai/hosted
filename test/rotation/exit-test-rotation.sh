@@ -946,6 +946,24 @@ velero_diagnose() {
   } >&2 || true
 }
 
+# velero_failed_volumes NAME: each PodVolumeBackup of the backup that did not
+# complete, with its pod, volume, phase and message, on stderr. A backup that
+# ends PartiallyFailed names no volume of its own: drill rotation run
+# 40402546442 failed the keyring class on one, with no cause in the log.
+velero_failed_volumes() {
+  {
+    echo "    --- the PodVolumeBackups of backup $1 that did not complete ---"
+    kubectl -n velero get podvolumebackups.velero.io -l "velero.io/backup-name=$1" -o json 2>&1 \
+      | jq -r '.items[] | select(.status.phase != "Completed")
+               | "      \(.spec.pod.namespace)/\(.spec.pod.name) \(.spec.volume): \(.status.phase // "no phase") \(.status.message // "")"' 2>&1
+    kubectl -n velero get backups.velero.io "$1" -o jsonpath='      errors={.status.errors} warnings={.status.warnings}{"\n"}' 2>&1
+  } >&2 || true
+}
+
+# The name of the last backup that velero_backup made. velero_backup runs in a
+# command substitution, so it hands the name over in this file.
+VELERO_LAST_FILE="${VELERO_LAST_FILE:-$(mktemp)}"
+
 # VELERO_PICKUP_WAIT: a new backup has a phase of the controller within this
 # time. A backup with no phase after it was never picked up, and it is no
 # result of the repository password. It is deleted, so that a later restart of
@@ -987,6 +1005,7 @@ velero_backup() {
   while :; do
     attempt=$(( attempt + 1 ))
     name="rotation-drill-$(date +%s)-${attempt}"
+    printf '%s' "$name" > "$VELERO_LAST_FILE"
     kubectl apply -f - >/dev/null <<YAML || { echo create-failed; return; }
 apiVersion: velero.io/v1
 kind: Backup
@@ -1125,7 +1144,11 @@ class_keyring_generated_keys() {
     printf 'VELERO_REPO_PASSWORD=%s\n' "$(head -c 32 /dev/urandom | base64 -w0)" >> "$work/velero.env" )
   velero_refusal_step "$work" || { rm -rf "$work"; return 1; }
   phase="$(velero_backup)"
-  [ "$phase" = Completed ] || { miss "a backup with the keyring repository password ends ${phase}"; rm -rf "$work"; return 1; }
+  if [ "$phase" != Completed ]; then
+    velero_diagnose "$(cat "$VELERO_LAST_FILE")"
+    velero_failed_volumes "$(cat "$VELERO_LAST_FILE")"
+    miss "a backup with the keyring repository password ends ${phase}"; rm -rf "$work"; return 1
+  fi
   ok "a backup with the keyring repository password completes"
 
   # 5. Back to the key of stage 0, through the same path. The drill keyring
