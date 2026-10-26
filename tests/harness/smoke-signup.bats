@@ -26,6 +26,12 @@ case "$*" in
   *"get secret "*) echo "Error from server (NotFound)" >&2; exit 1 ;;
   *"get pods --no-headers"*) echo "x 1/1 Running"; exit 0 ;;
   *"jsonpath={.items[0].status.phase}"*) printf Running; exit 0 ;;
+  # The cleanup of the smoke (hosted#23). TENANT_MODE=stuck is a Tenant that
+  # keeps its finalizer after the delete. Any other mode is a Tenant that is
+  # gone at the first read.
+  *"delete tenant "*) echo "tenant deleted"; exit 0 ;;
+  *"get tenant "*"jsonpath="*) echo 'deletionTimestamp=2026-10-13T10:00:00Z finalizers=["gibson.zeroroot.ai/tenant-final"] phase=Deleting'; exit 0 ;;
+  *"get tenant "*"-o name"*) [ "${TENANT_MODE:-gone}" = stuck ] && echo "tenant.gibson.zeroroot.ai/smoke-stuck"; exit 0 ;;
   # The suite stops after the driver; every later read is undeclared, and an
   # undeclared read fails, as on a cluster that has no such object (hosted#654).
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
@@ -93,4 +99,26 @@ smoke() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"has no STRIPE_SECRET_KEY. Set the keyring member STRIPE_SECRET_KEY"* ]]
   [ ! -s "$CALLS" ]
+}
+
+@test "FAILING FIXTURE: a Tenant that is still there after its delete fails the smoke and names why" {
+  run smoke SIGNUP_PROFILE=saas MAIL_SOURCE=s3 INBOX_BUCKET=bkt INBOX_DOMAIN=inbox.drill.example.test \
+    KEEP_TENANT=0 SMOKE_SLUG=smoke-stuck TENANT_MODE=stuck TEARDOWN_TIMEOUT=1 TEARDOWN_POLL=1
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"the Tenant smoke-stuck is still there 1s after its delete"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"finalizers=[\"gibson.zeroroot.ai/tenant-final\"]"* ]]
+}
+
+@test "a Tenant that is gone after its delete is not reported as left behind" {
+  run smoke SIGNUP_PROFILE=saas MAIL_SOURCE=s3 INBOX_BUCKET=bkt INBOX_DOMAIN=inbox.drill.example.test \
+    KEEP_TENANT=0 SMOKE_SLUG=smoke-gone TENANT_MODE=gone TEARDOWN_TIMEOUT=1 TEARDOWN_POLL=1
+  [[ "$output" == *"deleting Tenant CR smoke-gone"* ]]
+  [[ "$output" != *"is still there"* ]]
+}
+
+@test "FAILING FIXTURE: a poll of 0 or a timeout that is not a number stops the smoke before it can loop for ever" {
+  run smoke SIGNUP_PROFILE=saas MAIL_SOURCE=s3 INBOX_BUCKET=bkt INBOX_DOMAIN=inbox.drill.example.test TEARDOWN_POLL=0
+  [ "$status" -eq 2 ]; [[ "$output" == *"TEARDOWN_POLL a whole number of at least 1"* ]]
+  run smoke SIGNUP_PROFILE=saas MAIL_SOURCE=s3 INBOX_BUCKET=bkt INBOX_DOMAIN=inbox.drill.example.test TEARDOWN_TIMEOUT=soon
+  [ "$status" -eq 2 ]; [[ "$output" == *"TEARDOWN_TIMEOUT must be a whole number"* ]]
 }
