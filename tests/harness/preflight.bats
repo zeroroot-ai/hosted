@@ -142,6 +142,7 @@ done
 echo "$op" >> "$CALLS"
 # The config that each call saw, for the retry test.
 [ -n "${AWS_CONFIG_FILE:-}" ] && [ -r "$AWS_CONFIG_FILE" ] && cp "$AWS_CONFIG_FILE" "$CALLS.config"
+printf '%s %s\n' "${AWS_RETRY_MODE:-unset}" "${AWS_MAX_ATTEMPTS:-unset}" > "$CALLS.retryenv"
 case "$op" in
   put-object)
     cp "$body" "$CALLS.object"; echo '{"ETag": "\"stub\""}' ;;
@@ -394,6 +395,10 @@ set_dns_credential() {
   grep -qx 'retry_mode = standard' "$CALLS.config"
   n="$(sed -n 's/^max_attempts = //p' "$CALLS.config")"
   [ -n "$n" ] && [ "$n" -ge 8 ] || { cat "$CALLS.config"; false; }
+  # A caller's legacy mode in the environment does not undo it.
+  AWS_RETRY_MODE=legacy AWS_MAX_ATTEMPTS=2 run_preflight
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(cat "$CALLS.retryenv")" = "standard 8" ] || { cat "$CALLS.retryenv"; false; }
 }
 
 @test "no lifecycle configuration at all: exit 1, lifecycle named" {

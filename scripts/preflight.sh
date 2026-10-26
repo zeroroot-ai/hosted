@@ -134,6 +134,9 @@ fi
 # minute. A refusal (403) is not retried, so a real miss still fails at once.
 printf '[default]\nretry_mode = standard\nmax_attempts = 8\ns3 =\n  addressing_style = path\n' > "$WORK/aws-config"
 export AWS_CONFIG_FILE="$WORK/aws-config"
+# The environment wins over the config file, so a caller that sets these
+# (for example the legacy mode) would undo the retries above. Pin them here.
+export AWS_RETRY_MODE=standard AWS_MAX_ATTEMPTS=8
 export AWS_SHARED_CREDENTIALS_FILE=/dev/null
 export AWS_EC2_METADATA_DISABLED=true
 export AWS_PAGER=""
