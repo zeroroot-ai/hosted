@@ -34,7 +34,7 @@ spec:
     # touch envs/prod/values.yaml in the same commit.
     - repoURL: ghcr.io/zeroroot-ai/charts
       chart: gibson
-      targetRevision: "0.146.1"
+      targetRevision: "0.154.6"
       helm:
         valueFiles:
           - $values/gitops/envs/prod/values.yaml
