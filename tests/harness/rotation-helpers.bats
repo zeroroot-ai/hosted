@@ -508,7 +508,7 @@ for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "vel
     if not m:
         sys.exit("no function %s in the script" % name)
     out.append(m.group(0))
-for const in ("VELERO_IN_FLIGHT_PHASES", "VELERO_READY_WAIT", "VELERO_PICKUP_WAIT", "VELERO_DELETE_WAIT", "VELERO_RESTARTED_AT", "VELERO_LAST_FILE"):
+for const in ("VELERO_IN_FLIGHT_PHASES", "VELERO_READY_WAIT", "VELERO_PICKUP_WAIT", "VELERO_DELETE_WAIT", "VELERO_RESTARTED_AT", "VELERO_LAST_FILE", "VELERO_SCHEDULE"):
     m = re.search(r'^%s=.*\n' % const, text, re.M)
     if not m:
         sys.exit("no %s in the script" % const)
@@ -525,6 +525,12 @@ case "$*" in
     if [ "$(wc -l < "$STUB_DIR/reads")" -le "${STUB_BUSY:-0}" ]; then p=InProgress; else p=Completed; fi
     printf '{"items":[{"metadata":{"name":"platform-hourly-1"},"status":{"phase":"%s"}}]}' "$p" ;;
   "apply -f -") cat > "$STUB_DIR/applied"; echo x >> "$STUB_DIR/applies" ;;
+  # The shipped Schedule, in the shape of helm/gibson-velero (charts):
+  # every tenant namespace, and the kinds that the RBAC denies excluded.
+  # STUB_NO_SCHEDULE: the read fails.
+  "-n velero get schedule.velero.io/platform-hourly -o json")
+    [ -z "${STUB_NO_SCHEDULE:-}" ] || { echo 'Error from server (NotFound): schedules.velero.io "platform-hourly" not found' >&2; exit 1; }
+    echo '{"metadata":{"name":"platform-hourly","namespace":"velero"},"spec":{"schedule":"0 * * * *","template":{"includedNamespaces":["gibson","tenant-*"],"excludedNamespaceScopedResources":["secrets","*.generators.external-secrets.io"],"excludedClusterScopedResources":["helmchartconfigs.helm.cattle.io"],"includedClusterScopedResources":["tenants.gibson.zeroroot.ai"],"defaultVolumesToFsBackup":true,"ttl":"720h0m0s"}}}' ;;
   # The storage locations. STUB_BSL: the phase (default Available).
   # STUB_BSL_VALIDATED: the lastValidationTime (default: far in the future).
   "-n velero get backupstoragelocations.velero.io -o jsonpath="*) printf '%s %s\n' "${STUB_BSL:-Available}" "${STUB_BSL_VALIDATED-2099-01-01T00:00:00Z}" ;;
@@ -578,9 +584,31 @@ run_velero() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$output" = Completed ] || { echo "$output"; false; }
   [ "$(wc -l < "$TMP/reads")" -eq 4 ] || { cat "$TMP/reads"; false; }
-  grep -q 'app.kubernetes.io/component: openbao' "$TMP/applied"
+  # The spec of the shipped Schedule, narrowed to the OpenBao pod of the
+  # release namespace. Its exclusions stay (drill rotation run 40438631534).
+  jq -e '.kind == "Backup" and .metadata.namespace == "velero"
+         and .spec.includedNamespaces == ["gibson"]
+         and .spec.labelSelector.matchLabels["app.kubernetes.io/component"] == "openbao"
+         and (.spec.excludedNamespaceScopedResources | index("secrets"))
+         and .spec.excludedClusterScopedResources == ["helmchartconfigs.helm.cattle.io"]
+         and .spec.defaultVolumesToFsBackup == true and .spec.ttl == "1h0m0s"' "$TMP/applied" \
+    || { cat "$TMP/applied"; false; }
   # The diagnostics after a failed backup read its name from this file.
   grep -qE '^rotation-drill-[0-9]+-1$' "$TMP/last" || { cat "$TMP/last"; false; }
+}
+
+@test "FAILING FIXTURE: a Schedule that cannot be read makes no backup, and is never a refusal" {
+  velero_helpers
+  export STUB_BUSY=0 STUB_PHASE=PartiallyFailed STUB_NO_SCHEDULE=1
+  run_velero 3600
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(printf '%s\n' "$output" | tail -n 1)" = no-schedule ] || { echo "$output"; false; }
+  # The error of the read stays on stderr.
+  [[ "$output" == *'schedules.velero.io "platform-hourly" not found'* ]] || { echo "$output"; false; }
+  [ ! -e "$TMP/applied" ]
+  run bash -c '. "$1"; miss() { echo "MISS $*"; return 1; }; VELERO_SCHEDULE=platform-hourly; password_refused no-schedule' _ "$TMP/velero.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"MISS the Schedule velero/platform-hourly could not be read"* ]] || { echo "$output"; false; }
 }
 
 @test "FAILING FIXTURE: a queue that does not clear in VELERO_QUEUE_WAIT is a timeout, and no backup is created" {
