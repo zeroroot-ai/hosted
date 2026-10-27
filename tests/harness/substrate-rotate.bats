@@ -85,6 +85,8 @@ case "$*" in
   # Only an access key that the test made exists.
   "iam get-access-key-last-used --access-key-id "*)
     for a in "$@"; do case "$prev" in --access-key-id) id="$a" ;; esac; prev="$a"; done
+    # LAST_USED_FAIL=<id>: the call for that key fails, as a throttle or a denied call does.
+    [ "$id" != "${LAST_USED_FAIL:-}" ] || { echo "An error occurred (Throttling) when calling the GetAccessKeyLastUsed operation: Rate exceeded" >&2; exit 254; }
     case "$id" in AKIA[A-Z]BBBBBBBBBBBBBBB|AKIAAAAAAAAAAAAAAAAA) ;; *) echo "aws stub: no access key ${id}" >&2; exit 254 ;; esac ;;
   *) echo "aws stub: undeclared call: $*" >&2; exit 1 ;;
 esac
@@ -335,6 +337,23 @@ slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfva
   rotate
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(jq -c .halted "$STATE/key-rotation.json")" = '{"dns":1200}' ]
+}
+
+@test "FAILING FIXTURE: a failed last-used read of the old key stops the rotation before the delete, and both keys stay" {
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  LAST_USED_FAIL=AKIAAAAAAAAAAAAAAAAA rotate
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"did not answer for the last use of the old key"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"Rate exceeded"* ]] || { echo "$output"; false; }
+  [ "$(slots)" = '{"active":"b","keep":["a","b"]}' ]
+  [ "$(jq -c 'keys' "$D/keys.json")" = '["a","b"]' ]
+}
+
+@test "FAILING FIXTURE: a failed last-used read of the new key stops the rotation, and is never a wait" {
+  LAST_USED_FAIL=AKIABBBBBBBBBBBBBBBB rotate
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"did not answer for the last use of the new key"* ]] || { echo "$output"; false; }
+  [ "$(jq -c 'keys' "$D/keys.json")" = '["a","b"]' ]
 }
 
 @test "a use of the old key while its readers restart is not a consumer that still holds it" {

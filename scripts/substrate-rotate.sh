@@ -150,10 +150,18 @@ apply() {
   rm -rf "$work"
 }
 key_id() { tf output -json access_key_ids | jq -r --arg u "$USER_NAME" --arg s "$1" '.[$u][$s] // empty'; }
-last_used() {  # $1 key id: the epoch of its last use, or 0
+# last_used ID: the epoch of the last use of the access key ID, or 0 when AWS
+# answers None. A call that fails returns 1, and its error stays on stderr. A
+# failed call read as 0 was "never used since the switch", and step 6 then
+# deleted a key that a consumer could still hold (review of hosted#149).
+last_used() {
   local d
-  d="$(aws iam get-access-key-last-used --access-key-id "$1" --query 'AccessKeyLastUsed.LastUsedDate' --output text 2>/dev/null || true)"
-  case "$d" in ''|None) echo 0 ;; *) date -d "$d" +%s ;; esac
+  d="$(aws iam get-access-key-last-used --access-key-id "$1" --query 'AccessKeyLastUsed.LastUsedDate' --output text)" || return 1
+  case "$d" in
+    None) echo 0 ;;
+    '') echo "AWS gave an empty last-used time for $1" >&2; return 1 ;;
+    *) date -d "$d" +%s ;;
+  esac
 }
 
 active="$(slots_get '.key_slots[$u].active')"
@@ -371,7 +379,8 @@ if [ "$USER_NAME" = smtp ]; then
   say "the relay $host:$port accepts the new SMTP credential"
 else
   deadline=$(( $(date +%s) + WAIT_SECS ))
-  until [ "$(last_used "$new_id")" -gt 0 ]; do
+  until nlu="$(last_used "$new_id")" || die "AWS did not answer for the last use of the new key $new_id (the error is above); both keys stay"
+        [ "$nlu" -gt 0 ]; do
     [ "$(date +%s)" -lt "$deadline" ] || stop "AWS reports no use of the new key $new_id yet; run again to continue"
     sleep "$SLEEP_SECS"
   done
@@ -387,7 +396,8 @@ fi
 #    time starts again. A use after the recorded one halts again. AWS keeps
 #    only the time of the last use, so without this a halt could never clear
 #    (drill run 40418009633).
-olu="$(last_used "$old_id")"
+olu="$(last_used "$old_id")" \
+  || die "AWS did not answer for the last use of the old key $old_id (the error is above); both keys stay"
 if [ "$olu" -ge "$switched" ]; then
   halted="$(jq -r --arg u "$USER_NAME" '.halted[$u] // 0' "$SWITCHED")"
   if [ "$olu" -eq "$halted" ] && [ "$olu" -lt "$restarted" ]; then
