@@ -996,6 +996,11 @@ case "$*" in
   "-n gibson get jobs --sort-by=.metadata.creationTimestamp -o name")
     # STUB_JOBS: the Job list, oldest first.
     printf '%b' "${STUB_JOBS:-job.batch/gibson-redis-rotation-29872250\njob.batch/other-job\n}" ;;
+  "-n gibson get pods -l job-name=gibson-zitadel-masterkey-rotation-"*" -o json")
+    echo '{"items":[{"metadata":{"name":"gibson-zitadel-masterkey-rotation-29885000-lxnnt"},"status":{"phase":"Failed","initContainerStatuses":[{"name":"read","state":{"terminated":{"reason":"Completed","exitCode":0}}},{"name":"rewrap","state":{"terminated":{"reason":"OOMKilled","exitCode":137}}}],"containerStatuses":[{"name":"write","state":{"waiting":{"reason":"PodInitializing"}}}]}}]}' ;;
+  "-n gibson get pods -l job-name=gibson-redis-rotation-"*" -o json")
+    [ -z "${STUB_PODS_REFUSED:-}" ] || { echo 'Error from server (Forbidden): pods is forbidden: User "x" cannot list resource "pods"' >&2; exit 1; }
+    echo '{"items":[]}' ;;
   "-n gibson logs job.batch/gibson-zitadel-masterkey-rotation-"*" --all-containers --tail=20")
     echo "[masterkey] FATAL: the marker decrypts with neither the current nor the next masterkey; nothing changes" ;;
   "-n gibson logs job.batch/gibson-redis-rotation-"*" --all-containers --tail=20")
@@ -1030,6 +1035,18 @@ SH
   [[ "$output" == *"[masterkey] FATAL: the marker decrypts with neither"* ]] || { echo "$output"; false; }
   [[ "$output" == *"log of job.batch/gibson-redis-rotation-29885009"* ]] || { echo "$output"; false; }
   [[ "$output" != *"gibson-redis-rotation-29885007"* ]] || { echo "$output"; false; }
+  # How each container ended, for one that leaves no log (review of hosted#163).
+  [[ "$output" == *"gibson-zitadel-masterkey-rotation-29885000-lxnnt Failed"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"rewrap: terminated OOMKilled exit 137"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"write: waiting PodInitializing"* ]] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: a refused pod list prints the kubectl error, not a jq parse error (review of hosted#164)" {
+  diag_setup
+  run env PATH="$TMP/bin:$PATH" STUB_PODS_REFUSED=1 bash -c 'set -euo pipefail; NS=gibson RELEASE=gibson; . "$1"; diagnose_failed_class redis-password' _ "$TMP/diag.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *'kubectl: Error from server (Forbidden): pods is forbidden'* ]] || { echo "$output"; false; }
+  [[ "$output" != *"parse error"* ]] || { echo "$output"; false; }
 }
 
 @test "FAILING FIXTURE: a diagnostics run where every kubectl read fails does not stop a script under set -euo pipefail" {
