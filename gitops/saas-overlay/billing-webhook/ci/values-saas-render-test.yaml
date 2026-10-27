@@ -13,3 +13,9 @@ postgres:
   host: "platform-postgres-rw.gibson.svc.cluster.local"
   passwordSecretName: "gibson-platform-postgres-credentials"
 # CI uses the digest-pinned default from values.yaml (no image override needed).
+
+identityAdmission:
+  # The account of the core Reloader, which restarts this Deployment on a new
+  # Postgres login role (hosted#162). check-env-renders-at-pin.py step 6
+  # checks it against the Reloader Deployment of the core render.
+  reloaderPrincipal: "system:serviceaccount:gibson:reloader"
