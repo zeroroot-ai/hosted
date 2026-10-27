@@ -863,6 +863,16 @@ bao_ids() {
 # moment it leaves the queue, and the time in the queue counts against
 # VELERO_QUEUE_WAIT. A timeout prints "timeout:<phase>", which is never a
 # result of the repository password.
+#
+# The spec is spec.template of the shipped Schedule (VELERO_SCHEDULE), the
+# same source as the backup of a preserve teardown. Only the namespace, the
+# OpenBao label selector and the ttl change. The template excludes the kinds
+# that the RBAC of the Velero server denies (secrets, the ESO generators, the
+# k3s Helm kinds). A spec of its own with no exclusions ended PartiallyFailed
+# on 44 refused lists, with either password (drill rotation run 40438631534),
+# so neither backup said anything about the password. A Schedule that cannot
+# be read prints "no-schedule".
+VELERO_SCHEDULE="${VELERO_SCHEDULE:-platform-hourly}"
 # 1200 s: an hourly backup of a cluster that is an hour old takes 5 to 8
 # minutes (staging, hosted#731). The drill.yml step budget counts this wait.
 VELERO_QUEUE_WAIT="${VELERO_QUEUE_WAIT:-1200}"
@@ -1004,7 +1014,7 @@ velero_delete_backup() {
 }
 
 velero_backup() {
-  local name phase="" deadline queue_deadline busy pickup_deadline attempt=0
+  local name phase="" deadline queue_deadline busy pickup_deadline attempt=0 spec
   queue_deadline=$(( $(date +%s) + VELERO_QUEUE_WAIT ))
   while :; do
     # A list that cannot be read is not an empty queue.
@@ -1014,24 +1024,19 @@ velero_backup() {
     sleep 15
   done
   velero_storage_ready || { velero_diagnose "(none made yet)"; printf 'timeout:storage-location'; return; }
+  spec="$(kubectl -n velero get "schedule.velero.io/${VELERO_SCHEDULE}" -o json)" || { printf 'no-schedule'; return; }
+  spec="$(jq -ce --arg ns "$NS" '.spec.template
+        | .includedNamespaces = [$ns]
+        | .labelSelector = {matchLabels: {"app.kubernetes.io/component": "openbao"}}
+        | .defaultVolumesToFsBackup = true
+        | .ttl = "1h0m0s"' <<<"$spec")" || { printf 'no-schedule'; return; }
   while :; do
     attempt=$(( attempt + 1 ))
     name="rotation-drill-$(date +%s)-${attempt}"
     printf '%s' "$name" > "$VELERO_LAST_FILE"
-    kubectl apply -f - >/dev/null <<YAML || { echo create-failed; return; }
-apiVersion: velero.io/v1
-kind: Backup
-metadata:
-  name: ${name}
-  namespace: velero
-spec:
-  includedNamespaces: ["${NS}"]
-  labelSelector:
-    matchLabels:
-      app.kubernetes.io/component: openbao
-  defaultVolumesToFsBackup: true
-  ttl: 1h0m0s
-YAML
+    jq -n --arg name "$name" --argjson spec "$spec" \
+      '{apiVersion: "velero.io/v1", kind: "Backup", metadata: {name: $name, namespace: "velero"}, spec: $spec}' \
+      | kubectl apply -f - >/dev/null || { echo create-failed; return; }
     deadline=""
     pickup_deadline=$(( $(date +%s) + VELERO_PICKUP_WAIT ))
     while :; do
@@ -1067,6 +1072,7 @@ password_refused() {
     PartiallyFailed|Failed) return 0 ;;
     Completed) miss "a backup with a password that is not the keyring password completed" ;;
     FailedValidation) miss "the backup with another repository password failed validation, so it never read the repository" ;;
+    no-schedule) miss "the Schedule velero/${VELERO_SCHEDULE} could not be read (the error is above), so no backup was made and the refusal is not proved" ;;
     timeout:unreconciled) miss "the Velero server did not pick up the backup with another repository password in two tries (no phase), so it proves no refusal. The diagnostics of the Velero server are above" ;;
     timeout:stale-backup) miss "a backup that Velero never picked up could not be deleted, so the restart on the keyring password would run it, and it would end Completed. Delete the Backup rotation-drill-* in the velero namespace and run again" ;;
     timeout:storage-location) miss "no BackupStorageLocation was Available after the restart of the Velero server, so no backup could start and the refusal is not proved. The diagnostics are above" ;;
