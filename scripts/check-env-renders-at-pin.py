@@ -495,7 +495,13 @@ _MATCHES = re.compile(r"^request\.namespace\.matches\('([^']*)'\)$")
 
 def condition_excludes(expr: str, ns: str) -> bool:
     """True only when a term of the && of expr is a known shape that ns
-    fails: request.namespace.startsWith('x') or request.namespace.matches('re')."""
+    fails: request.namespace.startsWith('x') or request.namespace.matches('re').
+    An expression with || is not a pure && chain: CEL reads a || b && c as
+    a || (b && c), so it can hold for ns, and it never excludes (review of
+    hosted#165). A term must match the shape exactly, so a negated or a
+    parenthesized term never excludes either."""
+    if "||" in str(expr):
+        return False
     for term in str(expr).split("&&"):
         t = " ".join(term.split())
         m = _STARTS.match(t)
@@ -713,6 +719,11 @@ def self_test(tmp: pathlib.Path) -> list[str]:
     if reloader_admission_failures("fx", "0.1.0", rl + vap("tr", False, None,
             "request.namespace.startsWith('tenant-') && !request.namespace.endsWith('-plugins')")):
         out.append("self-test: a policy whose && starts with a tenant prefix failed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("or", False, None,
+            "request.userInfo.username == 'x' || request.operation == 'UPDATE' && request.namespace.startsWith('tenant-')")):
+        out.append("self-test: a match condition with || passed step 6 as if it left the namespace out")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("neg", False, None, "!request.namespace.startsWith('tenant-')")):
+        out.append("self-test: a negated startsWith passed step 6 as if it left the namespace out")
     if not reloader_admission_failures("fx", "0.1.0", rl + vap("gpref", False, None, "request.namespace.startsWith('gib')")):
         out.append("self-test: a startsWith prefix that the release namespace has passed step 6")
     return out
