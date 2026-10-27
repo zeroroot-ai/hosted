@@ -1449,6 +1449,24 @@ pg_su() {  # SQL: run as the Postgres superuser in the CNPG primary. A failed
   printf '%s\n' "$out"
 }
 
+# pg_role_holders ROLE: on stderr, each client of a session of ROLE, with the
+# pod behind its address and the count. A count of sessions names no
+# consumer: drill rotation run 40456829215 kept 6 sessions of the old role of
+# gibson_platform for 50 minutes, and the run could not say whose they were.
+pg_role_holders() {
+  local rows pods
+  rows="$(pg_su "SELECT coalesce(host(client_addr), 'local') || '|' || coalesce(nullif(application_name, ''), '-') || '|' || count(*) FROM pg_stat_activity WHERE usename = '$1' GROUP BY client_addr, application_name ORDER BY 1")" || rows="(pg_stat_activity could not be read)"
+  pods="$(kubectl get pods -A -o json 2>/dev/null \
+    | jq -r '.items[] | select(.status.podIP) | "\(.status.podIP) \(.metadata.namespace)/\(.metadata.name) \(.status.startTime // "-")"')" || pods=""
+  {
+    echo "    --- the sessions of the login role $1: client address, application, count, pod ---"
+    while IFS='|' read -r addr app n; do
+      [ -n "$addr" ] || continue
+      printf '      %s %s %s %s\n' "$addr" "$app" "${n:-}" "$(awk -v a="$addr" '$1 == a { print $2 " started " $3; exit }' <<<"$pods")"
+    done <<<"$rows"
+  } >&2 || true
+}
+
 # consumer_on_role <workload> <role> <since epoch> <deadline epoch>: the
 # workload runs on <role>. Two proofs (hosted#591):
 #   1. a new generation: every pod of the workload that is not being deleted
@@ -1541,7 +1559,7 @@ class_postgres_role_passwords() {
         || { miss "${workload} is not ready on the new login role"; return 1; }
       until sessions="$(pg_su "SELECT count(*) FILTER (WHERE usename = '${new}') || ' ' || count(*) FILTER (WHERE usename = '${old}') FROM pg_stat_activity")" \
             && [ "${sessions%% *}" -gt 0 ] && [ "${sessions##* }" = 0 ]; do
-        [ "$(date +%s)" -lt "$deadline" ] || { miss "${workload}: sessions of the new and the old login role are ${sessions}"; return 1; }
+        [ "$(date +%s)" -lt "$deadline" ] || { pg_role_holders "$old"; miss "after the rollout of ${workload}: sessions of the new and the old login role are ${sessions}, counted over every consumer of the role, not ${workload} alone. The holders of the old role are above"; return 1; }
         sleep 15
       done
       ok "${workload} runs on the new login role of ${owner}, and no session holds the old one"

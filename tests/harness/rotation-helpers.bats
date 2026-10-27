@@ -1287,3 +1287,48 @@ SH
   [ "$output" = "code=[200]" ] || { echo "$output"; false; }
   grep -qx '::add-mask::the-pat' "$TMP/stderr" || { cat "$TMP/stderr"; false; }
 }
+
+# --- pg_role_holders (drill rotation run 40456829215) -----------------------
+@test "FAILING FIXTURE: pg_role_holders names the pod and the application behind each session of the old role" {
+  python3 - "$TEST" "$TMP/holders.sh" <<'PY2'
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r"^pg_role_holders\(\) \{.*?^\}\n", text, re.M | re.S)
+if not m:
+    sys.exit("no function pg_role_holders in the script")
+open(sys.argv[2], "w").write(m.group(0))
+PY2
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "get pods -A -o json")
+    echo '{"items":[{"metadata":{"namespace":"gibson","name":"gibson-gibson-workloads-0"},"status":{"podIP":"10.42.0.9","startTime":"2026-10-27T05:00:00Z"}},{"metadata":{"namespace":"gibson","name":"gibson-dashboard-abc"},"status":{"podIP":"10.42.0.7","startTime":"2026-10-27T06:30:00Z"}}]}' ;;
+  *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$TMP/bin/kubectl"
+  PATH="$TMP/bin:$PATH" run bash -c '
+    . "$1"
+    pg_su() { printf "%s\n" "10.42.0.9|gibson daemon pool|6" "10.42.0.250|-|1"; }
+    pg_role_holders gibson_platform_old 2>&1; echo rc=$?' _ "$TMP/holders.sh"
+  [[ "$output" == *"10.42.0.9 gibson daemon pool 6 gibson/gibson-gibson-workloads-0 started 2026-10-27T05:00:00Z"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"10.42.0.250 - 1 "* ]] || { echo "$output"; false; }
+  [[ "$output" == *"rc=0"* ]] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: pg_role_holders with a failed read says so and never fails its caller" {
+  python3 - "$TEST" "$TMP/holders.sh" <<'PY2'
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r"^pg_role_holders\(\) \{.*?^\}\n", text, re.M | re.S)
+if not m:
+    sys.exit("no function pg_role_holders in the script")
+open(sys.argv[2], "w").write(m.group(0))
+PY2
+  mkdir -p "$TMP/bin"; printf '#!/usr/bin/env bash\nexit 1\n' > "$TMP/bin/kubectl"; chmod +x "$TMP/bin/kubectl"
+  PATH="$TMP/bin:$PATH" run bash -c 'set -euo pipefail; . "$1"; pg_su() { return 1; }; pg_role_holders r 2>&1; echo after' _ "$TMP/holders.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"(pg_stat_activity could not be read)"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"after"* ]] || { echo "$output"; false; }
+}
