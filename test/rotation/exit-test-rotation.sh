@@ -2615,13 +2615,15 @@ redact_stream() {
 # before it exits, so no line comes after the parent goes on.
 run_one_class() {
   local rc=0 out_pid err_pid
-  VELERO_REDACT_FILE="$(umask 077 && mktemp)"
+  # Under RUNNER_TEMP when the runner sets it: the runner empties that
+  # directory at the end of the job, so even the KILL case leaves no file.
+  VELERO_REDACT_FILE="$(umask 077 && mktemp -p "${RUNNER_TEMP:-${TMPDIR:-/tmp}}")"
   # The file holds passwords. The EXIT trap removes it on a normal end.
   # timeout stops the whole group with TERM, the filters too. Bash then
   # writes its note about the killed command to the dead stderr pipe and
   # dies of SIGPIPE before any EXIT trap, so the TERM trap removes the file
-  # first. Only the KILL of --kill-after can leave it, in the mktemp
-  # directory of the runner.
+  # first. Only the KILL of --kill-after can leave it, and the runner then
+  # deletes it with RUNNER_TEMP at the end of the job.
   trap 'rm -f "$VELERO_REDACT_FILE"' EXIT
   trap 'rm -f "$VELERO_REDACT_FILE"; exit 143' TERM
   # The keyring repository password is known before the class starts. The

@@ -1387,3 +1387,17 @@ PY2
   wait "$waiter" || true
   [ ! -e "$f" ] || { echo "the file $f is still there"; false; }
 }
+
+@test "FAILING FIXTURE: the file of passwords of a class child is a mode-600 file under RUNNER_TEMP" {
+  redact_fu_helpers
+  mkdir -p "$TMP/runner-temp"
+  printf 'VELERO_REPO_PASSWORD=k3yring-pw\n' > "$TMP/keyring.env"
+  RUNNER_TEMP="$TMP/runner-temp" KEYRING_FILE="$TMP/keyring.env" ROTATION_REASON_FILE="$TMP/reason" run bash -c '. "$1"
+    look_class() { printf "%s %s\n" "$VELERO_REDACT_FILE" "$(stat -c %a "$VELERO_REDACT_FILE")" > "$1"; }
+    run_one_class look_class "$2"' _ "$TMP/fu.sh" "$TMP/seen"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  read -r f mode < "$TMP/seen"
+  [[ "$f" == "$TMP/runner-temp/"* ]] || { echo "the file is at $f"; false; }
+  [ "$mode" = 600 ] || { echo "mode $mode"; false; }
+  [ ! -e "$f" ] || { echo "the file $f is still there"; false; }
+}
