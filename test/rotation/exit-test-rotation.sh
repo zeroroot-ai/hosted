@@ -2559,7 +2559,10 @@ redact_add() {
 # that the class adds while it runs counts from its next line. The one filter
 # for all output of a class (coordinator, hosted#154): Velero error text can
 # quote a repository URL or an error of the open call, and nobody knows all
-# the strings it prints.
+# the strings it prints. A value is plain text: index and substr, never a
+# pattern of gsub, so & \\ . * [ in a password match only themselves. A value
+# shorter than 3 characters is skipped: an empty or tiny value would cut
+# most positions of a line, and no password of the keyring is that short.
 redact_stream() {
   awk -v f="${VELERO_REDACT_FILE:-/dev/null}" '
     function cut(s, v,   out, i) {
@@ -2567,7 +2570,7 @@ redact_stream() {
       while ((i = index(s, v)) > 0) { out = out substr(s, 1, i - 1) "[redacted]"; s = substr(s, i + length(v)) }
       return out s
     }
-    { while ((getline v < f) > 0) if (v != "") $0 = cut($0, v)
+    { while ((getline v < f) > 0) if (length(v) >= 3) $0 = cut($0, v)
       close(f); print; fflush() }'
 }
 

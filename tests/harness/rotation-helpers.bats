@@ -1222,3 +1222,33 @@ SH
   [[ "$output" != *"k3yring-pw"* ]] || { echo "$output"; false; }
   [ "$(cat "$TMP/reason")" = "the class saw [redacted]" ] || { cat "$TMP/reason"; false; }
 }
+
+# redact_stream alone, from the script text (coordinator, hosted#154).
+redact_only() {
+  python3 - "$TEST" "$TMP/rs.sh" <<'PY2'
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r"^redact_stream\(\) \{.*?^\}\n", text, re.M | re.S)
+if not m:
+    sys.exit("no function redact_stream in the script")
+open(sys.argv[2], "w").write(m.group(0))
+PY2
+}
+
+@test "FAILING FIXTURE: redact_stream skips an empty value and a value of one or two characters" {
+  redact_only
+  printf '\na\nab\nabc\n' > "$TMP/values"
+  run bash -c '. "$1"; printf "a cab dabc ab\n" | VELERO_REDACT_FILE="$2" redact_stream' _ "$TMP/rs.sh" "$TMP/values"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "a cab d[redacted] ab" ] || { echo "$output"; false; }
+}
+
+@test "redact_stream matches a password with & \\ . * [ ( as plain text" {
+  redact_only
+  pw='p&w\1.*[x(y'
+  printf '%s\n' "$pw" > "$TMP/values"
+  line="key=${pw} and pAw\\1zz[x(y and p&w\\1.*[x(y."
+  run bash -c '. "$1"; printf "%s\n" "$3" | VELERO_REDACT_FILE="$2" redact_stream' _ "$TMP/rs.sh" "$TMP/values" "$line"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = 'key=[redacted] and pAw\1zz[x(y and [redacted].' ] || { echo "$output"; false; }
+}
