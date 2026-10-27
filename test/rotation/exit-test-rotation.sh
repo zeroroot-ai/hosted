@@ -1025,7 +1025,12 @@ velero_backup() {
   done
   velero_storage_ready || { velero_diagnose "(none made yet)"; printf 'timeout:storage-location'; return; }
   spec="$(kubectl -n velero get "schedule.velero.io/${VELERO_SCHEDULE}" -o json)" || { printf 'no-schedule'; return; }
+  # A template with no excludedNamespaceScopedResources lists the kinds that
+  # the RBAC denies, and every backup fails on them, with either password.
+  # orLabelSelectors goes: Velero refuses a spec with both selectors.
   spec="$(jq -ce --arg ns "$NS" '.spec.template
+        | select((.excludedNamespaceScopedResources // []) | length > 0)
+        | del(.orLabelSelectors)
         | .includedNamespaces = [$ns]
         | .labelSelector = {matchLabels: {"app.kubernetes.io/component": "openbao"}}
         | .defaultVolumesToFsBackup = true
@@ -1080,6 +1085,37 @@ password_refused() {
   esac
 }
 
+# VELERO_PASSWORD_ERROR: the words of a refused repository password. kopia
+# returns ErrInvalidPassword, "invalid repository password", and Velero
+# passes it on in the message of the PodVolumeBackup and in the backup log.
+VELERO_PASSWORD_ERROR="${VELERO_PASSWORD_ERROR:-invalid repository password}"
+
+# password_named NAME: true when a PodVolumeBackup message or an error line
+# of the log of backup NAME holds VELERO_PASSWORD_ERROR. Any PartiallyFailed
+# used to count as a refusal, and the 44 refused lists of drill rotation run
+# 40438631534 passed as one (review of hosted#153). Otherwise it prints what
+# Velero recorded, on stderr.
+password_named() {
+  local name="$1" msgs log
+  msgs="$(kubectl -n velero get podvolumebackups.velero.io -l "velero.io/backup-name=${name}" -o json \
+    | jq -r '.items[] | .status.message // empty')" || msgs=""
+  if grep -qiF -- "$VELERO_PASSWORD_ERROR" <<<"$msgs"; then return 0; fi
+  log="$(mktemp)"
+  # One awk, not grep | grep -q: under pipefail the early exit of grep -q
+  # can fail the pipe on a match.
+  if velero_backup_log "$name" "$log" \
+     && awk -v e="$VELERO_PASSWORD_ERROR" 'index($0, "level=error") && index(tolower($0), tolower(e)) { f = 1 } END { exit !f }' "$log"; then
+    rm -f "$log"; return 0
+  fi
+  rm -f "$log"
+  { echo "    --- the PodVolumeBackup messages of backup ${name} ---"
+    printf '%s\n' "${msgs:-(none)}" | sed 's/^/      /'
+    echo "    --- the errors in the log of backup ${name} ---"
+    explain_bad_backup "$name"
+  } >&2 || true
+  return 1
+}
+
 velero_restart() {
   kubectl -n velero rollout restart deployment/velero >/dev/null \
     && kubectl -n velero rollout status deployment/velero --timeout="${ROLLOUT_WAIT_S}s" >/dev/null
@@ -1104,7 +1140,9 @@ velero_refusal_step() {
   VELERO_RESTARTED_AT="$(velero_pod_start)" \
     || { miss "the start time of the Velero pod could not be read after the restart on the keyring password"; return 1; }
   password_refused "$phase" || return 1
-  ok "a backup with another repository password does not complete (${phase})"
+  password_named "$(cat "$VELERO_LAST_FILE")" \
+    || { miss "the backup with another repository password ended ${phase}, but no error names the repository password (what Velero recorded is above), so it proves no refusal"; return 1; }
+  ok "a backup with another repository password does not complete (${phase}), and Velero names the password"
 }
 
 class_keyring_generated_keys() {

@@ -190,6 +190,10 @@ keyring_slow() {
     bao_restart() { sleep $(( BAO_DELETE_WAIT_S + BAO_STATE_WAIT_S )); }
     velero_restart() { sleep "$ROLLOUT_WAIT_S"; }
     velero_pod_start() { printf 2031-01-01T00:00:00Z; }
+    # The slowest pass of password_named: no PodVolumeBackup message names the
+    # password, so it waits the whole VELERO_LOG_WAIT for the log URL.
+    VELERO_LAST_FILE="$D/last"; : > "$VELERO_LAST_FILE"
+    password_named() { sleep "${VELERO_LOG_WAIT:-60}"; }
     velero_backup() {
       sleep $(( VELERO_QUEUE_WAIT + VELERO_RUN_WAIT ))
       if [ -e "$D/backup1" ]; then printf Completed; else touch "$D/backup1"; printf PartiallyFailed; fi
