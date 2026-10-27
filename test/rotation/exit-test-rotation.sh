@@ -2504,7 +2504,8 @@ diagnose_failed_class() (
   # CronJob: the redis rotation runs every minute, so the last three Jobs of
   # both were all redis Jobs, and six failed masterkey Jobs printed no log
   # (drill rotation run 40478619844).
-  local cj jobs
+  local cj jobs diag_err
+  diag_err="$(mktemp)"
   jobs="$(kubectl -n "$NS" get jobs --sort-by=.metadata.creationTimestamp -o name 2>&1)"
   for cj in redis-rotation zitadel-masterkey-rotation; do
     for job in $(printf '%s\n' "$jobs" | grep -E "^job.batch/${RELEASE}-${cj}-" | tail -n 2); do
@@ -2515,15 +2516,19 @@ diagnose_failed_class() (
       # the Job, its phase, and how each of its containers ended (review of
       # hosted#163).
       printf '      the pods of %s and how their containers ended:\n' "$job"
-      kubectl -n "$NS" get pods -l "job-name=${job#job.batch/}" -o json 2>&1 \
+      # kubectl's stderr goes to its own file: in the pipe it became the
+      # input of jq, and a refused call printed only a parse error.
+      kubectl -n "$NS" get pods -l "job-name=${job#job.batch/}" -o json 2>"$diag_err" \
         | jq -r '.items[] | "\(.metadata.name) \(.status.phase // "-")",
             ((.status.initContainerStatuses // []) + (.status.containerStatuses // [])
              | .[] | "  \(.name): " + (if .state.terminated then
                  "terminated \(.state.terminated.reason // "-") exit \(.state.terminated.exitCode) \(.state.terminated.message // "")"
                elif .state.waiting then "waiting \(.state.waiting.reason // "-") \(.state.waiting.message // "")"
                else "running" end))' 2>&1 | cut -c1-300 | sed 's/^/        /'
+      [ ! -s "$diag_err" ] || sed 's/^/        kubectl: /' "$diag_err" | cut -c1-300
     done
   done
+  rm -f "$diag_err"
   return 0
 )
 
