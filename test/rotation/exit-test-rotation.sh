@@ -1090,26 +1090,33 @@ password_refused() {
 # passes it on in the message of the PodVolumeBackup and in the backup log.
 VELERO_PASSWORD_ERROR="${VELERO_PASSWORD_ERROR:-invalid repository password}"
 
-# password_named NAME: true when a PodVolumeBackup message or an error line
-# of the log of backup NAME holds VELERO_PASSWORD_ERROR. Any PartiallyFailed
-# used to count as a refusal, and the 44 refused lists of drill rotation run
-# 40438631534 passed as one (review of hosted#153). Otherwise it prints what
-# Velero recorded, on stderr.
+# password_named NAME: true when a PodVolumeBackup message of backup NAME, a
+# BackupRepository message, or an error line of the log of backup NAME holds
+# VELERO_PASSWORD_ERROR. On a match it prints that one line on stdout, with
+# its source, cut to 400 characters, as the evidence of the refusal. A wrong
+# password can fail the connect of the server first and mark the repository
+# NotReady before any PodVolumeBackup exists (review of hosted#154), so the
+# repository messages count too. Any PartiallyFailed used to count as a
+# refusal, and the 44 refused lists of drill rotation run 40438631534 passed
+# as one (review of hosted#153). Without a match it prints what Velero
+# recorded, on stderr. The caller redacts the passwords from the evidence.
 password_named() {
-  local name="$1" msgs log
-  msgs="$(kubectl -n velero get podvolumebackups.velero.io -l "velero.io/backup-name=${name}" -o json \
-    | jq -r '.items[] | .status.message // empty')" || msgs=""
-  if grep -qiF -- "$VELERO_PASSWORD_ERROR" <<<"$msgs"; then return 0; fi
+  local name="$1" lines log hit
+  lines="$(kubectl -n velero get podvolumebackups.velero.io -l "velero.io/backup-name=${name}" -o json \
+    | jq -r '.items[] | select(.status.message) | "PodVolumeBackup \(.metadata.name // ""): \(.status.message)"')" || lines=""
+  lines+=$'\n'"$(kubectl -n velero get backuprepositories.velero.io -o json \
+    | jq -r '.items[] | select(.status.message) | "BackupRepository \(.metadata.name // ""): \(.status.message)"')" || true
   log="$(mktemp)"
-  # One awk, not grep | grep -q: under pipefail the early exit of grep -q
-  # can fail the pipe on a match.
-  if velero_backup_log "$name" "$log" \
-     && awk -v e="$VELERO_PASSWORD_ERROR" 'index($0, "level=error") && index(tolower($0), tolower(e)) { f = 1 } END { exit !f }' "$log"; then
-    rm -f "$log"; return 0
+  if velero_backup_log "$name" "$log"; then
+    lines+=$'\n'"$(awk 'index($0, "level=error") { sub(/^time="[^"]*" /, ""); print "backup log: " $0 }' "$log")"
   fi
   rm -f "$log"
-  { echo "    --- the PodVolumeBackup messages of backup ${name} ---"
-    printf '%s\n' "${msgs:-(none)}" | sed 's/^/      /'
+  # One awk, not grep | head: under pipefail the early exit of head can fail
+  # the pipe on a match.
+  hit="$(awk -v e="$VELERO_PASSWORD_ERROR" 'index(tolower($0), tolower(e)) { print substr($0, 1, 400); exit }' <<<"$lines")"
+  if [ -n "$hit" ]; then printf '%s\n' "$hit"; return 0; fi
+  { echo "    --- what Velero recorded for backup ${name}: no line holds \"${VELERO_PASSWORD_ERROR}\" ---"
+    printf '%s\n' "$lines" | sed '/^$/d; s/^/      /'
     echo "    --- the errors in the log of backup ${name} ---"
     explain_bad_backup "$name"
   } >&2 || true
@@ -1140,9 +1147,16 @@ velero_refusal_step() {
   VELERO_RESTARTED_AT="$(velero_pod_start)" \
     || { miss "the start time of the Velero pod could not be read after the restart on the keyring password"; return 1; }
   password_refused "$phase" || return 1
-  password_named "$(cat "$VELERO_LAST_FILE")" \
+  local evidence pw
+  evidence="$(password_named "$(cat "$VELERO_LAST_FILE")")" \
     || { miss "the backup with another repository password ended ${phase}, but no error names the repository password (what Velero recorded is above), so it proves no refusal"; return 1; }
-  ok "a backup with another repository password does not complete (${phase}), and Velero names the password"
+  # The evidence is the words of Velero. It holds no password, but a value
+  # of either password is cut out of it before it prints.
+  for pw in "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "$work/velero.env" 2>/dev/null)" \
+            "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)"; do
+    [ -z "$pw" ] || evidence="${evidence//"$pw"/[redacted]}"
+  done
+  ok "a backup with another repository password does not complete (${phase}), and Velero names the password: ${evidence}"
 }
 
 class_keyring_generated_keys() {

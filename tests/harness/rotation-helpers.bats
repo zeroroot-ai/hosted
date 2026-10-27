@@ -736,9 +736,10 @@ refusal_step() {
     . "$1"
     # The backup sees the reference time that the step set.
     velero_backup() { echo "reference=$VELERO_RESTARTED_AT" >&2; printf PartiallyFailed; }
-    # password_named has its own tests below. STUB_NOT_NAMED: no error names the password.
-    password_named() { [ -z "${STUB_NOT_NAMED:-}" ]; }
-    velero_refusal_step /nonexistent; rc=$?
+    # password_named has its own tests below. STUB_NOT_NAMED: no error names
+    # the password. STUB_EVIDENCE: the line it found.
+    password_named() { [ -z "${STUB_NOT_NAMED:-}" ] && printf "%s\n" "${STUB_EVIDENCE:-PodVolumeBackup p1: invalid repository password}"; }
+    velero_refusal_step "${STUB_WORK:-/nonexistent}"; rc=$?
     echo "final=$VELERO_RESTARTED_AT"
     exit $rc' _ "$TMP/velero.sh"
 }
@@ -757,6 +758,19 @@ refusal_step() {
   [ "$status" -ne 0 ]
   [[ "$output" == *"miss: the backup with another repository password ended PartiallyFailed, but no error names the repository password"* ]] || { echo "$output"; false; }
   [[ "$output" != *"ok: a backup with another repository password"* ]] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: the ok line of a refusal holds the words of Velero, and never a password (coordinator, hosted#154)" {
+  mkdir -p "$TMP/work"
+  printf 'VELERO_REPO_PASSWORD=s3cr3t-random\n' > "$TMP/work/velero.env"
+  printf 'VELERO_REPO_PASSWORD=k3yring-pw\n' > "$TMP/keyring.env"
+  export STUB_POD_START=2031-01-02T03:04:05Z STUB_WORK="$TMP/work" KEYRING_FILE="$TMP/keyring.env"
+  export STUB_EVIDENCE='PodVolumeBackup p1: error to open repo: invalid repository password (tried s3cr3t-random, then k3yring-pw)'
+  refusal_step
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"ok: a backup with another repository password does not complete (PartiallyFailed), and Velero names the password: PodVolumeBackup p1: error to open repo: invalid repository password (tried [redacted], then [redacted])"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"s3cr3t-random"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"k3yring-pw"* ]] || { echo "$output"; false; }
 }
 
 @test "FAILING FIXTURE: a Velero pod read that gives nothing is a miss, and the time check is never skipped (hosted#68 review)" {
@@ -1093,7 +1107,10 @@ PY2
 #!/usr/bin/env bash
 case "$*" in
   "-n velero get podvolumebackups.velero.io -l velero.io/backup-name=b1 -o json")
-    jq -n --arg m "${STUB_PVB_MSG:-}" '{items: [{status: {phase: "Failed", message: $m}}]}' ;;
+    jq -n --arg m "${STUB_PVB_MSG:-}" '{items: [{metadata: {name: "b1-pvb"}, status: {phase: "Failed", message: $m}} | select(.status.message != "")]}' ;;
+  # STUB_REPO_MSG: the message of the one BackupRepository.
+  "-n velero get backuprepositories.velero.io -o json")
+    jq -n --arg m "${STUB_REPO_MSG:-}" '{items: [{metadata: {name: "gibson-default-kopia"}, status: {phase: "Ready", message: $m}} | select(.status.message != "")]}' ;;
   "apply -f -") cat > /dev/null ;;
   "-n velero get downloadrequest.velero.io/velero-explain-b1 -o jsonpath={.status.downloadURL}") printf 'http://bucket.invalid/signed' ;;
   "-n velero delete downloadrequest.velero.io/velero-explain-b1 --ignore-not-found") echo x >> "$STUB_DIR/deletes" ;;
@@ -1108,7 +1125,7 @@ SH
 }
 
 run_named() {
-  PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c 'set -euo pipefail; . "$1"; if password_named b1; then echo NAMED; else echo NOT-NAMED; fi' _ "$TMP/pn.sh"
+  PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c 'set -euo pipefail; . "$1"; if e="$(password_named b1)"; then echo "NAMED: $e"; else echo NOT-NAMED; fi' _ "$TMP/pn.sh"
 }
 
 @test "password_named: a PodVolumeBackup message with the kopia password error names the password" {
@@ -1116,15 +1133,23 @@ run_named() {
   export STUB_PVB_MSG='error to initialize data path: error to connect to backup repo: invalid repository password'
   run_named
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [ "$(printf '%s\n' "$output" | tail -n 1)" = NAMED ] || { echo "$output"; false; }
+  [ "$(printf '%s\n' "$output" | tail -n 1)" = "NAMED: PodVolumeBackup b1-pvb: error to initialize data path: error to connect to backup repo: invalid repository password" ] || { echo "$output"; false; }
 }
 
 @test "password_named: an error line of the backup log with the password error names the password" {
   password_named_helpers
   export STUB_LOG='time="t" level=info msg="Backing up item"\ntime="t" level=error msg="pod volume backup failed" error="Invalid Repository Password"\n'
   run_named
-  [ "$(printf '%s\n' "$output" | tail -n 1)" = NAMED ] || { echo "$output"; false; }
+  [ "$(printf '%s\n' "$output" | tail -n 1)" = 'NAMED: backup log: level=error msg="pod volume backup failed" error="Invalid Repository Password"' ] || { echo "$output"; false; }
   [ "$(wc -l < "$TMP/deletes")" -eq 1 ]
+}
+
+@test "password_named: a BackupRepository message with the password error names the password (hosted#154 review)" {
+  password_named_helpers
+  export STUB_PVB_MSG='' STUB_REPO_MSG='error to connect to backup repo: error to open repo: invalid repository password'
+  export STUB_LOG='time="t" level=error msg="backup repository is not ready"\n'
+  run_named
+  [ "$(printf '%s\n' "$output" | tail -n 1)" = "NAMED: BackupRepository gibson-default-kopia: error to connect to backup repo: error to open repo: invalid repository password" ] || { echo "$output"; false; }
 }
 
 @test "FAILING FIXTURE: password_named: refused lists alone do not name the password, and the errors are printed" {
