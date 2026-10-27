@@ -324,3 +324,22 @@ PY
   run python3 "$C" "$TMP/not-yaml.yaml" --expect 1
   [ "$status" -eq 2 ]; [[ "$output" == *"check-csi-excludes: cannot read"* ]]; [[ "$output" != *"Traceback"* ]]
 }
+
+# Reloader restarts this Deployment on a new Postgres login role (ADR-0171).
+# A policy that refused it stopped the whole Reloader pass, and no consumer of
+# the role restarted (drill rotation run 40478619844).
+@test "saas overlay: the workloads identity policy admits a restart-only UPDATE by Reloader" {
+  run render_saas
+  [ "$status" -eq 0 ] || { cat "$TMP/saas.err"; false; }
+  run python3 "$CHART_DIR/../reloader_restart.py" "$TMP/saas.yaml" gibson-saas-billing-identity-workloads gibson
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: a workloads identity policy without the Reloader clause fails the check" {
+  run render_saas
+  [ "$status" -eq 0 ] || { cat "$TMP/saas.err"; false; }
+  sed 's/|| variables.restartOnly//' "$TMP/saas.yaml" > "$TMP/no-restart.yaml"
+  run python3 "$CHART_DIR/../reloader_restart.py" "$TMP/no-restart.yaml" gibson-saas-billing-identity-workloads gibson
+  [ "$status" -eq 1 ] || { echo "$output"; false; }
+  [[ "$output" == *"no validation admits variables.restartOnly"* ]] || { echo "$output"; false; }
+}

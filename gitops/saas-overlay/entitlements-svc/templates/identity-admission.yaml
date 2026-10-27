@@ -50,6 +50,19 @@ admission. See the core file's residual-risk block.
       "system:serviceaccount:kube-system:deployment-controller"
       "system:serviceaccount:kube-system:cronjob-controller")
       ($ia.workloadCreators | default (list)) -}}
+{{- /* Reloader (stakater, --reload-strategy=annotations) restarts this
+       Deployment when its Postgres login role changes (ADR-0171, row
+       postgres-role-passwords). It rewrites one pod-template annotation and
+       nothing else, so the workloads policy admits its UPDATE only when the
+       pod template's spec and labels are byte-identical to the old object's,
+       the same rule as the platform policy of the charts
+       (gibson-platform-identity-workloads, restartOnly). Without it the
+       policy refused the restart. Reloader v1.4.6 stops its whole pass on the
+       first refused update (handler/upgrade.go, PerformAction), and the List
+       API gives gibson-billing-webhook first, so no consumer of the login
+       role restarted: drill rotation run 40478619844 kept 6 sessions of the
+       old role, 4 of them in the daemon. */ -}}
+{{- $reloaderPrincipal := $ia.reloaderPrincipal | default (printf "system:serviceaccount:%s:reloader" .Release.Namespace) -}}
 {{- $actions := $ia.actions | default (list "Deny") -}}
 {{- if and (has "Deny" $actions) (empty ($ia.workloadCreators | default (list))) -}}
 {{- fail "identityAdmission.actions requests Deny but identityAdmission.workloadCreators is empty. That policy governs who may create or update a workload whose pod template claims the entitlements-svc identity, and the legitimate creator differs per install — the Argo CD application-controller ServiceAccount on a GitOps cluster, the identity running `helm install` elsewhere. Name it, e.g. workloadCreators: [\"system:serviceaccount:argocd:argocd-application-controller\"]." -}}
@@ -156,10 +169,23 @@ spec:
       expression: >-
         variables.component == 'entitlements-svc'
           || variables.sa in {{ $protectedSAs | toJson }}
+    # A restart-only UPDATE by Reloader: the pod template's spec and labels are
+    # unchanged, only template annotations moved. Nothing new claims the
+    # identity, so the admitted creator's template is re-issued.
+    - name: restartOnly
+      expression: >-
+        request.operation == 'UPDATE'
+          && request.userInfo.username == {{ $reloaderPrincipal | toJson }}
+          && !has(object.spec.jobTemplate)
+          && has(oldObject.spec) && has(oldObject.spec.template)
+          && object.spec.template.spec == oldObject.spec.template.spec
+          && (has(object.spec.template.metadata) && has(object.spec.template.metadata.labels) ? object.spec.template.metadata.labels : {})
+             == (has(oldObject.spec.template.metadata) && has(oldObject.spec.template.metadata.labels) ? oldObject.spec.template.metadata.labels : {})
   validations:
     - expression: >-
         !variables.claimsPlatformIdentity
           || request.userInfo.username in {{ $workloadCreators | toJson }}
+          || variables.restartOnly
       reason: Forbidden
       messageExpression: >-
         'workload pod template claims the Gibson entitlements-svc identity (component=' + variables.component +
