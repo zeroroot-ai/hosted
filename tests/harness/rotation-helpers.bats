@@ -994,9 +994,12 @@ case "$*" in
     echo "Warning BackOff Back-off restarting failed container wait-for-redis" ;;
   "-n gibson logs gibson-gibson-workloads-0 --all-containers --tail=15") echo '{"msg":"redis auth failed"}' ;;
   "-n gibson get jobs --sort-by=.metadata.creationTimestamp -o name")
-    printf 'job.batch/gibson-redis-rotation-29872250\njob.batch/other-job\n' ;;
-  "-n gibson logs job.batch/gibson-redis-rotation-29872250 --all-containers --tail=20")
-    echo "[rotation] restarting statefulset/gibson-gibson-workloads..." ;;
+    # STUB_JOBS: the Job list, oldest first.
+    printf '%b' "${STUB_JOBS:-job.batch/gibson-redis-rotation-29872250\njob.batch/other-job\n}" ;;
+  "-n gibson logs job.batch/gibson-zitadel-masterkey-rotation-"*" --all-containers --tail=20")
+    echo "[masterkey] FATAL: the marker decrypts with neither the current nor the next masterkey; nothing changes" ;;
+  "-n gibson logs job.batch/gibson-redis-rotation-"*" --all-containers --tail=20")
+    echo "No rotation (version 5887 unchanged). Exiting." ;;
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
 esac
 SH
@@ -1012,8 +1015,21 @@ SH
   [[ "$output" == *"Back-off restarting failed container wait-for-redis"* ]] || { echo "$output"; false; }
   [[ "$output" == *"redis auth failed"* ]] || { echo "$output"; false; }
   [[ "$output" == *"log of job.batch/gibson-redis-rotation-29872250"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"No rotation (version 5887 unchanged)"* ]] || { echo "$output"; false; }
   [[ "$output" != *"other-job"* ]] || { echo "$output"; false; }
   [ "${lines[-1]}" = after ]
+}
+
+@test "FAILING FIXTURE: diagnose_failed_class prints the masterkey Jobs when newer redis Jobs follow them (drill rotation run 40478619844)" {
+  diag_setup
+  export STUB_JOBS='job.batch/gibson-zitadel-masterkey-rotation-29884990\njob.batch/gibson-zitadel-masterkey-rotation-29885000\njob.batch/gibson-redis-rotation-29885006\njob.batch/gibson-redis-rotation-29885007\njob.batch/gibson-redis-rotation-29885008\njob.batch/gibson-redis-rotation-29885009\n'
+  run env PATH="$TMP/bin:$PATH" bash -c 'set -euo pipefail; NS=gibson RELEASE=gibson; . "$1"; diagnose_failed_class platform-generated-secrets' _ "$TMP/diag.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"log of job.batch/gibson-zitadel-masterkey-rotation-29884990"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"log of job.batch/gibson-zitadel-masterkey-rotation-29885000"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"[masterkey] FATAL: the marker decrypts with neither"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"log of job.batch/gibson-redis-rotation-29885009"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"gibson-redis-rotation-29885007"* ]] || { echo "$output"; false; }
 }
 
 @test "FAILING FIXTURE: a diagnostics run where every kubectl read fails does not stop a script under set -euo pipefail" {
