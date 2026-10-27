@@ -2510,6 +2510,18 @@ diagnose_failed_class() (
     for job in $(printf '%s\n' "$jobs" | grep -E "^job.batch/${RELEASE}-${cj}-" | tail -n 2); do
       printf '      log of %s:\n' "$job"
       kubectl -n "$NS" logs "$job" --all-containers --tail=20 2>&1 | cut -c1-300 | sed 's/^/        /'
+      # A container that dies before its script (a missing Secret key, an
+      # OOM kill, an image that does not start) leaves no log. Each pod of
+      # the Job, its phase, and how each of its containers ended (review of
+      # hosted#163).
+      printf '      the pods of %s and how their containers ended:\n' "$job"
+      kubectl -n "$NS" get pods -l "job-name=${job#job.batch/}" -o json 2>&1 \
+        | jq -r '.items[] | "\(.metadata.name) \(.status.phase // "-")",
+            ((.status.initContainerStatuses // []) + (.status.containerStatuses // [])
+             | .[] | "  \(.name): " + (if .state.terminated then
+                 "terminated \(.state.terminated.reason // "-") exit \(.state.terminated.exitCode) \(.state.terminated.message // "")"
+               elif .state.waiting then "waiting \(.state.waiting.reason // "-") \(.state.waiting.message // "")"
+               else "running" end))' 2>&1 | cut -c1-300 | sed 's/^/        /'
     done
   done
   return 0
