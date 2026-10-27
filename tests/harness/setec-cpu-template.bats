@@ -25,7 +25,12 @@ setup() {
 case "$*" in
   *"io/instance}"*) printf '%s' "${STUB_RELEASE-gibson}" ;;
   *"{.args}"*)
-    [ "${STUB_SNAPSHOTS-on}" = on ] && printf '["--leader-elect=true","--snapshots-enabled"]\n' || printf '["--leader-elect=true"]\n' ;;
+    case "${STUB_SNAPSHOTS-on}" in
+      on) printf '["--leader-elect=true","--snapshots-enabled"]\n' ;;
+      false) printf '["--leader-elect=true","--snapshots-enabled=false"]\n' ;;
+      unreadable) echo "the server is unreachable" >&2; exit 1 ;;
+      *) printf '["--leader-elect=true"]\n' ;;
+    esac ;;
   *"get pods"*)
     v="${STUB_VERSION-v0.2.0}"
     [ -n "$v" ] || exit 0
@@ -123,4 +128,17 @@ STUB
   [ "$status" -eq 2 ]
   [[ "$output" == *"runs with snapshots off"* ]]
   [[ "$output" != *"make e2e-cpu-template"* ]]
+}
+
+@test "a release with --snapshots-enabled=false does not run" {
+  STUB_SNAPSHOTS=false run bash "$CHECK" "$SETEC"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"runs with snapshots off"* ]]
+}
+
+@test "a failed read of the setec arguments says so, with the kubectl error" {
+  STUB_SNAPSHOTS=unreadable run bash "$CHECK" "$SETEC"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"could not read the arguments"* ]]
+  [[ "$output" == *"the server is unreachable"* ]]
 }

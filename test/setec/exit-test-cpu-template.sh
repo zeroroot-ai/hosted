@@ -82,8 +82,10 @@ grep -qs 'SETEC_E2E_INSTALLED_NAMESPACE' "$SETEC_DIR/test/e2e/installed_run_test
 # gets a phase and the scenario times out after six minutes (run
 # 40460536815). Refuse that release before the run.
 args="$(kubectl -n "$SETEC_NS" get pods -l app.kubernetes.io/name=setec \
-  -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.args}{"\n"}{end}{end}' 2>/dev/null)" || args=""
-grep -q -- '--snapshots-enabled' <<< "$args" \
+  -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.args}{"\n"}{end}{end}')" \
+  || cannot "kubectl could not read the arguments of the setec Pods in ${SETEC_NS}"
+# The whole flag: a bare --snapshots-enabled or =true, never =false.
+grep -qE -- '(^|[",])--snapshots-enabled(=true)?([",]|$)' <<< "$args" \
   || cannot "the setec release in ${SETEC_NS} runs with snapshots off (no --snapshots-enabled on the manager), so a Snapshot cannot load. Set snapshots.enabled and nodeAgent.enabled for this env"
 
 m8i="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.node\.kubernetes\.io/instance-type}{"\n"}{end}' 2>/dev/null | grep -c '^m8i\.')" || m8i=0
