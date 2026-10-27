@@ -1252,3 +1252,38 @@ PY2
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$output" = 'key=[redacted] and pAw\1zz[x(y and [redacted].' ] || { echo "$output"; false; }
 }
+
+# --- mask: never on stdout (drill rotation run 40456829215) -----------------
+@test "FAILING FIXTURE: admin_pat_status under GITHUB_ACTIONS prints the HTTP code alone, and mask goes to stderr" {
+  python3 - "$TEST" "$TMP/mask.sh" <<'PY2'
+import re, sys
+text = open(sys.argv[1]).read()
+out = []
+for name in ("mask", "admin_pat_status"):
+    # A one-line function first: the multi-line form would run on to the
+    # next closing brace.
+    m = re.search(r"^%s\(\) \{.*\}\n" % name, text, re.M) or re.search(r"^%s\(\) \{.*?^\}\n" % name, text, re.M | re.S)
+    if not m:
+        sys.exit("no function %s in the script" % name)
+    out.append(m.group(0))
+open(sys.argv[2], "w").write("\n".join(out))
+PY2
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "get platformbootstrap -o json") echo '{"items":[{"spec":{"zitadel":{"adminTokenRef":{"name":"pat","key":"token"}}}}]}' ;;
+  "-n gibson get secret pat -o json") printf '{"data":{"token":"%s"}}' "$(printf 'the-pat' | base64)" ;;
+  *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
+esac
+SH
+  chmod +x "$TMP/bin/kubectl"
+  PATH="$TMP/bin:$PATH" GITHUB_ACTIONS=true run bash -c '
+    NS=gibson; . "$1"
+    zitadel_admin_status() { printf 200; }
+    code="$(admin_pat_status 2>"$2")"
+    printf "code=[%s]\n" "$code"' _ "$TMP/mask.sh" "$TMP/stderr"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$output" = "code=[200]" ] || { echo "$output"; false; }
+  grep -qx '::add-mask::the-pat' "$TMP/stderr" || { cat "$TMP/stderr"; false; }
+}

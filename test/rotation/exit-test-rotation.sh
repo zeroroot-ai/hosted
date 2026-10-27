@@ -86,7 +86,12 @@ START="$(date +%s)"
 REASON=""
 miss() { REASON="$*"; printf '    ✗ %s\n' "$*" >&2; return 1; }
 ok() { printf '    ✓ %s\n' "$*"; }
-mask() { [ -z "${GITHUB_ACTIONS:-}" ] || printf '::add-mask::%s\n' "$1"; }
+# mask VALUE: the runner hides VALUE in the log from now on. The command goes
+# to stderr, which the runner reads for workflow commands too. On stdout a
+# caller inside $(...) took it in: admin_pat_status gave
+# "::add-mask::***<newline>200", and the masterkey check read a 200 as a
+# refusal (drill rotation run 40456829215).
+mask() { [ -z "${GITHUB_ACTIONS:-}" ] || printf '::add-mask::%s\n' "$1" >&2; }
 
 # new_password: 43 letters and digits, the shape of the OpenBao seed kind `pw`.
 new_password() { LC_ALL=C tr -dc 'A-Za-z0-9' < /dev/urandom | head -c 43; }
