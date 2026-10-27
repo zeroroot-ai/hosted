@@ -49,10 +49,12 @@ or recreate-ec2.sh, this guard:
      the account and compares the old and new pod template spec, used by a
      validation. Reloader v1.4.6 stops its whole pass on the first refused
      update, so one policy without it stopped the restart of every consumer
-     of a rotated Secret (drill rotation run 40478619844, hosted#162). A
-     policy counts when its binding selects the release namespace by name,
-     or when it has no namespace selector and no match condition on
-     request.namespace.
+     of a rotated Secret (drill rotation run 40478619844, hosted#162). The
+     check fails closed: a policy counts unless each of its bindings
+     provably leaves the release namespace out (a name selector that does
+     not hold it), or a match condition of a known shape does
+     (request.namespace.startsWith('x') or .matches('re'), alone or as one
+     term of an &&). An unknown selector or condition counts.
 The chart comes from oci://ghcr.io/zeroroot-ai/charts/gibson with `helm pull`,
 which needs no login. CHART_TGZ_DIR names a directory that already holds
 gibson-<version>.tgz, for a run with no network.
@@ -466,17 +468,46 @@ def reloader_targets(docs: list[dict]) -> tuple[str, set[str]]:
     return principal, kinds
 
 
-def binds_namespace(binding: dict, ns: str) -> bool | None:
-    """True when the binding selects ns by name, False when it selects other
-    namespaces, None when it has no namespace selector."""
+def binding_excludes(binding: dict, ns: str) -> bool:
+    """True only when the namespace selector of the binding provably leaves
+    ns out. No selector, or any selector this cannot read, is False."""
     sel = ((binding.get("spec") or {}).get("matchResources") or {}).get("namespaceSelector")
     if not sel:
-        return None
-    if (sel.get("matchLabels") or {}).get("kubernetes.io/metadata.name") == ns:
+        return False
+    name = "kubernetes.io/metadata.name"
+    labels = sel.get("matchLabels") or {}
+    if name in labels and labels[name] != ns:
         return True
     for e in sel.get("matchExpressions") or []:
-        if e.get("key") == "kubernetes.io/metadata.name" and e.get("operator") == "In" and ns in (e.get("values") or []):
+        if e.get("key") != name:
+            continue
+        values = e.get("values") or []
+        if e.get("operator") == "In" and ns not in values:
             return True
+        if e.get("operator") == "NotIn" and ns in values:
+            return True
+    return False
+
+
+_STARTS = re.compile(r"^request\.namespace\.startsWith\('([^']*)'\)$")
+_MATCHES = re.compile(r"^request\.namespace\.matches\('([^']*)'\)$")
+
+
+def condition_excludes(expr: str, ns: str) -> bool:
+    """True only when a term of the && of expr is a known shape that ns
+    fails: request.namespace.startsWith('x') or request.namespace.matches('re')."""
+    for term in str(expr).split("&&"):
+        t = " ".join(term.split())
+        m = _STARTS.match(t)
+        if m and not ns.startswith(m.group(1)):
+            return True
+        m = _MATCHES.match(t)
+        if m:
+            try:
+                if not re.search(m.group(1), ns):
+                    return True
+            except re.error:
+                pass
     return False
 
 
@@ -499,15 +530,10 @@ def reloader_admission_failures(env: str, version: str, docs: list[dict], ns: st
         if not any("UPDATE" in (r.get("operations") or []) and "apps" in (r.get("apiGroups") or [])
                    and kinds & set(r.get("resources") or []) for r in rules):
             continue
-        seen = [binds_namespace(b, ns) for b in bindings.get(name, [])]
-        if True in seen:
-            applies = True
-        elif None in seen:
-            applies = not any("request.namespace" in str(c.get("expression") or "")
-                              for c in spec.get("matchConditions") or [])
-        else:
-            applies = False
-        if not applies:
+        bs = bindings.get(name, [])
+        if bs and all(binding_excludes(b, ns) for b in bs):
+            continue
+        if any(condition_excludes(c.get("expression") or "", ns) for c in spec.get("matchConditions") or []):
             continue
         rule = {v.get("name"): str(v.get("expression") or "") for v in spec.get("variables") or []}.get("restartOnly", "")
         ok = ('request.userInfo.username == "%s"' % principal in rule
@@ -671,6 +697,24 @@ def self_test(tmp: pathlib.Path) -> list[str]:
         out.append("self-test: a policy bound to another namespace failed step 6")
     if not reloader_admission_failures("fx", "0.1.0", vap("good", True, own)):
         out.append("self-test: step 6 passed with no Reloader in the render")
+    # Fail closed: an unknown selector or condition counts.
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("lbl", False, {"matchLabels": {"team": "x"}})):
+        out.append("self-test: a policy bound by a label that may hold the release namespace passed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("eq", False, None, "request.namespace == 'gibson'")):
+        out.append("self-test: a policy whose match condition names the release namespace passed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("notin", False, {"matchExpressions": [
+            {"key": "kubernetes.io/metadata.name", "operator": "NotIn", "values": ["kube-system"]}]})):
+        out.append("self-test: a NotIn selector that holds the release namespace passed step 6")
+    if reloader_admission_failures("fx", "0.1.0", rl + vap("notin2", False, {"matchExpressions": [
+            {"key": "kubernetes.io/metadata.name", "operator": "NotIn", "values": ["gibson"]}]})):
+        out.append("self-test: a NotIn selector that leaves the release namespace out failed step 6")
+    if reloader_admission_failures("fx", "0.1.0", rl + vap("plug", False, None, "request.namespace.matches('^tenant-.+-plugins$')")):
+        out.append("self-test: a policy scoped to plugin namespaces by matches() failed step 6")
+    if reloader_admission_failures("fx", "0.1.0", rl + vap("tr", False, None,
+            "request.namespace.startsWith('tenant-') && !request.namespace.endsWith('-plugins')")):
+        out.append("self-test: a policy whose && starts with a tenant prefix failed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("gpref", False, None, "request.namespace.startsWith('gib')")):
+        out.append("self-test: a startsWith prefix that the release namespace has passed step 6")
     return out
 
 
