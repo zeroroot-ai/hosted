@@ -50,6 +50,19 @@ die()  { printf '%s!%s [substrate] %s\n' "$RED" "$NC" "$*" >&2; exit 2; }
 case "$ENV" in staging|prod|drill) ;; *) die "ENV=$ENV is not an AWS environment of this workspace (staging, prod, drill)" ;; esac
 VARFILE="envs/$ENV.tfvars"
 [ -r "$HERE/$VARFILE" ] || die "$HERE/$VARFILE is missing"
+# The values that envs/<env>.tfvars takes per run, named on its line
+# "# per-run TF_VAR: <name> ...". Terraform takes an unset TF_VAR_<name> as
+# the default "", and this run then writes the empty value into substrate.env
+# and the keyring secret with no error: staging stage 0 on 2026-10-27 emptied
+# GITHUB_APP_ID and GITHUB_APP_INSTALLATION_ID that way. So each one must be
+# set and not empty before anything runs.
+missing=""
+for name in $(sed -n 's/^# per-run TF_VAR:[[:space:]]*//p' "$HERE/$VARFILE"); do
+  case "$name" in *[!a-z0-9_]*|'') die "$VARFILE names a per-run variable that is not a plain name: $name" ;; esac
+  var="TF_VAR_$name"
+  [ -n "${!var:-}" ] || missing="$missing $var"
+done
+[ -z "$missing" ] || die "$VARFILE takes these values per run, and they are unset or empty:$missing. Export each one, then run again. Nothing ran"
 for tool in terraform aws python3; do
   command -v "$tool" >/dev/null 2>&1 || die "$tool is not on PATH"
 done

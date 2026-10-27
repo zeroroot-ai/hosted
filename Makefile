@@ -1021,9 +1021,10 @@ check-install-terraform: ## The one Terraform installer fails closed: a corrupte
 	@bats tests/harness/install-terraform.bats
 
 .PHONY: check-stage0-store
-check-stage0-store: ## Stage 0 and the keyring: the state, key slots and rotation record of each env live in the durable bucket, and its keyring in the Secrets Manager secret zeroroot-ai/<env>/keyring (ADR-0083, row 24). Also: one rotation step, the keyring recovery, the drill access key rotation, the restart of a platform workload by pod delete, a resend of an empty stdin secret, the operator boundary spares the IAM users whose keys rotate, and only the intended roles reach a keyring secret (check-keyring-secret.py)
+check-stage0-store: ## Stage 0 and the keyring: the state, key slots and rotation record of each env live in the durable bucket, and its keyring in the Secrets Manager secret zeroroot-ai/<env>/keyring (ADR-0083, row 24). Also: stage 0 refuses to run while a per-run TF_VAR of the env is unset or empty, one rotation step, the keyring recovery, the drill access key rotation, the restart of a platform workload by pod delete, a resend of an empty stdin secret, the operator boundary spares the IAM users whose keys rotate, and only the intended roles reach a keyring secret (check-keyring-secret.py)
 	@printf "$(GREEN)▶$(NC) check-stage0-store...\n"
 	@bats tests/harness/stage0-store.bats
+	@bats tests/harness/substrate-per-run-vars.bats
 	@bats tests/harness/rotate-credential.bats
 	@bats tests/harness/recover-keyring.bats
 	@bats tests/harness/drill-rotate-keys.bats
