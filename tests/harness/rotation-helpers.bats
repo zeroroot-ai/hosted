@@ -1169,6 +1169,17 @@ run_named() {
   [ "$(printf '%s\n' "$output" | tail -n 1)" = "NAMED: PodVolumeBackup b1-pvb: error to initialize data path: error to connect to backup repo: invalid repository password" ] || { echo "$output"; false; }
 }
 
+@test "FAILING FIXTURE: password_named shows the match of a long message, not only its first 400 characters (drill rotation run 40551431498)" {
+  password_named_helpers
+  long="data path backup failed: $(printf 'error to connect to repository, %.0s' $(seq 1 15))unable to create format manager: invalid repository password"
+  export STUB_PVB_MSG="$long"
+  run_named
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  last="$(printf '%s\n' "$output" | tail -n 1)"
+  [[ "$last" == "NAMED: PodVolumeBackup b1-pvb: …"* ]] || { echo "$last"; false; }
+  [[ "$last" == *"unable to create format manager: invalid repository password" ]] || { echo "$last"; false; }
+}
+
 @test "password_named: an error line of the backup log with the password error names the password" {
   password_named_helpers
   export STUB_LOG='time="t" level=info msg="Backing up item"\ntime="t" level=error msg="pod volume backup failed" error="Invalid Repository Password"\n'

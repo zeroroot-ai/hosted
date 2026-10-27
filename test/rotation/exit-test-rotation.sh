@@ -1101,7 +1101,7 @@ VELERO_PASSWORD_ERROR="${VELERO_PASSWORD_ERROR:-invalid repository password}"
 # password_named NAME: true when a PodVolumeBackup message of backup NAME, a
 # BackupRepository message, or an error line of the log of backup NAME holds
 # VELERO_PASSWORD_ERROR. On a match it prints that one line on stdout, with
-# its source, cut to 400 characters, as the evidence of the refusal. A wrong
+# its source, and up to 400 characters around the match, as the evidence. A wrong
 # password can fail the connect of the server first and mark the repository
 # NotReady before any PodVolumeBackup exists (review of hosted#154), so the
 # repository messages count too. Any PartiallyFailed used to count as a
@@ -1121,7 +1121,15 @@ password_named() {
   rm -f "$log"
   # One awk, not grep | head: under pipefail the early exit of head can fail
   # the pipe on a match.
-  hit="$(awk -v e="$VELERO_PASSWORD_ERROR" 'index(tolower($0), tolower(e)) { print substr($0, 1, 400); exit }' <<<"$lines")"
+  # The evidence shows the match: up to 200 characters before it, and 400 in
+  # all. The first 400 characters of a long Velero message ended inside the
+  # match (drill rotation run 40551431498: "... invalid repository pa").
+  hit="$(awk -v e="$VELERO_PASSWORD_ERROR" '
+    (i = index(tolower($0), tolower(e))) {
+      src = substr($0, 1, index($0, ": ") + 1)
+      start = i > 200 ? i - 200 : 1
+      print (start > 1 ? src "…" : "") substr($0, start, 400); exit
+    }' <<<"$lines")"
   if [ -n "$hit" ]; then printf '%s\n' "$hit"; return 0; fi
   { echo "    --- what Velero recorded for backup ${name}: no line holds \"${VELERO_PASSWORD_ERROR}\" ---"
     printf '%s\n' "$lines" | sed '/^$/d; s/^/      /'
