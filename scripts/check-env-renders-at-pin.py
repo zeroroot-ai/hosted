@@ -41,6 +41,20 @@ or recreate-ec2.sh, this guard:
      the restore patch nothing. An optional one would let OpenBao start with
      an empty TLS directory on a normal install.
 
+  6. reads the Reloader Deployment and Role of the core render: the account
+     Reloader writes as, and the Deployments and StatefulSets it may patch.
+     Each ValidatingAdmissionPolicy of the core and overlay renders that
+     matches an UPDATE of such a kind in the release namespace must admit a
+     restart-only UPDATE by that account: a variable restartOnly that names
+     the account and compares the old and new pod template spec, used by a
+     validation. Reloader v1.4.6 stops its whole pass on the first refused
+     update, so one policy without it stopped the restart of every consumer
+     of a rotated Secret (drill rotation run 40478619844, hosted#162). The
+     check fails closed: a policy counts unless each of its bindings
+     provably leaves the release namespace out (a name selector that does
+     not hold it), or a match condition of a known shape does
+     (request.namespace.startsWith('x') or .matches('re'), alone or as one
+     term of an &&). An unknown selector or condition counts.
 The chart comes from oci://ghcr.io/zeroroot-ai/charts/gibson with `helm pull`,
 which needs no login. CHART_TGZ_DIR names a directory that already holds
 gibson-<version>.tgz, for a run with no network.
@@ -434,7 +448,109 @@ def env_failures(env: str, tmp: pathlib.Path) -> list[str]:
             out += renders_scope_failures(env, renders + others, groups, namespaces, allowed)
     secret, vols = restore_tls_volumes(VELERO_RESTORE.read_text(encoding="utf-8"))
     out += openbao_tls_failures(env, version, core, secret, vols)
+    out += reloader_admission_failures(env, version, core + overlay)
     return out + group_failures(env, version, core, overlay)
+
+
+def reloader_targets(docs: list[dict]) -> tuple[str, set[str]]:
+    """The account of the Reloader Deployment, and the resources (deployments,
+    statefulsets) that its Role lets it patch."""
+    principal, kinds = "", set()
+    for d in docs:
+        md = d.get("metadata") or {}
+        if d.get("kind") == "Deployment" and md.get("name") == "reloader":
+            sa = (((d.get("spec") or {}).get("template") or {}).get("spec") or {}).get("serviceAccountName") or "default"
+            principal = "system:serviceaccount:%s:%s" % (md.get("namespace") or "gibson", sa)
+        if d.get("kind") == "Role" and md.get("name") == "reloader":
+            for r in d.get("rules") or []:
+                if "patch" in (r.get("verbs") or []) and "apps" in (r.get("apiGroups") or []):
+                    kinds |= set(r.get("resources") or []) & {"deployments", "statefulsets"}
+    return principal, kinds
+
+
+def binding_excludes(binding: dict, ns: str) -> bool:
+    """True only when the namespace selector of the binding provably leaves
+    ns out. No selector, or any selector this cannot read, is False."""
+    sel = ((binding.get("spec") or {}).get("matchResources") or {}).get("namespaceSelector")
+    if not sel:
+        return False
+    name = "kubernetes.io/metadata.name"
+    labels = sel.get("matchLabels") or {}
+    if name in labels and labels[name] != ns:
+        return True
+    for e in sel.get("matchExpressions") or []:
+        if e.get("key") != name:
+            continue
+        values = e.get("values") or []
+        if e.get("operator") == "In" and ns not in values:
+            return True
+        if e.get("operator") == "NotIn" and ns in values:
+            return True
+    return False
+
+
+_STARTS = re.compile(r"^request\.namespace\.startsWith\('([^']*)'\)$")
+_MATCHES = re.compile(r"^request\.namespace\.matches\('([^']*)'\)$")
+
+
+def condition_excludes(expr: str, ns: str) -> bool:
+    """True only when a term of the && of expr is a known shape that ns
+    fails: request.namespace.startsWith('x') or request.namespace.matches('re').
+    An expression with || is not a pure && chain: CEL reads a || b && c as
+    a || (b && c), so it can hold for ns, and it never excludes (review of
+    hosted#165). A term must match the shape exactly, so a negated or a
+    parenthesized term never excludes either."""
+    if "||" in str(expr):
+        return False
+    for term in str(expr).split("&&"):
+        t = " ".join(term.split())
+        m = _STARTS.match(t)
+        if m and not ns.startswith(m.group(1)):
+            return True
+        m = _MATCHES.match(t)
+        if m:
+            try:
+                if not re.search(m.group(1), ns):
+                    return True
+            except re.error:
+                pass
+    return False
+
+
+def reloader_admission_failures(env: str, version: str, docs: list[dict], ns: str = "gibson") -> list[str]:
+    principal, kinds = reloader_targets(docs)
+    if not principal or not kinds:
+        return ["%s: the render at %s holds no Reloader Deployment or no Role that lets it patch a Deployment "
+                "or StatefulSet, so step 6 checked nothing" % (env, version)]
+    bindings: dict[str, list[dict]] = {}
+    for d in docs:
+        if d.get("kind") == "ValidatingAdmissionPolicyBinding":
+            bindings.setdefault(str((d.get("spec") or {}).get("policyName") or ""), []).append(d)
+    out = []
+    for d in docs:
+        if d.get("kind") != "ValidatingAdmissionPolicy":
+            continue
+        name = str((d.get("metadata") or {}).get("name") or "")
+        spec = d.get("spec") or {}
+        rules = ((spec.get("matchConstraints") or {}).get("resourceRules")) or []
+        if not any("UPDATE" in (r.get("operations") or []) and "apps" in (r.get("apiGroups") or [])
+                   and kinds & set(r.get("resources") or []) for r in rules):
+            continue
+        bs = bindings.get(name, [])
+        if bs and all(binding_excludes(b, ns) for b in bs):
+            continue
+        if any(condition_excludes(c.get("expression") or "", ns) for c in spec.get("matchConditions") or []):
+            continue
+        rule = {v.get("name"): str(v.get("expression") or "") for v in spec.get("variables") or []}.get("restartOnly", "")
+        ok = ('request.userInfo.username == "%s"' % principal in rule
+              and "object.spec.template.spec == oldObject.spec.template.spec" in rule
+              and any("variables.restartOnly" in str(v.get("expression") or "") for v in spec.get("validations") or []))
+        if not ok:
+            out.append("%s: the ValidatingAdmissionPolicy %s at %s matches an UPDATE of %s in %s and does not admit "
+                       "a restart-only UPDATE by %s (a variable restartOnly, used by a validation). Reloader stops "
+                       "its whole pass on the first refused update, so no consumer of a rotated Secret restarts "
+                       "(hosted#162)" % (env, name, version, "/".join(sorted(kinds)), ns, principal))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -556,6 +672,60 @@ def self_test(tmp: pathlib.Path) -> list[str]:
         out.append("self-test: restore_tls_volumes no longer reads velero-restore.sh")
     if not openbao_tls_failures("fx", "0.1.0", bao(req), "", []):
         out.append("self-test: step 5 passed with no volume list")
+    # Step 6: each workloads policy in the release namespace admits Reloader.
+    rl = [{"kind": "Deployment", "metadata": {"name": "reloader", "namespace": "gibson"},
+           "spec": {"template": {"spec": {"serviceAccountName": "reloader"}}}},
+          {"kind": "Role", "metadata": {"name": "reloader"},
+           "rules": [{"apiGroups": ["apps"], "resources": ["deployments"], "verbs": ["patch"]}]}]
+    def vap(name: str, restart: bool, sel: dict | None = None, cond: str = "") -> list[dict]:
+        spec: dict = {"matchConstraints": {"resourceRules": [
+            {"apiGroups": ["apps"], "operations": ["UPDATE"], "resources": ["deployments"]}]},
+            "validations": [{"expression": "x" + (" || variables.restartOnly" if restart else "")}]}
+        if restart:
+            spec["variables"] = [{"name": "restartOnly", "expression":
+                'request.userInfo.username == "system:serviceaccount:gibson:reloader" '
+                "&& object.spec.template.spec == oldObject.spec.template.spec"}]
+        if cond:
+            spec["matchConditions"] = [{"name": "c", "expression": cond}]
+        b = {"kind": "ValidatingAdmissionPolicyBinding", "metadata": {"name": name},
+             "spec": {"policyName": name, "matchResources": {"namespaceSelector": sel} if sel else {}}}
+        return [{"kind": "ValidatingAdmissionPolicy", "metadata": {"name": name}, "spec": spec}, b]
+    own = {"matchLabels": {"kubernetes.io/metadata.name": "gibson"}}
+    if reloader_admission_failures("fx", "0.1.0", rl + vap("good", True, own)):
+        out.append("self-test: a workloads policy that admits Reloader failed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("bad", False, own)):
+        out.append("self-test: a workloads policy in the release namespace that refuses Reloader passed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("open", False)):
+        out.append("self-test: an unscoped workloads policy that refuses Reloader passed step 6")
+    if reloader_admission_failures("fx", "0.1.0", rl + vap("tenant", False, None, "request.namespace.startsWith('tenant-')")):
+        out.append("self-test: a policy scoped to tenant namespaces by its match condition failed step 6")
+    if reloader_admission_failures("fx", "0.1.0", rl + vap("other", False, {"matchLabels": {"kubernetes.io/metadata.name": "x"}})):
+        out.append("self-test: a policy bound to another namespace failed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", vap("good", True, own)):
+        out.append("self-test: step 6 passed with no Reloader in the render")
+    # Fail closed: an unknown selector or condition counts.
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("lbl", False, {"matchLabels": {"team": "x"}})):
+        out.append("self-test: a policy bound by a label that may hold the release namespace passed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("eq", False, None, "request.namespace == 'gibson'")):
+        out.append("self-test: a policy whose match condition names the release namespace passed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("notin", False, {"matchExpressions": [
+            {"key": "kubernetes.io/metadata.name", "operator": "NotIn", "values": ["kube-system"]}]})):
+        out.append("self-test: a NotIn selector that holds the release namespace passed step 6")
+    if reloader_admission_failures("fx", "0.1.0", rl + vap("notin2", False, {"matchExpressions": [
+            {"key": "kubernetes.io/metadata.name", "operator": "NotIn", "values": ["gibson"]}]})):
+        out.append("self-test: a NotIn selector that leaves the release namespace out failed step 6")
+    if reloader_admission_failures("fx", "0.1.0", rl + vap("plug", False, None, "request.namespace.matches('^tenant-.+-plugins$')")):
+        out.append("self-test: a policy scoped to plugin namespaces by matches() failed step 6")
+    if reloader_admission_failures("fx", "0.1.0", rl + vap("tr", False, None,
+            "request.namespace.startsWith('tenant-') && !request.namespace.endsWith('-plugins')")):
+        out.append("self-test: a policy whose && starts with a tenant prefix failed step 6")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("or", False, None,
+            "request.userInfo.username == 'x' || request.operation == 'UPDATE' && request.namespace.startsWith('tenant-')")):
+        out.append("self-test: a match condition with || passed step 6 as if it left the namespace out")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("neg", False, None, "!request.namespace.startsWith('tenant-')")):
+        out.append("self-test: a negated startsWith passed step 6 as if it left the namespace out")
+    if not reloader_admission_failures("fx", "0.1.0", rl + vap("gpref", False, None, "request.namespace.startsWith('gib')")):
+        out.append("self-test: a startsWith prefix that the release namespace has passed step 6")
     return out
 
 

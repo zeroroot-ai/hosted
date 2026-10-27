@@ -50,3 +50,9 @@ spiffe:
   # controller-manager in this env watches className "gibson-gibson", the
   # same class the entitlements-svc overlay of this env names (gitops#355).
   controllerManagerClassName: "gibson-gibson"
+
+identityAdmission:
+  # The account of the core Reloader, which restarts this Deployment on a new
+  # Postgres login role (hosted#162). check-env-renders-at-pin.py step 6
+  # checks it against the Reloader Deployment of the core render.
+  reloaderPrincipal: "system:serviceaccount:gibson:reloader"

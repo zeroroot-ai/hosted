@@ -201,3 +201,10 @@ PY
   [ "$status" -eq 1 ] || { echo "$output"; false; }
   [[ "$output" == *"no validation admits variables.restartOnly"* ]] || { echo "$output"; false; }
 }
+
+@test "FAILING FIXTURE: under Deny an empty identityAdmission.reloaderPrincipal fails the render" {
+  run helm template x "$CHART_DIR" -f "$CHART_DIR/ci/values-saas-render-test.yaml" \
+    --set identityAdmission.reloaderPrincipal= --namespace gibson
+  [ "$status" -ne 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"identityAdmission.reloaderPrincipal is empty"* ]] || { echo "$output"; false; }
+}

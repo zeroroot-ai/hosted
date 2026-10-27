@@ -41,8 +41,15 @@ Deny: the legitimate creator differs per install.
        API gives gibson-billing-webhook first, so no consumer of the login
        role restarted: drill rotation run 40478619844 kept 6 sessions of the
        old role, 4 of them in the daemon. */ -}}
-{{- $reloaderPrincipal := $ia.reloaderPrincipal | default (printf "system:serviceaccount:%s:reloader" .Release.Namespace) -}}
+{{- /* The account Reloader writes as. The overlay cannot read it: Reloader
+       belongs to the core release, which may run elsewhere. So each env
+       names it, and scripts/check-env-renders-at-pin.py (step 6) checks it
+       against the Reloader Deployment of the core render. */ -}}
+{{- $reloaderPrincipal := $ia.reloaderPrincipal | default "" -}}
 {{- $actions := $ia.actions | default (list "Deny") -}}
+{{- if and (has "Deny" $actions) (empty $reloaderPrincipal) -}}
+{{- fail "identityAdmission.actions requests Deny but identityAdmission.reloaderPrincipal is empty. The workloads policy must admit the restart of this Deployment by Reloader when its Postgres login role changes (ADR-0171), and the overlay cannot know the account of the core Reloader. Name it, e.g. reloaderPrincipal: \"system:serviceaccount:gibson:reloader\"." -}}
+{{- end -}}
 {{- if and (has "Deny" $actions) (empty ($ia.workloadCreators | default (list))) -}}
 {{- fail "identityAdmission.actions requests Deny but identityAdmission.workloadCreators is empty. That policy governs who may create or update a workload whose pod template claims the billing identity, and the legitimate creator differs per install — the Argo CD application-controller ServiceAccount on a GitOps cluster, the identity running `helm install` elsewhere. Name it, e.g. workloadCreators: [\"system:serviceaccount:argocd:argocd-application-controller\"]." -}}
 {{- end -}}
