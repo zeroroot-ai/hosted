@@ -34,7 +34,9 @@ audit_lock_mode = "GOVERNANCE"
 #
 # Terraform reads TF_VAR_* with no extra wiring. Both variables default to "",
 # which is what an environment whose Argo needs no credential wants, so
-# forgetting them fails loudly at preflight rather than silently here.
+# forgetting them would write empty values into substrate.env. substrate.sh
+# refuses to run while one of them is unset or empty:
+# per-run TF_VAR: argocd_github_app_id argocd_github_app_installation_id
 
 # The edge TLS secret (edge-cert.tf). Staging is recreated from a workstation
 # (ADR-0095: `make recreate ENV=staging`) as OrganizationAccountAccessRole, so

@@ -31,7 +31,8 @@ audit_lock_mode = "GOVERNANCE"
 
 # argocd_github_app_id / argocd_github_app_installation_id are supplied per run
 # through TF_VAR_*, not committed (hosted#108). Both default to "", so a missing
-# one fails at preflight rather than silently here.
+# one would be written empty, so substrate.sh refuses to run without both.
+# per-run TF_VAR: argocd_github_app_id argocd_github_app_installation_id
 
 # Drill keeps its stage 0 state, key slots and rotation record in its own durable
 # bucket under tfstate/stage0/, and its keyring in the Secrets Manager secret
