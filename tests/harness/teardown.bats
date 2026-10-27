@@ -249,7 +249,7 @@ JSON
   *"get backup.velero.io/preserve-kind-"*) printf '{"phase":"%s"}' "$STUB_VELERO_BACKUP_PHASE"; exit 0 ;;
 
   # --- the backup log, signed by Velero ------------------------------------
-  *"get downloadrequest.velero.io/teardown-explain-preserve-kind-"*) printf 'http://bucket.invalid/signed/backup-logs.gz'; exit 0 ;;
+  *"get downloadrequest.velero.io/velero-explain-preserve-kind-"*) printf 'http://bucket.invalid/signed/backup-logs.gz'; exit 0 ;;
   # backup-verify cleans up its canary and its namespace.
   "-n tenant-"*"-canary delete pod backup-canary --ignore-not-found --wait=true") exit 0 ;;
   "-n backup-verify-"*" wait --for=condition=Ready pod/backup-canary --timeout=30s") exit 0 ;;

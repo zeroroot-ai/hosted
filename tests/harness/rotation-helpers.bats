@@ -958,3 +958,54 @@ SH
   grep -A3 '^run_diagnosis() {' "$TEST" | grep -q 'ROTATION_ONE_CLASS=diagnose_failed_class'
   grep -A6 '^run_diagnosis() {' "$TEST" | grep -q 'timeout --kill-after="\$CLASS_KILL_AFTER_S" "\$DIAG_TIMEOUT_S"'
 }
+
+# --- velero_failed_volumes names the cause (drill rotation run 40429097454) ---
+# The backup of the keyring class ended PartiallyFailed with errors=44 and no
+# failed PodVolumeBackup. The count names no cause. The helper now prints the
+# phase of each BackupRepository and the errors from the log of the backup.
+failed_volumes_helpers() {
+  python3 - "$TEST" "$TMP/fv.sh" "$REPO_ROOT/scripts/lib/velero-backup-log.sh" <<'PY'
+import re, sys
+text = open(sys.argv[1]).read()
+m = re.search(r"^velero_failed_volumes\(\) \{.*?^\}\n", text, re.M | re.S)
+if not m:
+    sys.exit("no function velero_failed_volumes in the script")
+if 'scripts/lib/velero-backup-log.sh"' not in text:
+    sys.exit("the script does not source scripts/lib/velero-backup-log.sh")
+open(sys.argv[2], "w").write('. "%s"\n' % sys.argv[3] + m.group(0))
+PY
+  mkdir -p "$TMP/bin"
+  python3 -c 'import gzip,sys; gzip.open(sys.argv[1],"wt").write(
+    "time=\"t\" level=info msg=\"Backing up item\" backup=velero/b1\n"
+    "time=\"t\" level=error msg=\"Error backing up item\" backup=velero/b1 error=\"repository not ready\" logSource=\"x.go:1\"\n"
+    "time=\"t\" level=error msg=\"Error backing up item\" backup=velero/b1 error=\"repository not ready\" logSource=\"x.go:2\"\n")' "$TMP/log.gz"
+  cat > "$TMP/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "-n velero get podvolumebackups.velero.io -l velero.io/backup-name=b1 -o json") echo '{"items":[]}' ;;
+  "-n velero get backups.velero.io b1 -o jsonpath="*) printf '      errors=2 warnings=\n' ;;
+  "-n velero get backuprepositories.velero.io -o json")
+    echo '{"items":[{"metadata":{"name":"gibson-default-kopia"},"spec":{"repositoryType":"kopia"},"status":{"phase":"NotReady","message":"invalid repository password"}}]}' ;;
+  "apply -f -") cat > "$STUB_DIR/applied" ;;
+  "-n velero get downloadrequest.velero.io/velero-explain-b1 -o jsonpath={.status.downloadURL}") printf 'http://bucket.invalid/signed' ;;
+  "-n velero delete downloadrequest.velero.io/velero-explain-b1 --ignore-not-found") : ;;
+  *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
+esac
+SH
+  cat > "$TMP/bin/curl" <<'SH'
+#!/usr/bin/env bash
+cp "$STUB_DIR/log.gz" "${@: -1}"
+SH
+  chmod +x "$TMP/bin/kubectl" "$TMP/bin/curl"
+}
+
+@test "FAILING FIXTURE: velero_failed_volumes names the BackupRepository phase and the grouped errors of the backup log" {
+  failed_volumes_helpers
+  PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c 'set -euo pipefail; . "$1"; velero_failed_volumes b1' _ "$TMP/fv.sh"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [[ "$output" == *"gibson-default-kopia kopia NotReady invalid repository password"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"1 distinct errors in the backup log"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'2 msg="Error backing up item" error="repository not ready"'* ]] || { echo "$output"; false; }
+  [[ "$output" != *"Backing up item"* ]] || { echo "$output"; false; }
+  grep -q 'kind: BackupLog' "$TMP/applied"
+}
