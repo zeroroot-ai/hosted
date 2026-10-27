@@ -41,6 +41,9 @@ set -euo pipefail
 # the identity admission policy denies a `rollout restart` of one.
 # shellcheck source=../../scripts/lib/restart-pods.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../../scripts/lib/restart-pods.sh"
+# explain_bad_backup: the errors of a backup, from its own log in the bucket.
+# shellcheck source=../../scripts/lib/velero-backup-log.sh
+. "$(dirname "${BASH_SOURCE[0]}")/../../scripts/lib/velero-backup-log.sh"
 
 NS="${NS:-gibson}"
 RELEASE="${RELEASE:-gibson}"
@@ -957,6 +960,15 @@ velero_failed_volumes() {
       | jq -r '.items[] | select(.status.phase != "Completed")
                | "      \(.spec.pod.namespace)/\(.spec.pod.name) \(.spec.volume): \(.status.phase // "no phase") \(.status.message // "")"' 2>&1
     kubectl -n velero get backups.velero.io "$1" -o jsonpath='      errors={.status.errors} warnings={.status.warnings}{"\n"}' 2>&1
+    # The phase of each kopia repository: a repository that is not Ready
+    # makes no PodVolumeBackup, so a failed volume backup shows only here.
+    echo "    --- the BackupRepositories ---"
+    kubectl -n velero get backuprepositories.velero.io -o json 2>&1 \
+      | jq -r '.items[] | "      \(.metadata.name) \(.spec.repositoryType // "") \(.status.phase // "no phase") \(.status.message // "")"' 2>&1
+    # The count above names no cause. Velero keeps the errors in the log of
+    # the backup in the bucket (drill rotation run 40429097454: errors=44).
+    echo "    --- the errors in the log of backup $1 ---"
+    explain_bad_backup "$1"
   } >&2 || true
 }
 

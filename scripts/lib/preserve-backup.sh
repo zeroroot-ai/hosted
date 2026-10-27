@@ -81,79 +81,10 @@ QUEUE_TIMEOUT="${QUEUE_TIMEOUT:-3600}"
 VELERO_ACTIVE_PHASES=" New Queued ReadyToStart InProgress WaitingForPluginOperations WaitingForPluginOperationsPartiallyFailed Finalizing FinalizingPartiallyFailed "
 VELERO_QUEUED_PHASES=" New Queued ReadyToStart "
 
-# explain_bad_backup <name> — WHY a backup is not Completed, in the words
-# Velero itself recorded.
-#
-# `.status` carries a NUMBER of errors and not one of them. Velero writes the
-# per-item errors to the backup's OWN log, which it stores beside the backup
-# in the durable bucket and never sends to the server pod's stdout, so
-# `kubectl logs deploy/velero` does not hold them either. An operator whose
-# teardown aborted therefore had a count and no cause: measured on 2026-09-02
-# (deploy#1740), three runs of the kind loop reported `errors: 134` and no way
-# to learn which items those were without a live cluster.
-#
-# The log comes back through a DownloadRequest: Velero signs a URL for the
-# object and this reads it. That path needs no bucket credential here and no
-# velero CLI, and it works the same on kind's MinIO and on S3.
-#
-# This function only ever prints. Every failure inside it is swallowed,
-# because it runs on the way to an abort and must not replace the real
-# message with one about diagnostics.
-explain_bad_backup() {
-  local name="$1" dr="teardown-explain-${1}" url="" deadline
-  kubectl apply -f - >/dev/null <<YAML
-apiVersion: velero.io/v1
-kind: DownloadRequest
-metadata:
-  name: ${dr}
-  namespace: ${VELERO_NS}
-spec:
-  target:
-    kind: BackupLog
-    name: ${name}
-YAML
-  deadline=$(( $(date +%s) + 60 ))
-  while :; do
-    url="$(kubectl -n "$VELERO_NS" get "downloadrequest.velero.io/${dr}" -o jsonpath='{.status.downloadURL}')" || true
-    [ -n "$url" ] && break
-    if [ "$(date +%s)" -ge "$deadline" ]; then
-      printf '  (Velero signed no download URL for the log of %s within 60s, so the errors cannot be named here)\n' "$name" >&2
-      return 0
-    fi
-    sleep 2
-  done
-  # curl -fsS names the HTTP status on stderr, never the signed URL.
-  if ! curl -fsSL "$url" -o "$WORK/backup-log.gz"; then
-    printf '  (the signed URL for the log of %s did not answer)\n' "$name" >&2
-    return 0
-  fi
-  if ! python3 -c 'import gzip,sys;sys.stdout.write(gzip.open(sys.stdin.buffer,"rt",errors="replace").read())' \
-       < "$WORK/backup-log.gz" > "$WORK/backup.log"; then
-    printf '  (the log of %s came back unreadable)\n' "$name" >&2
-    return 0
-  fi
-  # Everything that makes two reports of the SAME fault look different goes
-  # before the grouping: the timestamp, the log source, the backup name, the
-  # Go function, and the NAMESPACE. The item collector lists every kind once
-  # per included namespace, so one kind Velero cannot read is one error per
-  # namespace; folding the namespace away turns those back into one line that
-  # says which kind, and how many. Measured on 2026-09-02 (deploy#1740): with
-  # the namespace left in, one kind filled four lines and the display cap hid
-  # two thirds of the kinds behind the ones late in the alphabet.
-  local grouped="$WORK/backup-errors.txt"
-  grep 'level=error' "$WORK/backup.log" \
-    | sed -e 's/^time="[^"]*" //' -e 's/^level=error //' \
-          -e 's/ logSource="[^"]*"//' -e 's/ backup=[^ ]*//' \
-          -e 's/ error\.function="[^"]*"//' \
-          -e 's/ in the namespace \\"[^\\]*\\"//' \
-    | sort | uniq -c | sort -rn > "$grouped"
-  printf '\n  %s distinct errors in the backup log, most frequent first, at most 40 shown.\n' \
-    "$(wc -l < "$grouped")" >&2
-  printf '  The count is how many namespaces the fault was reported in.\n' >&2
-  head -40 "$grouped" >&2
-  kubectl -n "$VELERO_NS" delete "downloadrequest.velero.io/${dr}" --ignore-not-found >/dev/null \
-    || printf '  (the DownloadRequest %s was not deleted; the error is above. Velero expires it on its own)\n' "$dr" >&2
-}
+# explain_bad_backup lives in lib/velero-backup-log.sh, which the rotation
+# exit test also sources.
+# shellcheck source=velero-backup-log.sh
+. "$(dirname "${BASH_SOURCE[0]}")/velero-backup-log.sh"
 
 # velero_bsl_ready <bsl> — the BackupStorageLocation the backup writes to is
 # Available. Velero holds a backup whose location is not Available, so a
