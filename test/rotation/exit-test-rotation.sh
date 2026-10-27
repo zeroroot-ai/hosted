@@ -1099,9 +1099,11 @@ VELERO_PASSWORD_ERROR="${VELERO_PASSWORD_ERROR:-invalid repository password}"
 # repository messages count too. Any PartiallyFailed used to count as a
 # refusal, and the 44 refused lists of drill rotation run 40438631534 passed
 # as one (review of hosted#153). Without a match it prints what Velero
-# recorded, on stderr. The caller redacts the passwords from the evidence.
+# recorded, on stderr. Each value in the array VELERO_REDACT is cut out of
+# every line before any of it prints, on both paths.
+VELERO_REDACT=()
 password_named() {
-  local name="$1" lines log hit
+  local name="$1" lines log hit pw
   lines="$(kubectl -n velero get podvolumebackups.velero.io -l "velero.io/backup-name=${name}" -o json \
     | jq -r '.items[] | select(.status.message) | "PodVolumeBackup \(.metadata.name // ""): \(.status.message)"')" || lines=""
   lines+=$'\n'"$(kubectl -n velero get backuprepositories.velero.io -o json \
@@ -1111,6 +1113,9 @@ password_named() {
     lines+=$'\n'"$(awk 'index($0, "level=error") { sub(/^time="[^"]*" /, ""); print "backup log: " $0 }' "$log")"
   fi
   rm -f "$log"
+  for pw in "${VELERO_REDACT[@]}"; do
+    [ -z "$pw" ] || lines="${lines//"$pw"/[redacted]}"
+  done
   # One awk, not grep | head: under pipefail the early exit of head can fail
   # the pipe on a match.
   hit="$(awk -v e="$VELERO_PASSWORD_ERROR" 'index(tolower($0), tolower(e)) { print substr($0, 1, 400); exit }' <<<"$lines")"
@@ -1147,15 +1152,14 @@ velero_refusal_step() {
   VELERO_RESTARTED_AT="$(velero_pod_start)" \
     || { miss "the start time of the Velero pod could not be read after the restart on the keyring password"; return 1; }
   password_refused "$phase" || return 1
-  local evidence pw
-  evidence="$(password_named "$(cat "$VELERO_LAST_FILE")")" \
-    || { miss "the backup with another repository password ended ${phase}, but no error names the repository password (what Velero recorded is above), so it proves no refusal"; return 1; }
+  local evidence
   # The evidence is the words of Velero. It holds no password, but a value
   # of either password is cut out of it before it prints.
-  for pw in "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "$work/velero.env" 2>/dev/null)" \
-            "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)"; do
-    [ -z "$pw" ] || evidence="${evidence//"$pw"/[redacted]}"
-  done
+  VELERO_REDACT=("$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "$work/velero.env" 2>/dev/null)"
+                 "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)")
+  evidence="$(password_named "$(cat "$VELERO_LAST_FILE")")" \
+    || { VELERO_REDACT=(); miss "the backup with another repository password ended ${phase}, but no error names the repository password (what Velero recorded is above), so it proves no refusal"; return 1; }
+  VELERO_REDACT=()
   ok "a backup with another repository password does not complete (${phase}), and Velero names the password: ${evidence}"
 }
 

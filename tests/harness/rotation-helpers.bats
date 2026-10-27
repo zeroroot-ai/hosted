@@ -738,7 +738,12 @@ refusal_step() {
     velero_backup() { echo "reference=$VELERO_RESTARTED_AT" >&2; printf PartiallyFailed; }
     # password_named has its own tests below. STUB_NOT_NAMED: no error names
     # the password. STUB_EVIDENCE: the line it found.
-    password_named() { [ -z "${STUB_NOT_NAMED:-}" ] && printf "%s\n" "${STUB_EVIDENCE:-PodVolumeBackup p1: invalid repository password}"; }
+    password_named() {
+      local e="${STUB_EVIDENCE:-PodVolumeBackup p1: invalid repository password}" pw
+      [ -z "${STUB_NOT_NAMED:-}" ] || return 1
+      for pw in "${VELERO_REDACT[@]}"; do [ -z "$pw" ] || e="${e//"$pw"/[redacted]}"; done
+      printf "%s\n" "$e"
+    }
     velero_refusal_step "${STUB_WORK:-/nonexistent}"; rc=$?
     echo "final=$VELERO_RESTARTED_AT"
     exit $rc' _ "$TMP/velero.sh"
@@ -1090,7 +1095,7 @@ password_named_helpers() {
 import re, sys
 text = open(sys.argv[1]).read()
 out = ['. "%s"' % sys.argv[3]]
-for const in ("VELERO_PASSWORD_ERROR",):
+for const in ("VELERO_PASSWORD_ERROR", "VELERO_REDACT"):
     m = re.search(r'^%s=.*\n' % const, text, re.M)
     if not m:
         sys.exit("no %s in the script" % const)
@@ -1160,6 +1165,15 @@ run_named() {
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(printf '%s\n' "$output" | tail -n 1)" = NOT-NAMED ] || { echo "$output"; false; }
   [[ "$output" == *'1 msg="Error listing resources" error="secrets is forbidden"'* ]] || { echo "$output"; false; }
+}
+
+@test "FAILING FIXTURE: password_named: what it prints without a match holds no value of VELERO_REDACT" {
+  password_named_helpers
+  export STUB_PVB_MSG='error to open repo: wrong key pw-X9q' STUB_LOG=''
+  PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c 'set -euo pipefail; . "$1"; VELERO_REDACT=(pw-X9q); password_named b1 || echo NOT-NAMED' _ "$TMP/pn.sh"
+  [ "$(printf '%s\n' "$output" | tail -n 1)" = NOT-NAMED ] || { echo "$output"; false; }
+  [[ "$output" == *"error to open repo: wrong key [redacted]"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"pw-X9q"* ]] || { echo "$output"; false; }
 }
 
 @test "FAILING FIXTURE: password_named: a log that cannot be read does not name the password" {
