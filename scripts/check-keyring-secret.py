@@ -4,9 +4,9 @@
 
 The secret zeroroot-ai/<env>/keyring (substrate/gibson-bootstrap/
 keyring-secret.tf) holds the bringup keyring of an environment. Staging, prod
-and drill share one AWS account. The bringup role (eks-bringup) trusts the
-GitHub environments of staging and prod, and staging has no required reviewer,
-so no bringup role may reach the keyring of staging or prod. Who may reach it:
+and drill share one AWS account. A bringup role (eks-bringup of prod,
+staging-bringup of staging) runs from a GitHub environment, so no bringup role
+may reach the keyring of staging or prod. Who may reach it:
 
   - the operator role OrganizationAccountAccessRole, read and write;
   - the drill role drill-bringup, for drill only (envs/drill.tfvars);

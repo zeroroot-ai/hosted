@@ -1,0 +1,68 @@
+{
+  "Statement": [
+    {
+      "Action": [
+        "sts:*",
+        "ssmmessages:*",
+        "ssm:*",
+        "ses:Describe*",
+        "s3:*",
+        "ec2messages:*",
+        "ec2:Describe*"
+      ],
+      "Effect": "Allow",
+      "Resource": "*",
+      "Sid": "AllowTheServicesOfStaging"
+    },
+    {
+      "Action": "sts:AssumeRole",
+      "Effect": "Deny",
+      "Resource": "*",
+      "Sid": "DenyAssumingAnotherRole"
+    },
+    {
+      "Action": "s3:*",
+      "Effect": "Deny",
+      "NotResource": "arn:aws:s3:::zeroroot-ai-staging-*",
+      "Sid": "DenyBucketsOutsideStaging"
+    },
+    {
+      "Action": "*",
+      "Effect": "Deny",
+      "Resource": [
+        "arn:aws:ssm:*:*:parameter/zeroroot-ai/prod/*",
+        "arn:aws:ssm:*:*:parameter/zeroroot-ai/drill/*"
+      ],
+      "Sid": "DenyResourcesNamedForAnotherEnvironment"
+    },
+    {
+      "Action": "*",
+      "Condition": {
+        "Null": {
+          "aws:ResourceTag/Environment": "false"
+        },
+        "StringNotEquals": {
+          "aws:ResourceTag/Environment": "staging"
+        }
+      },
+      "Effect": "Deny",
+      "Resource": "*",
+      "Sid": "DenyResourcesTaggedWithAnotherEnvironment"
+    },
+    {
+      "Action": [
+        "ssm:StartSession",
+        "ssm:SendCommand"
+      ],
+      "Condition": {
+        "StringNotEquals": {
+          "ssm:resourceTag/Environment": "staging"
+        }
+      },
+      "Effect": "Deny",
+      "Resource": "arn:aws:ec2:*:${account_id}:instance/*",
+      "Sid": "DenyCommandsOnInstancesOutsideStaging"
+    }
+  ],
+  "Version": "2012-10-17"
+}

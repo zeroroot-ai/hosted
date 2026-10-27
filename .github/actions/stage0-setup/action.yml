@@ -16,7 +16,7 @@ inputs:
     description: The environment name.
     required: true
   role-arn:
-    description: The bringup role ARN variable. EKS_BRINGUP_ROLE_ARN for staging and prod, DRILL_BRINGUP_ROLE_ARN for drill.
+    description: The bringup role ARN variable. EKS_BRINGUP_ROLE_ARN for prod, DRILL_BRINGUP_ROLE_ARN for drill.
     required: true
   session-name:
     description: The role session name, one for each job.
@@ -55,8 +55,7 @@ runs:
 
     # The keyring reader role of this environment reads the keyring and nothing
     # else. eks-bringup is not a principal of the keyring secret of staging or
-    # prod: it trusts both of their GitHub environments, and staging has no
-    # required reviewer.
+    # prod: a bringup role runs from a GitHub environment.
     - name: The keyring reader role must be set outside drill
       shell: bash
       env:

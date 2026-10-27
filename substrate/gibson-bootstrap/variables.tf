@@ -201,7 +201,7 @@ variable "edge_cert_principal_role_names" {
 }
 
 variable "keyring_principal_role_names" {
-  description = "The IAM roles that read and write the keyring secret: the operator role that runs stage 0 from the workstation. Drill adds its own role drill-bringup. Staging and prod add no role: eks-bringup trusts both of their GitHub environments."
+  description = "The IAM roles that read and write the keyring secret: the operator role that runs stage 0 from the workstation. Drill adds its own role drill-bringup. Staging and prod add no role: a bringup role reaches the keyring of drill only."
   type        = list(string)
   default     = ["OrganizationAccountAccessRole"]
 }

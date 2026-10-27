@@ -253,6 +253,7 @@ aws s3api put-bucket-versioning \
 | `state-bucket.tf` | This workspace's own state backend |
 | `findings-bucket.tf` | Security findings (GuardDuty) bucket in mgmt |
 | `github-oidc.tf` | GitHub Actions OIDC IdP + tf-plan / tf-apply roles |
+| `github-oidc-staging.tf` | staging-bringup, the role of promote-staging.yml, and its boundary PB-StagingBringup |
 | `scripts/verify-scp-attached.sh` | Operator check: assert both SCPs on the workload OU |
 | `runbooks/RUNBOOK-account-bootstrap.md` | Manual operator account-creation procedure |
 
