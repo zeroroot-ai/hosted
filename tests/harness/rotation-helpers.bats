@@ -503,7 +503,7 @@ velero_helpers() {
 import re, sys
 text = open(sys.argv[1]).read()
 out = []
-for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "velero_delete_backup", "velero_pod_start", "velero_refusal_step", "password_refused", "password_named", "velero_backup"):
+for name in ("velero_in_flight", "velero_storage_ready", "velero_diagnose", "velero_delete_backup", "velero_pod_start", "velero_refusal_step", "password_refused", "password_named", "redact_add", "velero_backup"):
     m = re.search(r"^%s\(\) \{.*?^\}\n" % name, text, re.M | re.S)
     if not m:
         sys.exit("no function %s in the script" % name)
@@ -738,12 +738,7 @@ refusal_step() {
     velero_backup() { echo "reference=$VELERO_RESTARTED_AT" >&2; printf PartiallyFailed; }
     # password_named has its own tests below. STUB_NOT_NAMED: no error names
     # the password. STUB_EVIDENCE: the line it found.
-    password_named() {
-      local e="${STUB_EVIDENCE:-PodVolumeBackup p1: invalid repository password}" pw
-      [ -z "${STUB_NOT_NAMED:-}" ] || return 1
-      for pw in "${VELERO_REDACT[@]}"; do [ -z "$pw" ] || e="${e//"$pw"/[redacted]}"; done
-      printf "%s\n" "$e"
-    }
+    password_named() { [ -z "${STUB_NOT_NAMED:-}" ] && printf "%s\n" "${STUB_EVIDENCE:-PodVolumeBackup p1: invalid repository password}"; }
     velero_refusal_step "${STUB_WORK:-/nonexistent}"; rc=$?
     echo "final=$VELERO_RESTARTED_AT"
     exit $rc' _ "$TMP/velero.sh"
@@ -765,17 +760,17 @@ refusal_step() {
   [[ "$output" != *"ok: a backup with another repository password"* ]] || { echo "$output"; false; }
 }
 
-@test "FAILING FIXTURE: the ok line of a refusal holds the words of Velero, and never a password (coordinator, hosted#154)" {
+@test "FAILING FIXTURE: the ok line of a refusal holds the words of Velero, and both passwords go to the filter (coordinator, hosted#154)" {
   mkdir -p "$TMP/work"
   printf 'VELERO_REPO_PASSWORD=s3cr3t-random\n' > "$TMP/work/velero.env"
   printf 'VELERO_REPO_PASSWORD=k3yring-pw\n' > "$TMP/keyring.env"
-  export STUB_POD_START=2031-01-02T03:04:05Z STUB_WORK="$TMP/work" KEYRING_FILE="$TMP/keyring.env"
-  export STUB_EVIDENCE='PodVolumeBackup p1: error to open repo: invalid repository password (tried s3cr3t-random, then k3yring-pw)'
+  : > "$TMP/redact"
+  export STUB_POD_START=2031-01-02T03:04:05Z STUB_WORK="$TMP/work" KEYRING_FILE="$TMP/keyring.env" VELERO_REDACT_FILE="$TMP/redact"
+  export STUB_EVIDENCE='PodVolumeBackup p1: error to open repo: invalid repository password'
   refusal_step
   [ "$status" -eq 0 ] || { echo "$output"; false; }
-  [[ "$output" == *"ok: a backup with another repository password does not complete (PartiallyFailed), and Velero names the password: PodVolumeBackup p1: error to open repo: invalid repository password (tried [redacted], then [redacted])"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"s3cr3t-random"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"k3yring-pw"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"ok: a backup with another repository password does not complete (PartiallyFailed), and Velero names the password: PodVolumeBackup p1: error to open repo: invalid repository password"* ]] || { echo "$output"; false; }
+  [ "$(cat "$TMP/redact")" = "$(printf 's3cr3t-random\nk3yring-pw')" ] || { cat "$TMP/redact"; false; }
 }
 
 @test "FAILING FIXTURE: a Velero pod read that gives nothing is a miss, and the time check is never skipped (hosted#68 review)" {
@@ -1095,7 +1090,7 @@ password_named_helpers() {
 import re, sys
 text = open(sys.argv[1]).read()
 out = ['. "%s"' % sys.argv[3]]
-for const in ("VELERO_PASSWORD_ERROR", "VELERO_REDACT"):
+for const in ("VELERO_PASSWORD_ERROR",):
     m = re.search(r'^%s=.*\n' % const, text, re.M)
     if not m:
         sys.exit("no %s in the script" % const)
@@ -1164,16 +1159,7 @@ run_named() {
   run_named
   [ "$status" -eq 0 ] || { echo "$output"; false; }
   [ "$(printf '%s\n' "$output" | tail -n 1)" = NOT-NAMED ] || { echo "$output"; false; }
-  [[ "$output" == *'1 msg="Error listing resources" error="secrets is forbidden"'* ]] || { echo "$output"; false; }
-}
-
-@test "FAILING FIXTURE: password_named: what it prints without a match holds no value of VELERO_REDACT" {
-  password_named_helpers
-  export STUB_PVB_MSG='error to open repo: wrong key pw-X9q' STUB_LOG=''
-  PATH="$TMP/bin:$PATH" STUB_DIR="$TMP" run bash -c 'set -euo pipefail; . "$1"; VELERO_REDACT=(pw-X9q); password_named b1 || echo NOT-NAMED' _ "$TMP/pn.sh"
-  [ "$(printf '%s\n' "$output" | tail -n 1)" = NOT-NAMED ] || { echo "$output"; false; }
-  [[ "$output" == *"error to open repo: wrong key [redacted]"* ]] || { echo "$output"; false; }
-  [[ "$output" != *"pw-X9q"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'backup log: level=error msg="Error listing resources" error="secrets is forbidden"'* ]] || { echo "$output"; false; }
 }
 
 @test "FAILING FIXTURE: password_named: a log that cannot be read does not name the password" {
@@ -1182,4 +1168,57 @@ run_named() {
   export STUB_PVB_MSG='' VELERO_LOG_WAIT=0
   run_named
   [ "$(printf '%s\n' "$output" | tail -n 1)" = NOT-NAMED ] || { echo "$output"; false; }
+}
+
+# --- run_one_class: one filter for all output of a class (coordinator, hosted#154)
+one_class_helpers() {
+  python3 - "$TEST" "$TMP/one.sh" "$REPO_ROOT/scripts/lib/velero-backup-log.sh" <<'PY2'
+import re, sys
+text = open(sys.argv[1]).read()
+out = ['. "%s"' % sys.argv[3]]
+for name in ("redact_add", "redact_stream", "run_one_class"):
+    m = re.search(r"^%s\(\) \{.*?^\}\n" % name, text, re.M | re.S)
+    if not m:
+        sys.exit("no function %s in the script" % name)
+    out.append(m.group(0))
+if 'run_one_class "$ROTATION_ONE_CLASS"' not in text:
+    sys.exit("the class child does not run through run_one_class")
+open(sys.argv[2], "w").write("\n".join(out))
+PY2
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/kubectl" <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "apply -f -") cat > /dev/null ;;
+  "-n velero get downloadrequest.velero.io/velero-explain-b1 -o jsonpath={.status.downloadURL}") printf 'http://bucket.invalid/signed' ;;
+  "-n velero delete downloadrequest.velero.io/velero-explain-b1 --ignore-not-found") : ;;
+  *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
+esac
+SH
+  cat > "$TMP/bin/curl" <<'SH'
+#!/usr/bin/env bash
+printf 'time="t" level=error msg="error to open repo" error="s3://bucket/kopia?pw=r4nd-pw-7: invalid repository password"\n' | gzip > "${@: -1}"
+SH
+  chmod +x "$TMP/bin/kubectl" "$TMP/bin/curl"
+  printf 'VELERO_REPO_PASSWORD=k3yring-pw\n' > "$TMP/keyring.env"
+}
+
+@test "FAILING FIXTURE: a backup-log error that holds the password prints [redacted] in the explain_bad_backup output of a class" {
+  one_class_helpers
+  PATH="$TMP/bin:$PATH" KEYRING_FILE="$TMP/keyring.env" ROTATION_REASON_FILE="$TMP/reason" run bash -c '
+    . "$1"
+    fake_class() {
+      redact_add r4nd-pw-7
+      echo "ok: the keyring password k3yring-pw and the random one r4nd-pw-7"
+      explain_bad_backup b1
+      REASON="the class saw r4nd-pw-7"
+      return 1
+    }
+    run_one_class fake_class; echo "rc=$?"' _ "$TMP/one.sh"
+  [[ "$output" == *"rc=1"* ]] || { echo "$output"; false; }
+  [[ "$output" == *'1 msg="error to open repo" error="s3://bucket/kopia?pw=[redacted]: invalid repository password"'* ]] || { echo "$output"; false; }
+  [[ "$output" == *"ok: the keyring password [redacted] and the random one [redacted]"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"r4nd-pw-7"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"k3yring-pw"* ]] || { echo "$output"; false; }
+  [ "$(cat "$TMP/reason")" = "the class saw [redacted]" ] || { cat "$TMP/reason"; false; }
 }

@@ -1099,11 +1099,9 @@ VELERO_PASSWORD_ERROR="${VELERO_PASSWORD_ERROR:-invalid repository password}"
 # repository messages count too. Any PartiallyFailed used to count as a
 # refusal, and the 44 refused lists of drill rotation run 40438631534 passed
 # as one (review of hosted#153). Without a match it prints what Velero
-# recorded, on stderr. Each value in the array VELERO_REDACT is cut out of
-# every line before any of it prints, on both paths.
-VELERO_REDACT=()
+# recorded, on stderr. run_one_class redacts all of it (redact_stream).
 password_named() {
-  local name="$1" lines log hit pw
+  local name="$1" lines log hit
   lines="$(kubectl -n velero get podvolumebackups.velero.io -l "velero.io/backup-name=${name}" -o json \
     | jq -r '.items[] | select(.status.message) | "PodVolumeBackup \(.metadata.name // ""): \(.status.message)"')" || lines=""
   lines+=$'\n'"$(kubectl -n velero get backuprepositories.velero.io -o json \
@@ -1113,17 +1111,12 @@ password_named() {
     lines+=$'\n'"$(awk 'index($0, "level=error") { sub(/^time="[^"]*" /, ""); print "backup log: " $0 }' "$log")"
   fi
   rm -f "$log"
-  for pw in "${VELERO_REDACT[@]}"; do
-    [ -z "$pw" ] || lines="${lines//"$pw"/[redacted]}"
-  done
   # One awk, not grep | head: under pipefail the early exit of head can fail
   # the pipe on a match.
   hit="$(awk -v e="$VELERO_PASSWORD_ERROR" 'index(tolower($0), tolower(e)) { print substr($0, 1, 400); exit }' <<<"$lines")"
   if [ -n "$hit" ]; then printf '%s\n' "$hit"; return 0; fi
   { echo "    --- what Velero recorded for backup ${name}: no line holds \"${VELERO_PASSWORD_ERROR}\" ---"
     printf '%s\n' "$lines" | sed '/^$/d; s/^/      /'
-    echo "    --- the errors in the log of backup ${name} ---"
-    explain_bad_backup "$name"
   } >&2 || true
   return 1
 }
@@ -1141,6 +1134,10 @@ velero_restart() {
 # read again after the second restart, for the backup that follows this step.
 velero_refusal_step() {
   local work="$1" phase
+  # Velero error text can quote what the open call got. run_one_class cuts
+  # both repository passwords out of every line this class prints.
+  redact_add "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "$work/velero.env" 2>/dev/null)"
+  redact_add "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)"
   k2c "$work/velero.env" && velero_restart || { miss "Velero did not restart with another password"; k2c; velero_restart; return 1; }
   # Velero runs on the random password now. A miss here puts the keyring
   # password back and restarts it, as the failure path above does, or each
@@ -1153,13 +1150,8 @@ velero_refusal_step() {
     || { miss "the start time of the Velero pod could not be read after the restart on the keyring password"; return 1; }
   password_refused "$phase" || return 1
   local evidence
-  # The evidence is the words of Velero. It holds no password, but a value
-  # of either password is cut out of it before it prints.
-  VELERO_REDACT=("$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "$work/velero.env" 2>/dev/null)"
-                 "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)")
   evidence="$(password_named "$(cat "$VELERO_LAST_FILE")")" \
-    || { VELERO_REDACT=(); miss "the backup with another repository password ended ${phase}, but no error names the repository password (what Velero recorded is above), so it proves no refusal"; return 1; }
-  VELERO_REDACT=()
+    || { miss "the backup with another repository password ended ${phase}, but no error names the repository password (what Velero recorded is above), so it proves no refusal"; return 1; }
   ok "a backup with another repository password does not complete (${phase}), and Velero names the password: ${evidence}"
 }
 
@@ -2555,10 +2547,53 @@ time_bound_of() {
 CLASS_TIMEOUT_MARGIN_S=60
 CLASS_KILL_AFTER_S=30
 DIAG_TIMEOUT_S=120
-if [ -n "${ROTATION_ONE_CLASS:-}" ]; then
+# redact_add VALUE: from now on, redact_stream prints VALUE as [redacted].
+# The values go to VELERO_REDACT_FILE (mode 600), never on an argv.
+redact_add() {
+  [ -n "$1" ] && [ -n "${VELERO_REDACT_FILE:-}" ] || return 0
+  printf '%s\n' "$1" >> "$VELERO_REDACT_FILE"
+}
+
+# redact_stream: copy stdin to stdout, with each value of VELERO_REDACT_FILE
+# cut out as [redacted]. It reads the file again for each line, so a value
+# that the class adds while it runs counts from its next line. The one filter
+# for all output of a class (coordinator, hosted#154): Velero error text can
+# quote a repository URL or an error of the open call, and nobody knows all
+# the strings it prints.
+redact_stream() {
+  awk -v f="${VELERO_REDACT_FILE:-/dev/null}" '
+    function cut(s, v,   out, i) {
+      out = ""
+      while ((i = index(s, v)) > 0) { out = out substr(s, 1, i - 1) "[redacted]"; s = substr(s, i + length(v)) }
+      return out s
+    }
+    { while ((getline v < f) > 0) if (v != "") $0 = cut($0, v)
+      close(f); print; fflush() }'
+}
+
+# run_one_class FN [ARG]: the body of a class child. Its stdout, its stderr
+# and its REASON go through redact_stream. The child waits for both filters
+# before it exits, so no line comes after the parent goes on.
+run_one_class() {
+  local rc=0 out_pid err_pid
+  VELERO_REDACT_FILE="$(umask 077 && mktemp)"
+  # The keyring repository password is known before the class starts. The
+  # diagnosis of a failed class runs in a child of its own, so it gets it too.
+  redact_add "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)"
+  exec 3>&1 4>&2
+  exec 1> >(redact_stream >&3); out_pid=$!
+  exec 2> >(redact_stream >&4); err_pid=$!
   REASON=""
-  rc=0; "$ROTATION_ONE_CLASS" ${ROTATION_ONE_ARG:+"$ROTATION_ONE_ARG"} || rc=$?
-  printf '%s' "$REASON" > "${ROTATION_REASON_FILE:?the parent names the reason file}"
+  "$1" ${2:+"$2"} || rc=$?
+  printf '%s' "$REASON" | redact_stream > "${ROTATION_REASON_FILE:?the parent names the reason file}"
+  exec 1>&3 2>&4 3>&- 4>&-
+  wait "$out_pid" "$err_pid" 2>/dev/null || true
+  rm -f "$VELERO_REDACT_FILE"
+  return "$rc"
+}
+
+if [ -n "${ROTATION_ONE_CLASS:-}" ]; then
+  rc=0; run_one_class "$ROTATION_ONE_CLASS" "${ROTATION_ONE_ARG:-}" || rc=$?
   exit "$rc"
 fi
 
