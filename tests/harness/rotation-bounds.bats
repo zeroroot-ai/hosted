@@ -194,6 +194,8 @@ keyring_slow() {
     # password, so it waits the whole VELERO_LOG_WAIT for the log URL.
     VELERO_LAST_FILE="$D/last"; : > "$VELERO_LAST_FILE"
     password_named() { sleep "${VELERO_LOG_WAIT:-60}"; }
+    # The filter of run_one_class has its own tests in rotation-helpers.bats.
+    redact_add() { :; }
     velero_backup() {
       sleep $(( VELERO_QUEUE_WAIT + VELERO_RUN_WAIT ))
       if [ -e "$D/backup1" ]; then printf Completed; else touch "$D/backup1"; printf PartiallyFailed; fi

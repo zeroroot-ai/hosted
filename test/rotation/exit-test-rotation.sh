@@ -86,7 +86,10 @@ START="$(date +%s)"
 REASON=""
 miss() { REASON="$*"; printf '    ✗ %s\n' "$*" >&2; return 1; }
 ok() { printf '    ✓ %s\n' "$*"; }
-# mask VALUE: the runner hides VALUE in the log from now on. The command goes
+# mask VALUE: the runner hides VALUE in the log from now on. In a class
+# child, stdout and stderr have separate filters, so a later stdout line can
+# reach the runner before this command. A value that a class must print goes
+# to redact_add too (review of hosted#158). The command goes
 # to stderr, which the runner reads for workflow commands too. On stdout a
 # caller inside $(...) took it in: admin_pat_status gave
 # "::add-mask::***<newline>200", and the masterkey check read a 200 as a
@@ -1141,8 +1144,9 @@ velero_refusal_step() {
   local work="$1" phase
   # Velero error text can quote what the open call got. run_one_class cuts
   # both repository passwords out of every line this class prints.
-  redact_add "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "$work/velero.env" 2>/dev/null)"
-  redact_add "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)"
+  redact_add "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "$work/velero.env" 2>/dev/null)" \
+    && redact_add "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)" \
+    || { miss "a repository password is too short to redact, so the refusal step did not start"; return 1; }
   k2c "$work/velero.env" && velero_restart || { miss "Velero did not restart with another password"; k2c; velero_restart; return 1; }
   # Velero runs on the random password now. A miss here puts the keyring
   # password back and restarts it, as the failure path above does, or each
@@ -2571,9 +2575,16 @@ CLASS_TIMEOUT_MARGIN_S=60
 CLASS_KILL_AFTER_S=30
 DIAG_TIMEOUT_S=120
 # redact_add VALUE: from now on, redact_stream prints VALUE as [redacted].
-# The values go to VELERO_REDACT_FILE (mode 600), never on an argv.
+# The values go to VELERO_REDACT_FILE (mode 600), never on an argv. An empty
+# VALUE is a value that is not set, and adds nothing. A VALUE of 1 or 2
+# characters is refused with a message and return 1: redact_stream skips
+# such a value, so it would print unseen (review of hosted#154).
 redact_add() {
   [ -n "$1" ] && [ -n "${VELERO_REDACT_FILE:-}" ] || return 0
+  if [ "${#1}" -lt 3 ]; then
+    printf 'redact_add: a value of %s character(s) cannot be redacted, so it is refused\n' "${#1}" >&2
+    return 1
+  fi
   printf '%s\n' "$1" >> "$VELERO_REDACT_FILE"
 }
 
@@ -2582,7 +2593,9 @@ redact_add() {
 # that the class adds while it runs counts from its next line. The one filter
 # for all output of a class (coordinator, hosted#154): Velero error text can
 # quote a repository URL or an error of the open call, and nobody knows all
-# the strings it prints. A value is plain text: index and substr, never a
+# the strings it prints. The filter cuts only the values that the class gave
+# to redact_add: today the two Velero repository passwords of the keyring
+# class. It is no general redaction of secrets. A value is plain text: index and substr, never a
 # pattern of gsub, so & \\ . * [ in a password match only themselves. A value
 # shorter than 3 characters is skipped: an empty or tiny value would cut
 # most positions of a line, and no password of the keyring is that short.
@@ -2603,9 +2616,22 @@ redact_stream() {
 run_one_class() {
   local rc=0 out_pid err_pid
   VELERO_REDACT_FILE="$(umask 077 && mktemp)"
+  # The file holds passwords. The EXIT trap removes it on a normal end.
+  # timeout stops the whole group with TERM, the filters too. Bash then
+  # writes its note about the killed command to the dead stderr pipe and
+  # dies of SIGPIPE before any EXIT trap, so the TERM trap removes the file
+  # first. Only the KILL of --kill-after can leave it, in the mktemp
+  # directory of the runner.
+  trap 'rm -f "$VELERO_REDACT_FILE"' EXIT
+  trap 'rm -f "$VELERO_REDACT_FILE"; exit 143' TERM
   # The keyring repository password is known before the class starts. The
   # diagnosis of a failed class runs in a child of its own, so it gets it too.
-  redact_add "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)"
+  # A password that the filter cannot cut stops the class before it prints.
+  if ! redact_add "$(sed -n 's/^VELERO_REPO_PASSWORD=//p' "${KEYRING_FILE:-/dev/null}" 2>/dev/null)"; then
+    printf '%s' "the keyring repository password is too short to redact, so ${1} did not run" > "${ROTATION_REASON_FILE:?the parent names the reason file}"
+    rm -f "$VELERO_REDACT_FILE"
+    return 1
+  fi
   exec 3>&1 4>&2
   exec 1> >(redact_stream >&3); out_pid=$!
   exec 2> >(redact_stream >&4); err_pid=$!
