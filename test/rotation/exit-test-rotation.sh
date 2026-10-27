@@ -2500,11 +2500,17 @@ diagnose_failed_class() (
     kubectl -n "$NS" logs "$pod" --all-containers --tail=15 2>&1 | cut -c1-300 | sed 's/^/        /'
   done
   # The CronJob Jobs carry no label of their own (the jobTemplate has no
-  # metadata), so they are found by name.
-  for job in $(kubectl -n "$NS" get jobs --sort-by=.metadata.creationTimestamp -o name 2>&1 \
-                 | grep -E "^job.batch/${RELEASE}-(redis-rotation|zitadel-masterkey-rotation)-" | tail -n 3); do
-    printf '      log of %s:\n' "$job"
-    kubectl -n "$NS" logs "$job" --all-containers --tail=20 2>&1 | cut -c1-300 | sed 's/^/        /'
+  # metadata), so they are found by name. The last two Jobs of EACH rotation
+  # CronJob: the redis rotation runs every minute, so the last three Jobs of
+  # both were all redis Jobs, and six failed masterkey Jobs printed no log
+  # (drill rotation run 40478619844).
+  local cj jobs
+  jobs="$(kubectl -n "$NS" get jobs --sort-by=.metadata.creationTimestamp -o name 2>&1)"
+  for cj in redis-rotation zitadel-masterkey-rotation; do
+    for job in $(printf '%s\n' "$jobs" | grep -E "^job.batch/${RELEASE}-${cj}-" | tail -n 2); do
+      printf '      log of %s:\n' "$job"
+      kubectl -n "$NS" logs "$job" --all-containers --tail=20 2>&1 | cut -c1-300 | sed 's/^/        /'
+    done
   done
   return 0
 )
