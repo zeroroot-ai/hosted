@@ -38,6 +38,14 @@ defaults:
   cloudtrail_bucket_name_prefix = "gibson-org"
   ```
 
+- The operator keeps the tfvars outside git. The complete file lives at
+  `~/.config/zeroroot/aws-org.terraform.tfvars` (mode 600) on the operator
+  workstation. Copy it to `terraform.tfvars` in the working tree before a
+  plan. Besides the values above, it sets `public_site_bucket_arns`,
+  `public_site_distribution_arns` and `alerts_email_address`. A tfvars
+  without the two ARN lists plans a destroy of `public_site_publish`, the
+  role that publishes the public sites (hosted#142 apply, 2026-10-27).
+
 - Backend (matches `.terraform/terraform.tfstate` after init):
 
   ```bash
