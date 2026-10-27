@@ -281,6 +281,62 @@ slots() { jq -c --arg u "${U:-platform}" '.key_slots[$u]' "$STATE/key-slots.tfva
   [ "$(jq -c 'keys' "$D/keys.json")" = '["a","b"]' ]
 }
 
+# AWS keeps only the time of the last use of a key. A halt that kept the
+# first switch time could never clear: drill run 40418009633 halted on a use
+# of the old platform key from before its restarts and reloads.
+@test "FAILING FIXTURE: a run after a halt with no new use of the old key moves the switch, and the quiet time starts again" {
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  used=$(( $(date +%s) + 2 ))
+  echo "$used" > "$D/used/AKIAAAAAAAAAAAAAAAAA"
+  QUIET_SECS=3600 rotate
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [ "$(jq -r .halted.platform "$STATE/key-rotation.json")" = "$used" ]
+  first="$(jq -r .platform "$STATE/key-rotation.json")"
+  sleep 3
+  QUIET_SECS=3600 rotate
+  [ "$status" -eq 10 ] || { echo "$output"; false; }
+  [[ "$output" == *"no use since the halt"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"must stay unused"* ]] || { echo "$output"; false; }
+  [ "$(jq -r .platform "$STATE/key-rotation.json")" -gt "$used" ]
+  [ "$(jq -r .platform "$STATE/key-rotation.json")" -gt "$first" ]
+  [ "$(jq -r '.halted.platform // "none"' "$STATE/key-rotation.json")" = none ]
+  [ "$(jq -c 'keys' "$D/keys.json")" = '["a","b"]' ]
+}
+
+@test "FAILING FIXTURE: a use of the old key after the recorded halt halts again, and both keys stay" {
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  used=$(( $(date +%s) + 2 ))
+  echo "$used" > "$D/used/AKIAAAAAAAAAAAAAAAAA"
+  QUIET_SECS=3600 rotate
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  echo $(( used + 1 )) > "$D/used/AKIAAAAAAAAAAAAAAAAA"
+  sleep 4
+  QUIET_SECS=3600 rotate
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"a consumer still holds it"* ]] || { echo "$output"; false; }
+  [ "$(jq -r .halted.platform "$STATE/key-rotation.json")" = $(( used + 1 )) ]
+  [ "$(jq -c 'keys' "$D/keys.json")" = '["a","b"]' ]
+}
+
+@test "FAILING FIXTURE: a recorded halt whose use comes after the restarts of the run halts again" {
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  used=$(( $(date +%s) + 600 ))
+  echo "$used" > "$D/used/AKIAAAAAAAAAAAAAAAAA"
+  QUIET_SECS=3600 rotate
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  QUIET_SECS=3600 rotate
+  [ "$status" -eq 3 ] || { echo "$output"; false; }
+  [[ "$output" == *"a consumer still holds it"* ]] || { echo "$output"; false; }
+}
+
+@test "a new rotation drops the halt record of the last one" {
+  echo '{"platform": 1000, "halted": {"platform": 1500, "dns": 1200}}' > "$STATE/key-rotation.json"
+  date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
+  rotate
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  [ "$(jq -c .halted "$STATE/key-rotation.json")" = '{"dns":1200}' ]
+}
+
 @test "a use of the old key while its readers restart is not a consumer that still holds it" {
   date +%s > "$D/used/AKIABBBBBBBBBBBBBBBB"
   OLD_USED_AT_RESTART=1 rotate

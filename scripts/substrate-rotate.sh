@@ -173,7 +173,7 @@ if [ "$nkeep" = 1 ]; then
   # the slots change continues as an open rotation, and a kept old time
   # would read every use of the old key as a consumer that still holds it.
   jq --arg u "$USER_NAME" --arg h "$hash_before" \
-    'del(.[$u]) | if $u == "smtp" then .smtp_settings_hash_before = $h else . end' "$SWITCHED" > "$SWITCHED.tmp" && mv "$SWITCHED.tmp" "$SWITCHED"
+    'del(.[$u]) | del(.halted[$u]?) | if $u == "smtp" then .smtp_settings_hash_before = $h else . end' "$SWITCHED" > "$SWITCHED.tmp" && mv "$SWITCHED.tmp" "$SWITCHED"
   slots_put "$new" "$old" "$new"
   apply ""
   say "slot $new of $USER_NAME holds a new key $(key_id "$new"); slot $old keeps the old key"
@@ -351,6 +351,8 @@ fi
 #     use as a consumer, and step 5 halted (review of hosted#749). A later
 #     run of the same rotation keeps the first time.
 [ -s "$SWITCHED" ] || echo '{}' > "$SWITCHED"
+# The readers of this run restarted onto the new key before this time.
+restarted="$(date +%s)"
 switched="$(jq -r --arg u "$USER_NAME" '.[$u] // 0' "$SWITCHED" 2>/dev/null || echo 0)"
 if [ "$switched" -le 0 ]; then
   switched="$(date +%s)"
@@ -377,8 +379,26 @@ else
 fi
 
 # 5. The old key stays unused for QUIET_SECS after the switch.
+#    A use after the switch halts the run, and the halt records the time of
+#    that use. The next run is the action of the person who fixed the
+#    consumer. When the last use is still the recorded one, and it comes
+#    before the restarts of this run, no consumer used the old key since the
+#    halt. The switch then moves to the restarts of this run, and the quiet
+#    time starts again. A use after the recorded one halts again. AWS keeps
+#    only the time of the last use, so without this a halt could never clear
+#    (drill run 40418009633).
 olu="$(last_used "$old_id")"
-[ "$olu" -lt "$switched" ] || halt "the old key $old_id was used at $(date -u -d "@$olu" +%FT%TZ), after the switch: a consumer still holds it. Find it, restart it, and run again"
+if [ "$olu" -ge "$switched" ]; then
+  halted="$(jq -r --arg u "$USER_NAME" '.halted[$u] // 0' "$SWITCHED")"
+  if [ "$olu" -eq "$halted" ] && [ "$olu" -lt "$restarted" ]; then
+    switched="$restarted"
+    jq --arg u "$USER_NAME" --argjson t "$switched" '.[$u] = $t | del(.halted[$u])' "$SWITCHED" > "$SWITCHED.tmp" && mv "$SWITCHED.tmp" "$SWITCHED"
+    say "the old key $old_id has no use since the halt at its use of $(date -u -d "@$olu" +%FT%TZ); the switch moves to $(date -u -d "@$switched" +%FT%TZ)"
+  else
+    jq --arg u "$USER_NAME" --argjson t "$olu" '.halted[$u] = $t' "$SWITCHED" > "$SWITCHED.tmp" && mv "$SWITCHED.tmp" "$SWITCHED"
+    halt "the old key $old_id was used at $(date -u -d "@$olu" +%FT%TZ), after the switch: a consumer still holds it. Find it, restart it, and run again"
+  fi
+fi
 [ $(( $(date +%s) - switched )) -ge "$QUIET_SECS" ] \
   || stop "the switch was $(( ($(date +%s) - switched) / 60 )) minutes ago; the old key must stay unused for $(( QUIET_SECS / 60 )). Run again later"
 say "the old key $old_id has not been used since the switch"
