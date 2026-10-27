@@ -16,7 +16,8 @@
 #   3. It refuses a setec version with no installed mode
 #      (SETEC_E2E_INSTALLED_NAMESPACE): an older suite installs a second setec
 #      release, and that is never done to an env.
-#   4. It fails when the env has no m8i node.
+#   4. It refuses a release with snapshots off, and it fails when the env has
+#      no m8i node.
 #   5. It runs `make e2e-cpu-template` against the installed setec. The suite
 #      installs nothing. It makes one SandboxClass and its Sandboxes, and
 #      deletes them.
@@ -75,6 +76,17 @@ git -C "$SETEC_DIR" -c advice.detachedHead=false checkout --quiet "refs/tags/${v
 
 grep -qs 'SETEC_E2E_INSTALLED_NAMESPACE' "$SETEC_DIR/test/e2e/installed_run_test.go" \
   || cannot "setec ${version} has no installed mode (SETEC_E2E_INSTALLED_NAMESPACE). Its suite would install a second setec release into the env, so the test does not run. setec#271 adds the mode"
+
+# The scenario takes a Snapshot of one machine and loads it as another. A
+# release with snapshots off has no Snapshot controller, so the Snapshot never
+# gets a phase and the scenario times out after six minutes (run
+# 40460536815). Refuse that release before the run.
+args="$(kubectl -n "$SETEC_NS" get pods -l app.kubernetes.io/name=setec \
+  -o jsonpath='{range .items[*]}{range .spec.containers[*]}{.args}{"\n"}{end}{end}')" \
+  || cannot "kubectl could not read the arguments of the setec Pods in ${SETEC_NS}"
+# The whole flag: a bare --snapshots-enabled or =true, never =false.
+grep -qE -- '(^|[",])--snapshots-enabled(=true)?([",]|$)' <<< "$args" \
+  || cannot "the setec release in ${SETEC_NS} runs with snapshots off (no --snapshots-enabled on the manager), so a Snapshot cannot load. Set snapshots.enabled and nodeAgent.enabled for this env"
 
 m8i="$(kubectl get nodes -o jsonpath='{range .items[*]}{.metadata.labels.node\.kubernetes\.io/instance-type}{"\n"}{end}' 2>/dev/null | grep -c '^m8i\.')" || m8i=0
 # The setec scenario places by the same label. On an EC2 env the node
