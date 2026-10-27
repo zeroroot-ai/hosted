@@ -1332,3 +1332,72 @@ PY2
   [[ "$output" == *"(pg_stat_activity could not be read)"* ]] || { echo "$output"; false; }
   [[ "$output" == *"after"* ]] || { echo "$output"; false; }
 }
+
+# --- redaction follow-ups (reviews of hosted#154 and hosted#158) ------------
+redact_fu_helpers() {
+  python3 - "$TEST" "$TMP/fu.sh" "$REPO_ROOT/scripts/lib/velero-backup-log.sh" <<'PY2'
+import re, sys
+text = open(sys.argv[1]).read()
+out = ['. "%s"' % sys.argv[3]]
+for name in ("redact_add", "redact_stream", "run_one_class"):
+    m = re.search(r"^%s\(\) \{.*?^\}\n" % name, text, re.M | re.S)
+    if not m:
+        sys.exit("no function %s in the script" % name)
+    out.append(m.group(0))
+open(sys.argv[2], "w").write("\n".join(out))
+PY2
+}
+
+@test "FAILING FIXTURE: redact_add refuses a value of one or two characters with a message, and adds an empty one as nothing" {
+  redact_fu_helpers
+  : > "$TMP/values"
+  run bash -c '. "$1"; VELERO_REDACT_FILE="$2"
+    redact_add ab; echo "short=$?"
+    redact_add ""; echo "empty=$?"
+    redact_add abc; echo "ok=$?"' _ "$TMP/fu.sh" "$TMP/values"
+  [[ "$output" == *"redact_add: a value of 2 character(s) cannot be redacted, so it is refused"* ]] || { echo "$output"; false; }
+  [[ "$output" == *"short=1"* && "$output" == *"empty=0"* && "$output" == *"ok=0"* ]] || { echo "$output"; false; }
+  [ "$(cat "$TMP/values")" = abc ] || { cat "$TMP/values"; false; }
+}
+
+@test "FAILING FIXTURE: a keyring repository password too short to redact stops the class before it runs" {
+  redact_fu_helpers
+  printf 'VELERO_REPO_PASSWORD=xy\n' > "$TMP/keyring.env"
+  KEYRING_FILE="$TMP/keyring.env" ROTATION_REASON_FILE="$TMP/reason" run bash -c '. "$1"
+    loud_class() { echo "the class ran"; }
+    run_one_class loud_class; echo "rc=$?"' _ "$TMP/fu.sh"
+  [[ "$output" == *"rc=1"* ]] || { echo "$output"; false; }
+  [[ "$output" != *"the class ran"* ]] || { echo "$output"; false; }
+  [ "$(cat "$TMP/reason")" = "the keyring repository password is too short to redact, so loud_class did not run" ] || { cat "$TMP/reason"; false; }
+}
+
+@test "FAILING FIXTURE: a class child stopped with TERM removes its file of passwords" {
+  redact_fu_helpers
+  printf 'VELERO_REPO_PASSWORD=k3yring-pw\n' > "$TMP/keyring.env"
+  # setsid -w: the child leads its own process group, as under timeout, and
+  # setsid waits for it. The class writes the group id and the file name.
+  KEYRING_FILE="$TMP/keyring.env" ROTATION_REASON_FILE="$TMP/reason" setsid -w bash -c '. "$1"
+    slow_class() { printf "%s %s\\n" "$$" "$VELERO_REDACT_FILE" > "$1"; sleep 30; }
+    run_one_class slow_class "$2"' _ "$TMP/fu.sh" "$TMP/path" &
+  waiter=$!
+  for _ in $(seq 1 50); do [ -s "$TMP/path" ] && break; sleep 0.1; done
+  read -r pgid f < "$TMP/path"
+  [ -f "$f" ] || { echo "no file at $f"; false; }
+  kill -TERM -- "-$pgid"
+  wait "$waiter" || true
+  [ ! -e "$f" ] || { echo "the file $f is still there"; false; }
+}
+
+@test "FAILING FIXTURE: the file of passwords of a class child is a mode-600 file under RUNNER_TEMP" {
+  redact_fu_helpers
+  mkdir -p "$TMP/runner-temp"
+  printf 'VELERO_REPO_PASSWORD=k3yring-pw\n' > "$TMP/keyring.env"
+  RUNNER_TEMP="$TMP/runner-temp" KEYRING_FILE="$TMP/keyring.env" ROTATION_REASON_FILE="$TMP/reason" run bash -c '. "$1"
+    look_class() { printf "%s %s\n" "$VELERO_REDACT_FILE" "$(stat -c %a "$VELERO_REDACT_FILE")" > "$1"; }
+    run_one_class look_class "$2"' _ "$TMP/fu.sh" "$TMP/seen"
+  [ "$status" -eq 0 ] || { echo "$output"; false; }
+  read -r f mode < "$TMP/seen"
+  [[ "$f" == "$TMP/runner-temp/"* ]] || { echo "the file is at $f"; false; }
+  [ "$mode" = 600 ] || { echo "mode $mode"; false; }
+  [ ! -e "$f" ] || { echo "the file $f is still there"; false; }
+}
