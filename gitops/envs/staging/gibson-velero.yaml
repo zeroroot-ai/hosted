@@ -32,7 +32,7 @@ spec:
     # by deploy's publish-umbrella-chart workflow (deploy#1777/#1785).
     - repoURL: ghcr.io/zeroroot-ai/charts
       chart: gibson-velero
-      targetRevision: "0.154.8"
+      targetRevision: "0.154.9"
       helm:
         valueFiles:
           - $values/gitops/envs/staging/gibson-velero-values.yaml
