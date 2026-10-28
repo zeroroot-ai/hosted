@@ -382,3 +382,7 @@ charts:
   "0.154.8":
     digest: "sha256:e32e22d1a3d2296d49bd9dc9cddc6f7768f814054257c88f74d8844674255e7e"
     signed: true
+
+  "0.154.9":
+    digest: "sha256:adf6c2919fd5b3f42158fc45fea5421c5549f005473db1c7181b8437885306f6"
+    signed: true
