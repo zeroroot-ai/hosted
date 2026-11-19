@@ -1102,6 +1102,10 @@ external-dns:
 # directory is not empty. NEVER delete the old archive to reuse a name: it is
 # the restore source for the environment that wrote it (ADR-0083).
 #
+# 20261119 is the rebuild from nothing for the agentgateway chart (owner
+# decision of 2026-11-19, MODE=wipe). 20261012 ran from 2026-10-12 until that
+# teardown. Its archive stays.
+#
 # 20260929b is the ninth staging bringup, and the fifth on the plain cluster
 # (ADR-0095). It is the hosted#209 rebuild from zero on the identity model
 # (ADR-0093), with the first tenant Owner at a real inbox (hosted#278).
@@ -1125,7 +1129,7 @@ platformPostgres:
   backup:
     destinationPath: "s3://zeroroot-ai-staging-durable-447184491447/backups/postgres/"
     endpointURL: ""
-    serverName: "platform-postgres-20261012"
+    serverName: "platform-postgres-20261119"
 
 # -----------------------------------------------------------------------------
 # gateway — the agentgateway Gateway of the umbrella (charts#815, gibson#1366).
