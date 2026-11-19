@@ -110,6 +110,8 @@ locals {
   #   postgresql.cnpg.io                      — the platform Postgres clusters
   #   velero.io                               — the tenant-neo4j backup Schedule
   #   gibson.zeroroot.ai                      — PlatformBootstrap and the tenant CRs
+  #   gateway.networking.k8s.io               — the agentgateway Gateway, HTTPRoute, ReferenceGrant
+  #   agentgateway.dev                        — AgentgatewayParameters and AgentgatewayPolicy
   argocd_controller_platform_api_groups = [
     "apps",
     "batch",
@@ -139,6 +141,14 @@ locals {
     "postgresql.cnpg.io",
     "velero.io",
     "gibson.zeroroot.ai",
+    # The agentgateway Gateway of the umbrella (charts#815, gibson#1366).
+    # The chart renders a Gateway, an HTTPRoute and a ReferenceGrant, and an
+    # AgentgatewayParameters and AgentgatewayPolicy objects. Without the two
+    # groups the controller drops them in silence: the agentgateway
+    # controller then has no Gateway to reconcile, and no proxy pod starts.
+    # gibson-crds installs the CRDs of both groups.
+    "gateway.networking.k8s.io",
+    "agentgateway.dev",
   ]
 
   # Per-env additions, appended in order (deploy#1397). Everything above is
