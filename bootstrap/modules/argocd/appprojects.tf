@@ -84,6 +84,13 @@ locals {
   #             "namespace kube-system is not permitted in project 'default'"
   #             (measured on staging, deploy#1746) — the same shape as the
   #             setec-sandboxes miss below.
+  #   gibson-gateway — the namespace of the agentgateway Gateway (charts#815,
+  #             gibson.gatewayNamespace, which is <release namespace>-gateway).
+  #             The umbrella renders the Namespace, the Gateway, its
+  #             parameters and policies, the HTTPRoute of the agent listener,
+  #             a Cilium policy and the Role of the tenant-operator here.
+  #             Missing, the gibson app sync aborts "namespace gibson-gateway
+  #             is not permitted in project", as setec-sandboxes did.
   # Per-tenant namespaces are deliberately absent: the tenant operator mints
   # those at runtime, ArgoCD never applies into them.
   #
@@ -108,6 +115,7 @@ locals {
       "velero",
       "spire-system",
       "kube-system",
+      "gibson-gateway",
     ],
     var.extra_platform_namespaces,
   )

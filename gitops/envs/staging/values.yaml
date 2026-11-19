@@ -1127,6 +1127,29 @@ platformPostgres:
     endpointURL: ""
     serverName: "platform-postgres-20261012"
 
+# -----------------------------------------------------------------------------
+# gateway — the agentgateway Gateway of the umbrella (charts#815, gibson#1366).
+#
+# The chart installs the agentgateway controller, one Gateway with the Model
+# gateway and the Agent gateway listeners, and the trace collector of
+# gibson-workloads (charts#816). The chart defaults hold every other value:
+# the proxy image digest, the ext-authz and trace policies, the header strip
+# lists, the listener certificate from the internal issuer, and the egress to
+# public port 443. No value here names a secret. The tenant-operator writes
+# the provider credential Secrets of each tenant into gibson-gateway.
+#
+# ONE PROXY REPLICA. This environment is one node (ADR-0095), like the Envoy
+# edge, the daemon and ext-authz above, which run one replica each. A second
+# proxy pod on the same node adds load and gives no failover. ADR-0090 puts
+# staging sizing with the environment, not with the chart.
+#
+# The collector queue PVC names no storage class, so it gets the cluster
+# default, which on k3s is local-path. The chart has no seam for it.
+# -----------------------------------------------------------------------------
+gateway:
+  proxy:
+    replicas: 1
+
 # OpenFGA — force sslmode=require on the Aurora client (deploy#1197 / deploy#1239).
 # Base values.yaml sets sslmode=disable (kind CNPG has no TLS); on AWS that literal
 # is passed straight to the openfga subchart and connects in plaintext, which
