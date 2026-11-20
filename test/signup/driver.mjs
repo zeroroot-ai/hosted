@@ -142,11 +142,34 @@ async function fillUntilHeld(locator, value, label, opts = {}) {
 // page reads the top document only. So the driver asks each frame of the page
 // for the selector and takes the first visible match. There is one code path
 // for both layouts, and no guess about which layout the page has.
+//
+// Only a frame that Stripe serves is read. The driver types a card and clicks
+// in the frame it finds, and a selector such as #email is generic. So a frame
+// of another host never matches, whatever elements it holds.
 // ---------------------------------------------------------------------------
 
-/** findInFrames returns the first visible match of the selector in a frame of the page, or null. */
+// The hosts of the frames of a Checkout page: the page and the Stripe.js frames.
+const CHECKOUT_FRAME_HOSTS = ["checkout.stripe.com", "js.stripe.com"];
+
+/**
+ * checkoutFrames returns the frames of the page that Stripe serves. The host
+ * is compared whole and the protocol must be https. A URL that does not
+ * parse, such as an empty one, and about:blank are refused.
+ */
+function checkoutFrames(page) {
+  return page.frames().filter((frame) => {
+    try {
+      const u = new URL(frame.url());
+      return u.protocol === "https:" && CHECKOUT_FRAME_HOSTS.includes(u.hostname);
+    } catch {
+      return false;
+    }
+  });
+}
+
+/** findInFrames returns the first visible match of the selector in a Stripe frame of the page, or null. */
 async function findInFrames(page, selector) {
-  for (const frame of page.frames()) {
+  for (const frame of checkoutFrames(page)) {
     const found = frame.locator(selector).first();
     if (await found.isVisible().catch(() => false)) return found;
   }
@@ -163,7 +186,7 @@ async function waitInFrames(page, selector, label, opts = {}) {
     if (found) return found;
     if (Date.now() >= deadline) {
       throw new Error(
-        `${label} (${selector}) did not show in a frame of the page within ${timeoutMs / 1000}s. ` +
+        `${label} (${selector}) did not show in a Stripe frame of the page within ${timeoutMs / 1000}s. ` +
           `Frames: ${JSON.stringify(page.frames().map((f) => safeURL(f.url())))}`,
       );
     }
@@ -418,6 +441,36 @@ async function selftest() {
   await asyncCheck("an element that no frame shows is not found", async () => {
     if ((await findInFrames(fakePage, "#absent")) !== null) throw new Error("found an absent element");
   }, false);
+  // A frame of another host is never read, whatever it holds. Each of these
+  // frames shows #pay, and each must be ignored.
+  const foreign = [
+    "https://attacker.example/pay",
+    "https://js.stripe.com.attacker.example/v3/elements-inner-habanero-0a.html",
+    "https://attacker.example/js.stripe.com/v3/",
+    "http://js.stripe.com/v3/elements-inner-habanero-0a.html",
+    "about:blank",
+    "",
+  ];
+  for (const url of foreign) {
+    await asyncCheck(`a frame at ${JSON.stringify(url)} that shows the element is ignored`, async () => {
+      const found = await findInFrames({ frames: () => [fakeFrame(url, ["#pay"])] }, "#pay");
+      if (found !== null) throw new Error(`found the element in ${found.url}`);
+    }, false);
+  }
+  await asyncCheck("a foreign frame ahead of the Stripe frame does not win", async () => {
+    const page = { frames: () => [fakeFrame("https://attacker.example/pay", ["#pay"]), ...fakePage.frames()] };
+    const found = await findInFrames(page, "#pay");
+    if (!found?.url.startsWith("https://js.stripe.com/")) throw new Error(`found in ${found?.url}`);
+  }, false);
+  await asyncCheck(
+    "a wait for an element that only a foreign frame shows fails",
+    () =>
+      waitInFrames({ frames: () => [fakeFrame("https://attacker.example/pay", ["#pay"])] }, "#pay", "the pay button", {
+        sleep: noSleep,
+        timeoutMs: 0,
+      }),
+    true,
+  );
   await asyncCheck(
     "a wait for an element that no frame shows fails",
     () => waitInFrames(fakePage, "#absent", "the pay button", { sleep: noSleep, timeoutMs: 0 }),
@@ -655,8 +708,8 @@ async function cardStep(page, email) {
   const zip = await findInFrames(page, CHECKOUT.postalCode);
   if (zip) await zip.fill("10001");
   // The checkbox can sit under its styled label, so isVisible is not the
-  // test here: each frame is asked for its checked state.
-  for (const frame of page.frames()) {
+  // test here: each Stripe frame is asked for its checked state.
+  for (const frame of checkoutFrames(page)) {
     const saveWithLink = frame.locator(CHECKOUT.saveWithLink).first();
     if (await saveWithLink.isChecked({ timeout: 1_000 }).catch(() => false)) await saveWithLink.uncheck({ force: true });
   }
