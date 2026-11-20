@@ -119,7 +119,7 @@ aws cloudtrail lookup-events \
 
 Likely causes:
 - Daemon caching disabled — restart with caching ON.
-- Tenant abusing system LLM keys without quota — enforce quotas.
+- A tenant spends the system LLM keys with no budget. Ask the tenant admin to set a tenant budget (`SetTenantBudgetDefaults`). The platform has no plan quota.
 
 ---
 
