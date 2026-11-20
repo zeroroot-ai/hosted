@@ -135,6 +135,58 @@ async function fillUntilHeld(locator, value, label, opts = {}) {
 }
 
 // ---------------------------------------------------------------------------
+// findInFrames — find an element in whichever frame draws it.
+//
+// Stripe Checkout draws its payment form in the top document on one layout
+// and in a js.stripe.com frame on another (see cardStep). A locator of the
+// page reads the top document only. So the driver asks each frame of the page
+// for the selector and takes the first visible match. There is one code path
+// for both layouts, and no guess about which layout the page has.
+// ---------------------------------------------------------------------------
+
+/** findInFrames returns the first visible match of the selector in a frame of the page, or null. */
+async function findInFrames(page, selector) {
+  for (const frame of page.frames()) {
+    const found = frame.locator(selector).first();
+    if (await found.isVisible().catch(() => false)) return found;
+  }
+  return null;
+}
+
+/** waitInFrames polls findInFrames until a match shows. It throws at the timeout, and the error names the frames. */
+async function waitInFrames(page, selector, label, opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? 60_000;
+  const sleep = opts.sleep ?? ((ms) => new Promise((r) => setTimeout(r, ms)));
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = await findInFrames(page, selector);
+    if (found) return found;
+    if (Date.now() >= deadline) {
+      throw new Error(
+        `${label} (${selector}) did not show in a frame of the page within ${timeoutMs / 1000}s. ` +
+          `Frames: ${JSON.stringify(page.frames().map((f) => safeURL(f.url())))}`,
+      );
+    }
+    await sleep(500);
+  }
+}
+
+// The elements of the Checkout form. Each entry lists the name on the
+// top-document layout first and the name on the frame layout second.
+const CHECKOUT = {
+  pay: '[data-testid="hosted-payment-submit-button"], [data-testid="payment-form-submit-button"]',
+  email: "#email, #linkAuthentication-emailInput",
+  cardItem: '#payment-method-label-card, [role="button"][data-value="card"]',
+  cardNumber: "#cardNumber, #payment-numberInput",
+  cardExpiry: "#cardExpiry, #payment-expiryInput",
+  cardCvc: "#cardCvc, #payment-cvcInput",
+  name: "#billingName, #payment-nameInput",
+  country: "#billingCountry, #payment-countryInput",
+  postalCode: "#billingPostalCode, #payment-postalCodeInput",
+  saveWithLink: "#enableStripePass, #payment-linkOptInInput",
+};
+
+// ---------------------------------------------------------------------------
 // Selftest — proves the assertions above can fail (guards lane, offline)
 // ---------------------------------------------------------------------------
 
@@ -347,6 +399,31 @@ async function selftest() {
     }
   }
 
+  // findInFrames: an element in a child frame must be found, a hidden one
+  // must not, and a wait for an element in no frame must FAIL.
+  const fakeFrame = (url, visible) => ({
+    url: () => url,
+    locator: (sel) => ({ first: () => ({ sel, url, isVisible: async () => visible.includes(sel) }) }),
+  });
+  const fakePage = {
+    frames: () => [
+      fakeFrame("https://checkout.stripe.com/g/pay/cs_test_a1", []),
+      fakeFrame("https://js.stripe.com/v3/elements-inner-habanero-0a.html", ["#pay"]),
+    ],
+  };
+  await asyncCheck("an element in a child frame is found", async () => {
+    const found = await findInFrames(fakePage, "#pay");
+    if (!found?.url.startsWith("https://js.stripe.com/")) throw new Error(`found in ${found?.url}`);
+  }, false);
+  await asyncCheck("an element that no frame shows is not found", async () => {
+    if ((await findInFrames(fakePage, "#absent")) !== null) throw new Error("found an absent element");
+  }, false);
+  await asyncCheck(
+    "a wait for an element that no frame shows fails",
+    () => waitInFrames(fakePage, "#absent", "the pay button", { sleep: noSleep, timeoutMs: 0 }),
+    true,
+  );
+
   if (failures > 0) {
     console.error(`selftest: ${failures} assertion(s) cannot fail correctly`);
     process.exit(1);
@@ -396,6 +473,19 @@ async function diagnose(page, diagDir, label) {
     console.error(`diagnostics written: ${diagDir}/${label}.{png,html} (url=${safeURL(page.url())})`);
   } catch (e) {
     console.error(`diagnostics failed for ${label}: ${e}`);
+  }
+  // Each child frame gets its own file. A hosted page such as Stripe Checkout
+  // draws its form in a frame, and the top document then holds no field at
+  // all (run 44689809192). The first line of a file is the URL of its frame.
+  const frames = page.frames().filter((f) => f !== page.mainFrame());
+  for (const [i, frame] of frames.entries()) {
+    const file = `${diagDir}/${label}.frame-${String(i + 1).padStart(2, "0")}.html`;
+    try {
+      writeFileSync(file, `<!-- frame url: ${safeURL(frame.url())} -->\n${await frame.content()}`);
+      console.error(`diagnostics written: ${file} (url=${safeURL(frame.url())})`);
+    } catch (e) {
+      console.error(`diagnostics failed for frame ${safeURL(frame.url())}: ${e}`);
+    }
   }
 }
 
@@ -501,57 +591,75 @@ async function cardStep(page, email) {
     throw new Error(`the signup step did not open a Stripe test Checkout session (url=${page.url().slice(0, 120)})`);
   }
   console.log("step 4b: on Stripe Checkout (test mode), paying with the Stripe test card");
-  const email_ = page.locator("#email");
-  if (await email_.isVisible().catch(() => false) && !(await email_.inputValue().catch(() => ""))) {
-    await email_.fill(email);
-  }
-  // The Checkout page of the sandbox account, as a headless probe of a real
-  // test session read it on 2026-10-13 (the same parameters as the billing
-  // component: subscription, a customer, a 14 day trial):
+  // The Checkout page of the sandbox account, as a headless probe of seven
+  // real test sessions read it on 2026-11-20 (the same parameters as the
+  // billing component: subscription, a customer, a 14 day trial). Each of the
+  // seven sessions had the frame layout:
+  //   - the URL path is /g/pay/cs_test_… (it was /c/pay/), and the top
+  //     document holds the product summary only. Stripe draws the form in a
+  //     child frame, js.stripe.com/v3/elements-inner-habanero-<hash>.html. A
+  //     locator of the page does not read a frame, so run 44689809192 waited
+  //     60 s for a pay button that the screenshot shows;
+  //   - the email is #linkAuthentication-emailInput. Checkout fills it from
+  //     the customer and disables it;
   //   - the payment methods are an accordion (Card, Cash App Pay, Klarna,
-  //     Bank), and the card fields exist only after Card is chosen. A cover
-  //     element over the item takes the pointer events, so the click on the
-  //     label is forced (drill run 38452048127 waited for #cardNumber);
-  //   - the card fields are #cardNumber, #cardExpiry, #cardCvc, #billingName,
-  //     #billingCountry (a select) and #billingPostalCode;
-  //   - "Save my information with Link" (#enableStripePass) is checked by
-  //     default and then requires a phone number, so the payment never
-  //     submits. The driver unchecks it;
-  //   - the pay button is [data-testid="hosted-payment-submit-button"]
+  //     Bank). The Card item is [role="button"][data-value="card"], and the
+  //     card fields exist only after Card is chosen;
+  //   - the card fields are #payment-numberInput, #payment-expiryInput,
+  //     #payment-cvcInput, #payment-nameInput, #payment-countryInput (a
+  //     select) and #payment-postalCodeInput;
+  //   - "Save my information for faster checkout" (#payment-linkOptInInput)
+  //     is checked by default and then requires a mobile number, so the
+  //     payment never submits. The driver unchecks it;
+  //   - the pay button is [data-testid="payment-form-submit-button"]
   //     ("Start trial"), and Checkout then redirects to the success URL.
-  // A Checkout with the card method alone shows the fields at once, and the
-  // accordion item is then absent.
+  // The probe of 2026-10-13 read the top-document layout: the same form in
+  // the top document, with #email, #payment-method-label-card, #cardNumber,
+  // #cardExpiry, #cardCvc, #billingName, #billingCountry, #billingPostalCode,
+  // #enableStripePass and [data-testid="hosted-payment-submit-button"]. A
+  // cover element over the Card item took the pointer events there, so the
+  // click on the item is forced (drill run 38452048127 waited for
+  // #cardNumber). A Checkout with the card method alone shows the fields at
+  // once, and the Card item is then absent.
+  //
+  // CHECKOUT holds both sets of names, and findInFrames reads every frame, so
+  // one code path serves both layouts.
   //
   // The Checkout page draws its form after the URL loads. The pay button is
   // the sign that the form is drawn (staging run 38459072925 looked for the
   // card label too early, found none, and never chose Card). A click before
   // the page attaches its handlers does nothing, so the driver clicks again
   // until the card fields show.
-  const payButton = page.locator('[data-testid="hosted-payment-submit-button"]');
-  await payButton.waitFor({ state: "visible", timeout: 60_000 });
-  const cardNumber = page.locator("#cardNumber");
-  const cardLabel = page.locator("#payment-method-label-card");
+  const payButton = await waitInFrames(page, CHECKOUT.pay, "the Checkout pay button");
+  const email_ = await findInFrames(page, CHECKOUT.email);
+  if (email_ && (await email_.isEditable().catch(() => false)) && !(await email_.inputValue().catch(() => ""))) {
+    await email_.fill(email);
+  }
   const cardDeadline = Date.now() + 60_000;
-  while (!(await cardNumber.isVisible().catch(() => false))) {
+  let cardNumber = await findInFrames(page, CHECKOUT.cardNumber);
+  while (!cardNumber) {
     if (Date.now() > cardDeadline) {
       throw new Error("the Checkout card fields did not show within 60s of the pay button");
     }
-    if (await cardLabel.isVisible().catch(() => false)) {
-      await cardLabel.click({ force: true });
-    }
-    await cardNumber.waitFor({ state: "visible", timeout: 5_000 }).catch(() => {});
+    const cardItem = await findInFrames(page, CHECKOUT.cardItem);
+    if (cardItem) await cardItem.click({ force: true });
+    cardNumber = await waitInFrames(page, CHECKOUT.cardNumber, "the card number field", { timeoutMs: 5_000 }).catch(() => null);
   }
   await cardNumber.fill("4242 4242 4242 4242");
-  await page.locator("#cardExpiry").fill("12 / 34");
-  await page.locator("#cardCvc").fill("123");
-  const name = page.locator("#billingName");
-  if (await name.isVisible().catch(() => false)) await name.fill("Exit Test");
-  const country = page.locator("#billingCountry");
-  if (await country.isVisible().catch(() => false)) await country.selectOption("US");
-  const zip = page.locator("#billingPostalCode");
-  if (await zip.isVisible().catch(() => false)) await zip.fill("10001");
-  const saveWithLink = page.locator("#enableStripePass");
-  if (await saveWithLink.isChecked().catch(() => false)) await saveWithLink.uncheck({ force: true });
+  await (await waitInFrames(page, CHECKOUT.cardExpiry, "the card expiry field", { timeoutMs: 10_000 })).fill("12 / 34");
+  await (await waitInFrames(page, CHECKOUT.cardCvc, "the card security code field", { timeoutMs: 10_000 })).fill("123");
+  const name = await findInFrames(page, CHECKOUT.name);
+  if (name) await name.fill("Exit Test");
+  const country = await findInFrames(page, CHECKOUT.country);
+  if (country) await country.selectOption("US");
+  const zip = await findInFrames(page, CHECKOUT.postalCode);
+  if (zip) await zip.fill("10001");
+  // The checkbox can sit under its styled label, so isVisible is not the
+  // test here: each frame is asked for its checked state.
+  for (const frame of page.frames()) {
+    const saveWithLink = frame.locator(CHECKOUT.saveWithLink).first();
+    if (await saveWithLink.isChecked({ timeout: 1_000 }).catch(() => false)) await saveWithLink.uncheck({ force: true });
+  }
   await payButton.click();
   console.log("step 4b: payment submitted, waiting for the return to the signup step");
 }
