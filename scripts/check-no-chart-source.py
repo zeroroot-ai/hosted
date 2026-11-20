@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""Guard: this repo holds no chart source, except the two SaaS overlay charts.
+"""Guard: this repo holds no chart source, except the SaaS overlay chart.
 
 ADR-0086: `hosted` is a customer of `charts`. It installs the published,
-signed OCI chart at a pinned version. ADR-0074 permits two local charts, the
-SaaS overlay charts. A third chart in this tree is chart source in the wrong
-repo (hosted#415).
+signed OCI chart at a pinned version. ADR-0074 permits one local chart, the
+SaaS overlay chart of billing. A second chart in this tree is chart source in
+the wrong repo (hosted#415).
 
 WHAT IT CHECKS
     Each tracked file is read by path, and a Helm template also by content:
@@ -17,7 +17,7 @@ WHAT IT CHECKS
        `.Chart` or `include`. A Terraform template is not one, so
        `bootstrap/ec2/gibson/templates/` passes.
 
-    The allowed list is keyed by path and holds exactly two charts.
+    The allowed list is keyed by path and holds exactly one chart.
 
 Usage:
     scripts/check-no-chart-source.py             # the guard
@@ -38,10 +38,9 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 FIXTURES = ROOT / "tests" / "guards" / "chart-source"
 
-# ADR-0074. Exactly these two. A third chart needs a decision, not an entry.
+# ADR-0074. Exactly this one. A second chart needs a decision, not an entry.
 ALLOWED_CHARTS = (
     "gitops/saas-overlay/billing-webhook",
-    "gitops/saas-overlay/entitlements-svc",
 )
 
 HELM_TEMPLATE_SUFFIXES = frozenset({".yaml", ".yml", ".tpl", ".txt"})
@@ -59,7 +58,7 @@ def findings(base: pathlib.Path, rels: list[str]) -> list[str]:
             continue
         parts = rel.split("/")
         if parts[-1] == "Chart.yaml":
-            out.append(f"{rel}: a chart outside the two SaaS overlay charts")
+            out.append(f"{rel}: a chart outside the SaaS overlay chart")
             continue
         if "templates" in parts[:-1]:
             if "helm" in parts[: parts.index("templates")]:
@@ -72,7 +71,7 @@ def findings(base: pathlib.Path, rels: list[str]) -> list[str]:
                 except (UnicodeDecodeError, OSError):
                     continue
                 if HELM_MARK.search(text):
-                    out.append(f"{rel}: a Helm template outside the two SaaS overlay charts")
+                    out.append(f"{rel}: a Helm template outside the SaaS overlay chart")
     return out
 
 
@@ -81,7 +80,7 @@ def tree(base: pathlib.Path) -> list[str]:
 
 
 def selftest() -> int:
-    cases = {"bad-third-chart": 2, "bad-helm-templates": 1, "bad-loose-template": 1, "good": 0}
+    cases = {"bad-second-chart": 2, "bad-helm-templates": 1, "bad-loose-template": 1, "good": 0}
     for name, want in cases.items():
         d = FIXTURES / name
         if not d.is_dir():
@@ -91,11 +90,11 @@ def selftest() -> int:
         if len(got) != want:
             print(f"check-no-chart-source: selftest: {name} gave {got}, wanted {want} findings", file=sys.stderr)
             return 2
-    if len(ALLOWED_CHARTS) != 2:
-        print("check-no-chart-source: selftest: the allowed list must hold exactly two charts", file=sys.stderr)
+    if len(ALLOWED_CHARTS) != 1:
+        print("check-no-chart-source: selftest: the allowed list must hold exactly one chart", file=sys.stderr)
         return 2
-    print("✅ self-test: a third chart, a template under a helm directory and a loose Helm "
-          "template are each rejected; the two overlay charts and a Terraform template pass")
+    print("✅ self-test: a second chart, a template under a helm directory and a loose Helm "
+          "template are each rejected; the overlay chart and a Terraform template pass")
     return 0
 
 
@@ -123,7 +122,7 @@ def main() -> int:
         print("  Chart source lives in zeroroot-ai/charts. This repo installs the published chart.",
               file=sys.stderr)
         return 1
-    print(f"✅ no chart source outside the two SaaS overlay charts: {len(rels)} tracked files read")
+    print(f"✅ no chart source outside the SaaS overlay chart: {len(rels)} tracked files read")
     return 0
 
 

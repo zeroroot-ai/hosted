@@ -364,17 +364,11 @@ gibson-workloads:
         # s3 + source bucket at steady-state as originally planned.
         enabled: true
         initMode: download
-    # Entitlements seam knob (ADR-0074 / deploy#1032).
-    # The entitlements-svc workload is now a SaaS overlay (separate Argo app:
-    # envs/staging/apps/entitlements-svc.yaml). The core
-    # umbrella carries only this seam knob. The overlay deploys the actual
-    # Service and this value points the daemon at it over SPIFFE mTLS.
-    entitlementsEndpoint: "gibson-entitlements-svc:9091"
-    # INVARIANT (deploy#1055, gitops#356): endpoint set implies required true.
-    # Without this the daemon falls back to the unlimited OSS ConfigProvider
-    # when the seam fails to wire — fail-OPEN, which is the exact posture the
-    # guard exists to prevent. Fail closed instead.
-    entitlementsRequired: true
+    # Plan limits are off (gibson#1525): the product is open source. With no
+    # endpoint the daemon uses its unlimited provider, and the chart refuses
+    # entitlementsRequired: true with an empty endpoint.
+    entitlementsEndpoint: ""
+    entitlementsRequired: false
     # The neutral connection points (ADR-0060, D54, charts#375). The signup
     # waits on the external step of the billing service, at its redirect
     # endpoint on the app host. The SPIFFE path names the one caller that can
@@ -687,14 +681,12 @@ gibson-operators:
     rollouts:
       extraDeployments:
         - gibson-billing-webhook
-        - gibson-entitlements-svc
   global:
     domain: "zeroroot.ai"
   aws:
     region: "us-east-1"
   # -----------------------------------------------------------------------------
-  # tenant-operator — real Stripe in prod (no devAutoConfirm); in-cluster CNPG
-  # for the broker-config DB.
+  # tenant-operator — in-cluster CNPG for the broker-config DB.
   # -----------------------------------------------------------------------------
   tenantOperator:
     # Images come from the umbrella chart's digest pins (deploy#1403).
@@ -713,10 +705,6 @@ gibson-operators:
       image:
         repository: "447184491447.dkr.ecr.us-east-1.amazonaws.com/zeroroot-ai-staging-belief-trainer"
         tag: "sha-9797812@sha256:a3a6e1b46ef83adff7fa4b6293651de662467f335b0474d1aaf91f07fb26740a"
-    billing:
-      # Real Stripe Checkout — WaitForBillingConfirmation actually waits.
-      devAutoConfirm: false
-      # Card-first-signup mode guard (dashboard#767): staging test key.
     brokerConfig:
       platformPg:
         host: "platform-postgres-rw.gibson.svc.cluster.local"
@@ -951,7 +939,7 @@ gibson-operators:
 global:
   # The SPIFFE trust domain of this install (ADR-0164). It is the one value
   # that names the domain. The chart builds each SPIFFE ID from it and a path,
-  # and the entitlements-svc Application reads it from this file too. The
+  # and the billing-webhook Application reads it from this file too. The
   # SaaS uses zeroroot.ai. It cannot change on a running install.
   spire:
     trustDomain: zeroroot.ai

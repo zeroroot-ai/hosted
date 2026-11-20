@@ -4,4 +4,4 @@ jobs:
   t:
     runs-on: ubuntu-latest
     steps:
-      - run: bash scripts/smoke-entitlements.sh
+      - run: bash scripts/smoke-signup.sh

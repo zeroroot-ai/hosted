@@ -25,9 +25,8 @@
 #
 # This Application deploys the billing service (deploy#1132, billing#20): the
 # Stripe webhook and the two redirect endpoints, behind the envoy.extraRoutes
-# entries of this env (charts#375). It projects each tenant's
-# subscription_status into tenant_quotas, where entitlements-svc reads it to
-# payment-gate plan limits.
+# entries of this env (charts#375). It writes the subscription_status of
+# each tenant into tenant_quotas.
 #
 # This repo owns both halves: the chart under gitops/saas-overlay/ and the
 # env-specific values overlay under gitops/envs/.

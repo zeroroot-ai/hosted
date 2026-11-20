@@ -8,8 +8,8 @@ ID is the one caller that can end a signup step (ADR-0060, D54).
 
 Every workload selector is a Helm-rendered literal. A selector template that
 reads `.PodSpec` or `.PodMeta` is satisfied by construction and checks
-nothing (see the entitlements-svc overlay and the core chart's
-clusterspiffeids.yaml). The literals do not stop a principal that can create
+nothing (see clusterspiffeids.yaml of the core chart). The literals do not
+stop a principal that can create
 pods in this namespace; identity-admission.yaml next door does that.
 */}}
 apiVersion: spire.spiffe.io/v1alpha1

@@ -3,8 +3,8 @@
 
 This repository holds no chart source (ADR-0086): all of it moved to
 zeroroot-ai/charts on 2026-09-04. scripts/check-no-chart-source.py fails the
-build on a `Chart.yaml` or a Helm template outside the two SaaS overlay
-charts (hosted#415). This guard is the other half: a SCRIPT that reaches into
+build on a `Chart.yaml` or a Helm template outside the SaaS overlay
+chart (hosted#415). This guard is the other half: a SCRIPT that reaches into
 `helm/` relative to itself.
 
 Two did, and both were dead on arrival (hosted#363):

@@ -28,8 +28,8 @@
 # before ArgoCD exists (module.bootstrap-addons: LB controller,
 # Karpenter). cert-manager, external-secrets and external-dns are
 # umbrella subcharts since deploy#1728 (ADR-0083). The SaaS overlay
-# Applications (entitlements-svc, billing-webhook) remain real, separate
-# Applications reconciled from gitops/envs/<env>/apps.
+# Application (billing-webhook) remains a real, separate
+# Application reconciled from gitops/envs/<env>/apps.
 #
 # `wave` semantics: `pre-argo` for Terraform stages (applied by the recreate apply
 # before ArgoCD); an integer for `argo:` stages (the Application's own
@@ -72,13 +72,6 @@ stages:
     depends_on: [argocd]
     readiness: "Application gibson Synced + Healthy (the umbrella aggregates every subchart: crds, spire, datastores, zitadel, operators, workloads)"
     blocked_hint: "The whole platform is inside this one Application, ordered by in-chart sync-waves. Localise with the substages below + `kubectl get pods -n gibson` + `kubectl get application gibson -n argocd -o yaml | yq '.status.resources'`."
-
-  - name: entitlements-svc
-    wave: 0
-    owner: argo:gibson-entitlements-svc
-    depends_on: [gibson-umbrella]
-    readiness: "gibson-entitlements-svc Application Healthy; daemon dials the seam over SPIFFE mTLS"
-    blocked_hint: "SaaS overlay (envs/<env>/apps). Needs the ClusterSPIFFEID class gibson-gibson (gitops#355) and umbrella chart >= 0.105.0 for the seam env vars (gitops#359)."
 
   - name: billing-webhook
     wave: 0

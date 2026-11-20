@@ -122,7 +122,7 @@ locals {
 
   # Every repo named in a spec.source(s).repoURL across this env's Applications.
   #   hosted — the Application CRs themselves, the $values ref, and the SaaS
-  #            overlay charts under gitops/saas-overlay/ (ADR-0086).
+  #            overlay chart under gitops/saas-overlay/ (ADR-0086).
   #   ghcr charts — the versioned OCI umbrella chart
   #                 (gitops/envs/<env>/gibson.yaml source[0]).
   # Third-party sources are per-env and come from
@@ -171,7 +171,7 @@ locals {
     { group = "external-secrets.io", kind = "ClusterSecretStore" },
     # The cluster-wide Cilium policies of the chart (D76).
     { group = "cilium.io", kind = "CiliumClusterwideNetworkPolicy" },
-    # 15 ClusterSPIFFEIDs from the umbrella + 1 from the entitlements-svc overlay.
+    # The ClusterSPIFFEIDs of the umbrella + 1 from the billing-webhook overlay.
     { group = "spire.spiffe.io", kind = "ClusterSPIFFEID" },
     # The cluster-scoped PlatformBootstrap CR that drives platform bringup.
     { group = "gibson.zeroroot.ai", kind = "PlatformBootstrap" },
