@@ -59,4 +59,15 @@
 #   - Role and RoleBinding gibson-zitadel, retired by charts#758, which first
 #     shipped in chart v0.153.0 (hosted#114 said 0.154.0 in error). That Role
 #     let the Zitadel ServiceAccount write Secrets.
-resources: []
+resources:
+  - group: ""
+    kind: ConfigMap
+    namespace: gibson
+    name: tenant-neo4j-template
+    retiredBy: zeroroot-ai/charts#824 (chart 0.156.0)
+    reason: >-
+      Chart 0.156.0 replaced the plan-keyed Neo4j size table with one
+      default size. The template that rendered this ConfigMap is deleted,
+      and the tenant operator of gibson v0.166.0 reads tenant-neo4j-size.
+      Nothing reads this ConfigMap now.
+    observed: "2026-11-20"
