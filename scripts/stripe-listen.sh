@@ -5,9 +5,8 @@
 #
 # kind has no public ingress, so Stripe cannot POST to the Envoy edge. The
 # SaaS profile the dev cluster runs (deploy#1132, gitops#353) needs those
-# deliveries: the receiver projects each tenant's subscription_status into
-# tenant_quotas. Without a tunnel, signup completes and the tenant's
-# billing state simply never converges.
+# deliveries: the receiver reports each confirmed signup Checkout to the
+# daemon. Without a tunnel, the signup card step never completes.
 #
 # THE TRAP THIS CLOSES (deploy#1135)
 #

@@ -529,9 +529,9 @@ verify-harness: ## Prove the live verification suites fail closed (offline, depl
 # kind Stripe webhook tunnel (deploy#1135)
 # ===============================================================
 # kind has no public ingress, so Stripe cannot POST to the edge. The SaaS
-# profile the kind cluster runs needs those deliveries — the receiver projects
-# subscription_status into tenant_quotas — so without a tunnel signup completes
-# and the tenant's billing state never converges.
+# profile the kind cluster runs needs those deliveries. The receiver reports
+# each confirmed signup Checkout to the daemon, so without a tunnel the signup
+# card step never completes.
 #
 # The target reconciles the signing secret before it forwards anything: the
 # secret `stripe listen` signs with is NOT a Dashboard endpoint secret, and a
