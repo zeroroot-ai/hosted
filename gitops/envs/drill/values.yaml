@@ -60,36 +60,35 @@ gibson-workloads:
   # ---------------------------------------------------------------------------
   # tenantNeo4j — the per-tenant graph, sized for a REAL cluster.
   #
-  # The chart's default `team` tier is the MEASURED FLOOR: 100m / 1Gi, the
+  # The chart's default `size` is the MEASURED FLOOR: 100m / 1Gi, the
   # smallest size a non-backed-up Neo4j is known to run at, with its heap
   # pinned by the operator. That number exists so the whole platform plus two
   # tenants fit one local node, and baseline, developer and CI install it
   # (ADR-0090).
   #
-  # It is not what a paying tenant should run on. Neo4j's own Helm chart
+  # It is not what a hosted tenant should run on. Neo4j's own Helm chart
   # refuses to render below 500m CPU and 2Gi memory, and states that as its
-  # minimum; the platform's own graph is pinned at exactly that. A hosted
+  # minimum. The platform's own graph is pinned at exactly that. A hosted
   # environment has no reason to run a tenant's graph below the vendor's
-  # stated minimum, so this raises `team` to it.
+  # stated minimum, so this raises `size` to it.
   #
   # WHY THIS LIVES HERE AND NOT IN THE CHART. ADR-0090 puts staging and
   # production sizing with the environment, not with the chart: the chart
   # ships the floor an operator can install anywhere, and an environment that
   # can afford more says so itself.
   #
-  # org and enterprise are already at or above the vendor minimum in the
-  # chart, so they are not restated. One name for one number.
+  # No plan selects a size (gibson#1526). This is the one default size. A
+  # Tenant that needs a different size sets it in `spec.resources.neo4j`.
   #
-  # Delivered by the tenant-neo4j-template ConfigMap, which the chart renders
-  # and the tenant-operator reads. Until zeroroot-ai/charts#99 that ConfigMap
-  # did not exist, so EVERY environment silently ran the 100m/1Gi dev size
-  # regardless of what any values file said.
+  # Delivered by the tenant-neo4j-size ConfigMap, which the chart renders
+  # (charts 0.156.0 and later) and the tenant-operator reads for each
+  # provision. The chart fails the render if a values file still sets the
+  # deleted `tenantNeo4j.tiers`.
   tenantNeo4j:
-    tiers:
-      team:
-        storage: 10Gi
-        cpu: 500m
-        memory: 2Gi
+    size:
+      storage: 10Gi
+      cpu: 500m
+      memory: 2Gi
   global:
     domain: "zeroroot.ai"
   # -----------------------------------------------------------------------------

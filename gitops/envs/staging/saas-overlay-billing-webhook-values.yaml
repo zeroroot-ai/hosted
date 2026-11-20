@@ -3,11 +3,10 @@
 # Deployed as a separate Argo Application (envs/staging/apps/billing-webhook.yaml), not as part of the core umbrella.
 # ADR-0074 / deploy#1132 (gibson#798/#800).
 #
-# The receiver verifies Stripe subscription events and writes each tenant's
-# subscription_status into tenant_quotas. Until this Application existed, NO
-# environment ran
-# one: the Envoy route resolved to zero endpoints and subscription state never
-# reached the platform at all (gitops#357).
+# The receiver verifies Stripe events and reports each confirmed signup
+# Checkout to the daemon. It writes no tenant quota (billing#58). Until this
+# Application existed, NO environment ran one: the Envoy route resolved to
+# zero endpoints and no Stripe event reached the platform (gitops#357).
 #
 # Stripe delivers to the public edge, which rewrites /api/billing/webhook onto
 # the receiver's /webhook. The browser reaches /signup-step, /account and

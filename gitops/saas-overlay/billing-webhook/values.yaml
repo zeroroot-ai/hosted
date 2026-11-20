@@ -38,9 +38,10 @@ port: 8090
 # entry names this exact Service.
 fullnameOverride: "gibson-billing-webhook"
 
-# Platform Postgres connection (libpq env vars). The receiver writes
-# subscription_status into tenant_quotas in the platform database and runs
-# EnsureSchema at boot, so the user must own that schema.
+# Platform Postgres connection (libpq env vars). The receiver records each
+# Stripe event it handled in billing_webhook_events, so a redelivery changes
+# nothing, and it runs EnsureSchema at boot, so the user must own that schema.
+# It writes no tenant quota (billing#58).
 # These MUST be overridden by the env-specific overlay.
 postgres:
   host: ""

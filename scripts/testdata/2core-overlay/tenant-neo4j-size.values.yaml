@@ -1,0 +1,9 @@
+# Self-test fixture for scripts/check-2core-overlay.py: the default size of a
+# tenant Neo4j raised to 1000m. Two tenant pods at that size put the node over
+# the 2-vCPU budget. Layered after the clean overlays, it MUST make the guard
+# fail, and the tenant rows MUST read 1000m. Never applied to a cluster.
+gibson-workloads:
+  tenantNeo4j:
+    size:
+      cpu: 1000m
+      memory: 1Gi

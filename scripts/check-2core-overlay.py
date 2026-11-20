@@ -28,9 +28,9 @@ WHAT IT MEASURES
      plugin: the agent 90m/128Mi and the operator 10m/64Mi
      (bootstrap/cilium/values.yaml).
   5. The ToolHive operator the verb installs: 10m/64Mi (upstream default).
-  6. TWO tenant data planes, each a neo4j at the tenant-operator's small
-     tier (100m / 1Gi, its tierDefaults; the chart's tenantNeo4j.tiers.*
-     values are discarded by the operator): the bringup's own tenant
+  6. TWO tenant data planes, each a neo4j at the default size the umbrella
+     renders into the tenant-neo4j-size ConfigMap (tenantNeo4j.size, which
+     the tenant-operator reads for each provision): the bringup's own tenant
      (tenant-primary, created by the first-admin Job) and the tenant the
      exit test seeds. Postgres and Redis for a tenant live in the platform's
      shared stores and add no pod. The first guard counted one tenant at a
@@ -96,6 +96,10 @@ def velero_rung(rung: str) -> Path:
     # Velero installs as its own release, so an umbrella rung never reaches it.
     return CHARTS_ROOT / f"helm/gibson-velero/values-{rung}.yaml"
 OVERAGE_FIXTURE = ROOT / "scripts/testdata/2core-overlay/overage.values.yaml"
+# A rung that raises tenantNeo4j.size. The guard must count the raised size
+# for both tenant neo4j pods, and the total must go over the budget.
+TENANT_SIZE_FIXTURE = ROOT / "scripts/testdata/2core-overlay/tenant-neo4j-size.values.yaml"
+TENANT_SIZE_FIXTURE_CPU_M = 1000
 
 CPU_BUDGET_M = 1900
 MEM_BUDGET_MI = 7000
@@ -207,27 +211,37 @@ def deep_merge(a: dict, b: dict) -> dict:
     return out
 
 
-# The tenant-operator sizes every per-tenant neo4j from its own tierDefaults
-# (gibson operators/tenant/internal/dataplane/neo4j.go: small = 10Gi, 100m,
-# 1Gi) and discards the chart's tenantNeo4j.tiers.* values, so those values
-# are not the truth and this guard does not read them. Measured on hosted run
-# 34233760977: tenant-primary and tenant-restoreloop each held 100m / 1Gi
-# with the overlay claiming 50m. Change these two numbers only when the
-# operator's tierDefaults change.
-TENANT_NEO4J_SMALL_CPU_M = 100
-TENANT_NEO4J_SMALL_MEM_MI = 1024
+# The tenant-operator (gibson v0.166.0 and later) sizes each per-tenant neo4j
+# from the tenant-neo4j-size ConfigMap that the umbrella renders from
+# tenantNeo4j.size (gibson operators/tenant/internal/dataplane/neo4j.go). It
+# uses `memory` for both the request and the limit. The guard reads the
+# rendered ConfigMap, so a rung that raises tenantNeo4j.size moves the total.
+# Hosted run 34233760977 showed why the size must come from what the operator
+# reads: tenant-primary and tenant-restoreloop each held 100m / 1Gi while the
+# overlay claimed 50m.
+TENANT_NEO4J_SIZE_CONFIGMAP = "tenant-neo4j-size"
 
 
-def tenant_data_planes() -> list[tuple[str, int, float]]:
-    """The two per-tenant neo4j pods the loop stands up, at the operator's small tier.
+def tenant_data_planes(docs: list[dict]) -> list[tuple[str, int, float]]:
+    """The two per-tenant neo4j pods the loop stands up, at the rendered default size.
 
     The bringup's first-admin Job creates tenant-primary, and the exit test
     seeds a second tenant. The operator creates both StatefulSets after the
-    install, so no manifest carries them.
+    install, so no manifest carries them. Their size is the data of the
+    tenant-neo4j-size ConfigMap in the same render.
     """
+    sizes = [d for d in docs if d.get("kind") == "ConfigMap"
+             and d.get("metadata", {}).get("name") == TENANT_NEO4J_SIZE_CONFIGMAP]
+    if len(sizes) != 1:
+        die(f"the umbrella render holds {len(sizes)} {TENANT_NEO4J_SIZE_CONFIGMAP} ConfigMaps, not 1. "
+            "The tenant-operator reads it for the size of each tenant neo4j (charts 0.156.0 and later)")
+    data = sizes[0].get("data") or {}
+    if "cpu" not in data or "memory" not in data:
+        die(f"the {TENANT_NEO4J_SIZE_CONFIGMAP} ConfigMap has no cpu or no memory key: {sorted(data)}")
+    c, m = cpu_m(data["cpu"]), mem_mi(data["memory"])
     return [
-        ("tenant-primary/neo4j (operator small tier)", TENANT_NEO4J_SMALL_CPU_M, float(TENANT_NEO4J_SMALL_MEM_MI)),
-        ("tenant-<seeded>/neo4j (operator small tier)", TENANT_NEO4J_SMALL_CPU_M, float(TENANT_NEO4J_SMALL_MEM_MI)),
+        ("tenant-primary/neo4j (tenantNeo4j.size)", c, m),
+        ("tenant-<seeded>/neo4j (tenantNeo4j.size)", c, m),
     ]
 
 
@@ -272,13 +286,14 @@ def measure(umbrella_values: list[Path], velero_values: list[Path], metrics_valu
     inputs = render_inputs()
     if not inputs.is_file():
         die(f"missing {inputs}: the chart's render inputs. Is CHARTS_ROOT={CHARTS_ROOT} a charts checkout?")
-    rows += workload_rows(helm_template(umbrella, [inputs, *umbrella_values], ["--namespace", "gibson", "--set", "platformPostgres.instances=1"]), "")
+    umbrella_docs = helm_template(umbrella, [inputs, *umbrella_values], ["--namespace", "gibson", "--set", "platformPostgres.instances=1"])
+    rows += workload_rows(umbrella_docs, "")
     rows += workload_rows(helm_template(velero, velero_values, []), "velero: ")
     ms = yaml.safe_load(metrics_values.read_text()) or {}
     req = ms.get("resources", {}).get("requests", {})
     rows.append(("kube-system/metrics-server", cpu_m(req.get("cpu", 0)), mem_mi(req.get("memory", 0))))
     rows += [(n, c, float(m)) for n, c, m in KUBE_SYSTEM_BASELINE]
-    rows += tenant_data_planes()
+    rows += tenant_data_planes(umbrella_docs)
     rows.append(restore_helper(velero_values))
     cpu = sum(r[1] for r in rows)
     mem = sum(r[2] for r in rows)
@@ -361,6 +376,17 @@ def selftest() -> int:
     rows, cpu, mem = measure([baseline, u, OVERAGE_FIXTURE], [v], METRICS_OVERLAY)
     if cpu <= CPU_BUDGET_M:
         die(f"self-test: the planted overage ({cpu}m) did not exceed the budget — the guard cannot fail")
+    # The tenant neo4j size: a rung that raises tenantNeo4j.size must move
+    # both tenant rows to that size and push the total over the budget.
+    if not TENANT_SIZE_FIXTURE.is_file():
+        die(f"self-test fixture missing: {TENANT_SIZE_FIXTURE}")
+    rows_t, cpu_t, _ = measure([baseline, u, TENANT_SIZE_FIXTURE], [v], METRICS_OVERLAY)
+    tenant_t = [r for r in rows_t if r[0].endswith("/neo4j (tenantNeo4j.size)")]
+    if len(tenant_t) != 2 or any(r[1] != TENANT_SIZE_FIXTURE_CPU_M for r in tenant_t):
+        die(f"self-test: with tenantNeo4j.size.cpu={TENANT_SIZE_FIXTURE_CPU_M}m the tenant rows read "
+            f"{[r[1] for r in tenant_t]}, so the guard does not count the size the operator reads")
+    if cpu_t <= CPU_BUDGET_M:
+        die(f"self-test: the raised tenant neo4j size ({cpu_t}m) did not exceed the budget. The guard cannot fail on it")
     # The restore helper: the Velero overlay without its fs-restore-action-config
     # ConfigMap puts Velero's 100m default on the node, and that must not fit.
     # This is the shape of run 34233760977, planted.
@@ -394,7 +420,7 @@ def selftest() -> int:
     # Unit paths: the parsers must read the shapes the chart emits.
     assert cpu_m("250m") == 250 and cpu_m("1") == 1000 and cpu_m(0.5) == 500
     assert mem_mi("1Gi") == 1024 and mem_mi("512Mi") == 512 and round(mem_mi("1024Ki")) == 1
-    print(f"✅ self-test: the planted overage measures {cpu}m > {CPU_BUDGET_M}m and is rejected; without fs-restore-action-config the total counts the helper default ({cpu2}m, not {cpu_c}m); unit parsers agree")
+    print(f"✅ self-test: the planted overage measures {cpu}m > {CPU_BUDGET_M}m and is rejected; a raised tenantNeo4j.size measures {cpu_t}m and is rejected; without fs-restore-action-config the total counts the helper default ({cpu2}m, not {cpu_c}m); unit parsers agree")
     return 0
 
 
