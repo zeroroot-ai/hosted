@@ -130,7 +130,7 @@ SH
 # ---------------------------------------------------------------------------
 
 @test "SaaS suite refuses to run on a self-hosted cluster" {
-  # No entitlements-svc Service => self-hosted. The SaaS suite must NOT report a result:
+  # No billing-webhook Service => self-hosted. The SaaS suite must NOT report a result:
   # every marketing assertion would fail for the correct reason and read as a
   # product defect.
   write_kubectl_stub <<'SH'
@@ -150,7 +150,41 @@ SH
 }
 
 @test "self-hosted suite refuses to run on a SaaS cluster" {
-  # entitlements-svc present => saas.
+  # billing-webhook present => saas.
+  write_kubectl_stub <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "config current-context") echo "kind-gibson"; exit 0 ;;
+  "cluster-info") exit 0 ;;
+  "get ns gibson") exit 0 ;;
+  "-n gibson get svc -o name") echo "service/gibson-billing-webhook"; exit 0 ;;
+  *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
+esac
+SH
+  run bash "$REPO_ROOT/scripts/verify-selfhosted-seams.sh"
+  [ "$status" -eq 2 ]
+  [[ "$output" == *"running the 'saas' profile"* ]]
+}
+
+@test "FAILING FIXTURE: a Service that only holds the name of the SaaS signal is not a SaaS cluster" {
+  # The signal is the whole Service name. With a substring match this cluster
+  # reads as saas, and the self-hosted suite refuses to run on it.
+  write_kubectl_stub <<'SH'
+#!/usr/bin/env bash
+case "$*" in
+  "config current-context") echo "kind-gibson"; exit 0 ;;
+  "cluster-info") exit 0 ;;
+  "get ns gibson") exit 0 ;;
+  "-n gibson get svc -o name") printf 'service/gibson-dashboard\nservice/not-gibson-billing-webhook-proxy\n'; exit 0 ;;
+  *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
+esac
+SH
+  run bash "$REPO_ROOT/scripts/verify-saas-surfaces.sh"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"running the 'self-hosted' profile"* ]] || { echo "$output"; false; }
+}
+
+@test "the retired entitlements Service does not make a cluster SaaS" {
   write_kubectl_stub <<'SH'
 #!/usr/bin/env bash
 case "$*" in
@@ -161,9 +195,9 @@ case "$*" in
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
 esac
 SH
-  run bash "$REPO_ROOT/scripts/verify-selfhosted-seams.sh"
-  [ "$status" -eq 2 ]
-  [[ "$output" == *"running the 'saas' profile"* ]]
+  run bash "$REPO_ROOT/scripts/verify-saas-surfaces.sh"
+  [ "$status" -eq 2 ] || { echo "$output"; false; }
+  [[ "$output" == *"running the 'self-hosted' profile"* ]] || { echo "$output"; false; }
 }
 
 # ---------------------------------------------------------------------------
@@ -177,7 +211,7 @@ case "$*" in
   "config current-context") echo "kind-gibson"; exit 0 ;;
   "cluster-info") exit 0 ;;
   "get ns gibson") exit 0 ;;
-  "-n gibson get svc -o name") echo "service/gibson-entitlements-svc"; exit 0 ;;
+  "-n gibson get svc -o name") echo "service/gibson-billing-webhook"; exit 0 ;;
   "-n gibson get deploy gibson-dashboard") echo 'Error from server (NotFound): deployments.apps "gibson-dashboard" not found' >&2; exit 1 ;;
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
 esac
@@ -195,7 +229,7 @@ case "$*" in
   "config current-context") echo "kind-gibson"; exit 0 ;;
   "cluster-info") exit 0 ;;
   "get ns gibson") exit 0 ;;
-  "-n gibson get svc -o name") echo "service/gibson-entitlements-svc"; exit 0 ;;
+  "-n gibson get svc -o name") echo "service/gibson-billing-webhook"; exit 0 ;;
   "-n gibson get deploy gibson-dashboard") exit 0 ;;
   *) echo "kubectl stub: undeclared call: $*" >&2; exit 1 ;;
 esac

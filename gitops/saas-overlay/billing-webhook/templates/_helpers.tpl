@@ -95,8 +95,8 @@ values.yaml.
 {{- end -}}
 
 {{/*
-Wait-for-SPIRE socket init container. The same shape as the entitlements-svc
-overlay. It blocks pod start until the SPIRE agent socket is reachable, so
+Wait-for-SPIRE socket init container. It blocks pod start until the SPIRE
+agent socket is reachable, so
 the binary does not fail its boot dial of the daemon.
 */}}
 {{- define "billing-webhook.waitForSpireSocket" -}}

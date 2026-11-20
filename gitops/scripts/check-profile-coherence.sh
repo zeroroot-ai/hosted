@@ -3,34 +3,25 @@
 #
 # WHY THIS EXISTS AND WHY IT RENDERS
 #
-# deploy's helm/gibson/tests/signup-seam.bats already encodes the SaaS /
-# self-hosted invariant, but it only guards the chart's OWN ci/ fixtures. The
-# overlays that actually ship live here, and both real environments violated
-# the invariant undetected: prod ran billing-on with no WWW_URL (the deploy#1075
-# combination — the deployment-profile resolver fail-closes and the dashboard
-# 500s on every route incl. /login), and staging + prod both pointed the daemon
-# at the entitlements seam without requiring it, i.e. fail-OPEN to unlimited.
+# The product is open source, so no environment enforces a plan limit
+# (gibson#1525). The entitlements service is deleted. A daemon that still
+# renders the entitlements seam dials a Service that does not exist, and with
+# GIBSON_ENTITLEMENTS_REQUIRED=true it refuses every provision.
 #
-# This guard renders each env's values against THAT ENV'S OWN pinned
-# chartVersion, not the chart tip. That distinction is the point: a value can be
-# set in an overlay while the pinned chart has no template to consume it, so the
-# knob is silently inert. prod was exactly that case: entitlementsEndpoint had
-# been set for months while chartVersion sat on 0.104.0, which predates the seam
-# templates (they land in 0.105.0), so prod's daemon ran the embedded unlimited
-# provider no matter what the overlay said (gitops#359). prod advanced to 0.109.2
-# in gitops#378 and the seam renders now — but the class of bug is what this
-# guard is for, and only a render can see it; grepping the values file cannot.
+# This guard renders each env's values against THAT ENV'S OWN pinned chart
+# version, not the chart tip. Only a render shows what the daemon gets: a value
+# can be set in an overlay while the pinned chart has no template for it, and a
+# chart default can set an env var that no overlay names (gitops#359).
 #
-# THE INVARIANT (both directions)
+# THE INVARIANT
 #
-#   SaaS profile        — ALL of: DASHBOARD_BILLING_PAID_TIERS_ENABLED=true,
-#                         WWW_URL, ENTITLEMENTS_ENDPOINT,
-#                         GIBSON_ENTITLEMENTS_REQUIRED=true
-#   self-hosted profile — NONE of the above
-#   both                — SIGNUP_SELF_SERVE agrees between the daemon workload
-#                         and the dashboard workload
+#   plan limits off  — no workload renders ENTITLEMENTS_ENDPOINT, and none
+#                      renders GIBSON_ENTITLEMENTS_REQUIRED=true
+#   signup           — SIGNUP_SELF_SERVE agrees between the daemon workload
+#                      and the dashboard workload
 #
-# Anything in between is incoherent and fails.
+# The chart refuses a render that sets one half of the seam, so that case
+# fails here as a render failure.
 #
 # EXEMPTIONS
 #
@@ -42,8 +33,8 @@
 # Usage:
 #   scripts/check-profile-coherence.sh              # every env under envs/
 #   scripts/check-profile-coherence.sh staging prod  # named envs
-#   scripts/check-profile-coherence.sh --selftest   # prove the checker catches
-#                                                   # a synthetic incoherent env
+#   scripts/check-profile-coherence.sh --selftest   # prove the checker refuses
+#                                                   # an env with the seam on
 #
 # Requires: helm, python3, and a ghcr login able to pull
 # oci://ghcr.io/zeroroot-ai/charts/gibson.
@@ -96,8 +87,6 @@ profile_facts() {
 import sys, re, yaml
 
 WANTED = {
-    "DASHBOARD_BILLING_PAID_TIERS_ENABLED",
-    "WWW_URL",
     "ENTITLEMENTS_ENDPOINT",
     "GIBSON_ENTITLEMENTS_REQUIRED",
     "SIGNUP_SELF_SERVE",
@@ -235,41 +224,22 @@ check_env() {
     fail_count=$((fail_count + 1))
     return
   fi
-  local billing www endpoint required
-  billing="$(sed -n 's/^DASHBOARD_BILLING_PAID_TIERS_ENABLED=//p' <<<"$facts")"
-  www="$(sed -n 's/^WWW_URL=//p' <<<"$facts")"
+  local endpoint required
   endpoint="$(sed -n 's/^ENTITLEMENTS_ENDPOINT=//p' <<<"$facts")"
   required="$(sed -n 's/^GIBSON_ENTITLEMENTS_REQUIRED=//p' <<<"$facts")"
 
-  local billing_on=0 www_on=0 endpoint_on=0 required_on=0
-  [ "$billing" = "true" ] && billing_on=1
-  [ "$www" != "<absent>" ] && [ -n "$www" ] && www_on=1
+  local endpoint_on=0 required_on=0
   [ "$endpoint" != "<absent>" ] && [ -n "$endpoint" ] && endpoint_on=1
   [ "$required" = "true" ] && required_on=1
 
-  printf '  billing=%s www=%s entitlements=%s required=%s\n' \
-    "$billing_on" "$www_on" "$endpoint_on" "$required_on"
+  printf '  entitlements=%s required=%s\n' "$endpoint_on" "$required_on"
 
-  local on=$((billing_on + www_on + endpoint_on + required_on))
-  if [ "$on" -eq 4 ]; then
-    printf '  %s[PASS]%s coherent SaaS profile\n' "$GREEN" "$NC"
-  elif [ "$on" -eq 0 ]; then
-    printf '  %s[PASS]%s coherent self-hosted profile\n' "$GREEN" "$NC"
-  else
-    # Name the specific missing half so the failure is actionable rather than
-    # "something is incoherent".
-    [ "$billing_on" -eq 1 ] && [ "$www_on" -eq 0 ] && report "$env" "billing-without-www" \
-      "DASHBOARD_BILLING_PAID_TIERS_ENABLED=true with no WWW_URL — the deployment-profile resolver fail-closes and the dashboard 500s on every route (deploy#1075)"
-    [ "$www_on" -eq 1 ] && [ "$billing_on" -eq 0 ] && report "$env" "www-without-billing" \
-      "WWW_URL set with billing off — self-hosted installs must not link a marketing surface (dashboard#920)"
-    [ "$endpoint_on" -eq 1 ] && [ "$required_on" -eq 0 ] && report "$env" "entitlements-fail-open" \
-      "ENTITLEMENTS_ENDPOINT set without GIBSON_ENTITLEMENTS_REQUIRED=true — the seam degrades to unlimited instead of denying (deploy#1055)"
-    [ "$required_on" -eq 1 ] && [ "$endpoint_on" -eq 0 ] && report "$env" "required-without-endpoint" \
-      "GIBSON_ENTITLEMENTS_REQUIRED=true with no ENTITLEMENTS_ENDPOINT — the daemon fails closed with nothing to dial"
-    [ "$billing_on" -eq 1 ] && [ "$endpoint_on" -eq 0 ] && report "$env" "entitlements-seam-absent" \
-      "billing is on but the entitlements seam does not render — plan limits are not enforced (a knob set in the overlay that this chartVersion has no template for renders nothing; see gitops#359)"
-    [ "$endpoint_on" -eq 1 ] && [ "$billing_on" -eq 0 ] && report "$env" "entitlements-without-billing" \
-      "entitlements seam wired with billing off — an incoherent half-SaaS profile"
+  [ "$endpoint_on" -eq 1 ] && report "$env" "entitlements-endpoint-set" \
+    "ENTITLEMENTS_ENDPOINT=${endpoint} renders — the entitlements service is deleted, so the daemon dials nothing (gibson#1525)"
+  [ "$required_on" -eq 1 ] && report "$env" "entitlements-required" \
+    "GIBSON_ENTITLEMENTS_REQUIRED=true renders — the daemon enforces plan limits, and no environment has any (gibson#1525)"
+  if [ $((endpoint_on + required_on)) -eq 0 ]; then
+    printf '  %s[PASS]%s plan limits are off\n' "$GREEN" "$NC"
   fi
 
   # SIGNUP_SELF_SERVE must agree across workloads: a daemon that serves public
@@ -290,8 +260,8 @@ check_env() {
 }
 
 # ---------------------------------------------------------------------------
-# selftest — synthesise an incoherent overlay from a real one and assert the
-# checker rejects it. Proves the guard can still catch a regression, rather
+# selftest — build an overlay with the entitlements seam on from a real one and
+# assert the checker rejects it for both reasons. Proves the guard can still catch a regression, rather
 # than passing because every assertion silently became a no-op.
 # ---------------------------------------------------------------------------
 selftest() {
@@ -299,16 +269,24 @@ selftest() {
   local base="${REPO_ROOT}/envs/staging/values.yaml"
   local mutant="${WORKDIR}/incoherent.yaml"
 
-  # Drop wwwUrl from a SaaS overlay: billing stays on, marketing host vanishes.
-  grep -v '^    wwwUrl:' "$base" >"$mutant"
+  # Turn the entitlements seam back on in a real overlay. Both halves are set,
+  # so the chart renders it and only this guard can refuse it.
+  sed -e 's|^    entitlementsEndpoint: ""$|    entitlementsEndpoint: "gibson-entitlements-svc:9091"|' \
+      -e 's|^    entitlementsRequired: false$|    entitlementsRequired: true|' "$base" >"$mutant"
+  if cmp -s "$base" "$mutant"; then
+    printf '  %s[FAIL]%s selftest: the mutation changed nothing in %s\n' "$RED" "$NC" "$base"
+    return 1
+  fi
 
   local before=$fail_count
   # Output is captured, not discarded: the mutant's own FAIL lines would read
   # as real failures in CI, but they are the evidence when the selftest itself
   # goes wrong, so dump them only then.
   check_env staging "$mutant" >"${WORKDIR}/selftest.out" 2>&1 || true
-  if [ "$fail_count" -gt "$before" ]; then
-    printf '  %s[PASS]%s selftest: a SaaS overlay with WWW_URL removed is rejected\n' "$GREEN" "$NC"
+  if [ "$fail_count" -eq $((before + 2)) ] \
+      && grep -q 'ENTITLEMENTS_ENDPOINT=gibson-entitlements-svc:9091 renders' "${WORKDIR}/selftest.out" \
+      && grep -q 'GIBSON_ENTITLEMENTS_REQUIRED=true renders' "${WORKDIR}/selftest.out"; then
+    printf '  %s[PASS]%s selftest: an overlay with the entitlements seam on is rejected\n' "$GREEN" "$NC"
     fail_count=$before
     warn_count=0
     USED_EXEMPTIONS=()

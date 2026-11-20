@@ -8,10 +8,9 @@
 # step in gitops or deploy applied them. They were committed and then
 # hand-applied at best.
 #
-# That blind spot is the likely reason two defects sat undetected: the wrong
-# SPIRE controller className in both envs (gitops#355) and prod's entitlements
-# seam being inert against its pinned chart (gitops#359). If nothing reconciles
-# the Application, nothing reports it unhealthy.
+# That blind spot is the likely reason the wrong SPIRE controller className
+# sat undetected in both envs (gitops#355). If nothing reconciles the
+# Application, nothing reports it unhealthy.
 #
 # SCOPE — deliberately narrow. This root recurses ONLY envs/staging/apps/, which
 # holds the SaaS overlay Applications. The platform Application itself

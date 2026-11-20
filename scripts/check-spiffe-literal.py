@@ -8,7 +8,7 @@ ADR-0164: each install has its own SPIFFE trust domain. One config value
 names it, `global.spire.trustDomain`, and the chart builds each SPIFFE ID
 from that value and a path. Before hosted#435 this repo held 18 lines with
 a full SPIFFE ID in the SaaS domain: IDs in each env values file, a default in
-the entitlements-svc template, a test overlay and a smoke script. Each one
+an overlay template, a test overlay and a smoke script. Each one
 is a second place that names the domain, and each one silently disagrees
 with an install that uses another domain.
 

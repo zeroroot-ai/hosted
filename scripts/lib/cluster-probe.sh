@@ -135,17 +135,18 @@ require_workload() {
 #
 # Echoes "saas" or "self-hosted". Exits 2 when indeterminate.
 #
-# The discriminator is the presence of the SaaS-only entitlements-svc Service.
-# Per ADR-0074 the SaaS overlay is a separate set of charts composed on top of
-# the core umbrella, and entitlements-svc is one of its deployables — so its
-# Service existing is the cleanest deployment-profile signal available
-# in-cluster.
+# The discriminator is the Service of the billing-webhook overlay chart
+# (gitops/saas-overlay/billing-webhook). Per ADR-0074 the SaaS overlay is a
+# separate chart composed on top of the core umbrella, and no self-hosted
+# install has it. So its Service is the deployment-profile signal in-cluster.
 #
-# It used to be www-svc. That stopped working when the marketing site became an
-# off-cluster surface (ADR-0077): www-svc exists in NEITHER audience now, so
-# every cluster would have reported "self-hosted" and every SaaS suite would
-# have refused to run — silently, because require_profile skips rather than
-# fails on a mismatch.
+# The match is the whole Service name. A substring match would call a cluster
+# SaaS because of some other Service that only holds the word.
+#
+# It was www-svc first, then entitlements-svc. Each one stopped existing
+# (ADR-0077, gibson#1525), and each time every cluster would have reported
+# "self-hosted" with no failure. tests/harness/cluster-probe.bats holds the
+# signal: a cluster with the Service is "saas", and one without it is not.
 # ---------------------------------------------------------------------------
 # NOTE ON SUBSHELLS: this function and resolve_edge below are called inside
 # command substitution, where `exit` would only terminate the subshell and let
@@ -163,7 +164,7 @@ detect_profile() {
     return 1
   fi
 
-  if grep -q 'entitlements-svc' <<<"$names"; then
+  if grep -qx 'service/gibson-billing-webhook' <<<"$names"; then
     echo "saas"
   else
     echo "self-hosted"

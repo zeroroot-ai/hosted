@@ -1,0 +1,4 @@
+# A second chart. The guard must reject the Chart.yaml and the template.
+apiVersion: v2
+name: second
+version: 0.1.0

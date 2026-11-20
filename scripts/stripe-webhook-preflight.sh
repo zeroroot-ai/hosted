@@ -56,7 +56,7 @@ readonly STRIPE_WEBHOOK_FILE="${STRIPE_WEBHOOK_FILE:-$HOME/.stripe-webhook.tok}"
 # The event set the billing receiver consumes. Ground truth is two switches
 # in zeroroot-ai/billing:
 #   - internal/webhook/sync.go subscriptionEvent(): the five subscription
-#     events, which keep the tenant's entitlements in step with Stripe;
+#     events, which keep the subscription status of the tenant in step with Stripe;
 #   - internal/webhook/step.go stepEvent(): the three Checkout events, which
 #     complete or fail the signup card step. Without them the signup page
 #     waits on "We are confirming your payment details" until it times out

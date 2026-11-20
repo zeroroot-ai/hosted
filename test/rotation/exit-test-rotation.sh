@@ -1445,10 +1445,10 @@ openfga-postgres-credentials openfga deployment/gibson-openfga
 spire-postgres-credentials spire statefulset/gibson-server
 "
 
-# The SaaS overlay consumers of gibson_platform (billing, entitlements). They
-# read the login role of gibson-platform-postgres-credentials too, so each
-# must roll onto the new one.
-POSTGRES_PLATFORM_CONSUMERS="deployment/gibson-billing-webhook deployment/gibson-entitlements-svc"
+# The SaaS overlay consumer of gibson_platform (billing). It reads the login
+# role of gibson-platform-postgres-credentials too, so it must roll onto the
+# new one.
+POSTGRES_PLATFORM_CONSUMERS="deployment/gibson-billing-webhook"
 
 pg_su() {  # SQL: run as the Postgres superuser in the CNPG primary. A failed
   # exec or SQL error returns non-zero with its message on stderr, so a

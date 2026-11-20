@@ -10,7 +10,7 @@
 #     8090 with the stated auth mode, the dashboard carries the approved texts
 #     byte for byte, the daemon accepts the billing SPIFFE ID as the one
 #     signup step completer, and the OIDC client matches the pod.
-#   - The receiver runs the billing-webhook binary, not entitlements-svc.
+#   - The receiver runs the billing-webhook binary.
 #   - Each environment value the binary requires is wired.
 #   - The overlay owns the Stripe ExternalSecret, the SPIFFE identity and its
 #     admission policies.

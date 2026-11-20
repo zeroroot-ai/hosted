@@ -4,13 +4,13 @@
 # staging + prod). Self-hosted installs NEVER install this chart.
 #
 # ADR-0074: self-hosted vs SaaS seam model. The closed billing image reference
-# lives exclusively in the SaaS overlay charts — the core gibson umbrella
+# lives exclusively in the SaaS overlay chart — the core gibson umbrella
 # carries zero closed refs.
 # -----------------------------------------------------------------------------
 
-# Image — ghcr.io/zeroroot-ai/billing cmd/billing-webhook. Same image as the
-# entitlements-svc overlay (one image, two binaries); the entrypoint is
-# overridden to /usr/local/bin/billing-webhook.
+# Image — ghcr.io/zeroroot-ai/billing cmd/billing-webhook. The image holds
+# more than one binary, so the entrypoint is overridden to
+# /usr/local/bin/billing-webhook.
 # deploy#789 / ADR-0072: digest-pinned for staging/prod immutability.
 # Re-resolve via:
 #   gh api /orgs/zeroroot-ai/packages/container/billing/versions
@@ -18,9 +18,8 @@
 # may pin their own digest; kind/dev overlays are exempt from the digest guard.
 image:
   repository: ghcr.io/zeroroot-ai/billing
-  # billing 4b2c65f: the two redirect endpoints (billing#20), the license
-  # file (billing#33), and an entitlements-svc that proves its database
-  # credential at start (billing#43).
+  # billing 4b2c65f: the two redirect endpoints (billing#20) and the license
+  # file (billing#33).
   tag: "sha-4b2c65f@sha256:2e4715c0f95fcac3e9eae410e94b697e49aba322c44586e3e8201c3f9467a46c"
   pullPolicy: Always
 

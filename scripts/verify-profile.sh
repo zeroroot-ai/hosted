@@ -17,8 +17,7 @@
 # release or after flipping a profile.
 #
 # Render-time checks alone cannot see what this sees: an image that pulls, a
-# daemon that actually chose the embedded provider, a /login that serves rather
-# than 500ing on an incoherent profile.
+# daemon that runs with no entitlements seam, a /login that serves.
 #
 # Usage:
 #   scripts/verify-profile.sh self-hosted
@@ -96,39 +95,38 @@ if [ "$PROFILE" = "self-hosted" ]; then
 else
   [ "$closed_refs" -gt 0 ] \
     && pass "closed billing image running as expected (found $closed_refs container(s))" \
-    || fail "SaaS profile but no ghcr.io/zeroroot-ai/billing container is running — the entitlements/webhook overlays are missing"
+    || fail "SaaS profile but no ghcr.io/zeroroot-ai/billing container is running — the billing-webhook overlay is missing"
 fi
 
-step "daemon entitlements seam"
+# No profile enforces a plan limit (gibson#1525). The entitlements service is
+# deleted, so a daemon that still has the seam dials a Service that does not
+# exist, and with GIBSON_ENTITLEMENTS_REQUIRED=true it refuses each provision.
+step "plan limits off"
 endpoint="$(env_present gibson-workloads ENTITLEMENTS_ENDPOINT || true)"
 required="$(env_present gibson-workloads GIBSON_ENTITLEMENTS_REQUIRED || true)"
-if [ "$PROFILE" = "self-hosted" ]; then
-  [ -z "$endpoint" ] && pass "ENTITLEMENTS_ENDPOINT absent (embedded ConfigProvider)" \
-                     || fail "ENTITLEMENTS_ENDPOINT=$endpoint set on a self-hosted daemon"
-  [ -z "$required" ] && pass "GIBSON_ENTITLEMENTS_REQUIRED absent (fail-open is correct here)" \
-                     || fail "GIBSON_ENTITLEMENTS_REQUIRED=$required set on a self-hosted daemon"
-  if kubectl -n "$NAMESPACE" logs statefulset/gibson-gibson-workloads -c gibson --tail=2000 2>/dev/null \
-      | grep -qi 'grpcProvider'; then
-    fail "daemon logs mention grpcProvider — it is dialing a remote seam"
-  else
-    pass "daemon logs show no remote-seam provider"
-  fi
+if [ -z "$endpoint" ]; then
+  pass "ENTITLEMENTS_ENDPOINT absent (the daemon uses its unlimited provider)"
 else
-  [ -n "$endpoint" ] && pass "ENTITLEMENTS_ENDPOINT=$endpoint" \
-                     || fail "SaaS profile but the daemon has no ENTITLEMENTS_ENDPOINT"
-  [ "$required" = "true" ] && pass "GIBSON_ENTITLEMENTS_REQUIRED=true (fails closed)" \
-                           || fail "SaaS profile without GIBSON_ENTITLEMENTS_REQUIRED=true — the seam is fail-OPEN (deploy#1055)"
+  fail "ENTITLEMENTS_ENDPOINT=$endpoint set on the daemon — the entitlements service is deleted"
+fi
+if [ "$required" = "true" ]; then
+  fail "GIBSON_ENTITLEMENTS_REQUIRED=true on the daemon — it enforces plan limits"
+else
+  pass "GIBSON_ENTITLEMENTS_REQUIRED is not true"
+fi
+if kubectl -n "$NAMESPACE" logs statefulset/gibson-gibson-workloads -c gibson --tail=2000 2>/dev/null \
+    | grep -qi 'grpcProvider'; then
+  fail "daemon logs mention grpcProvider — it is dialing a remote seam"
+else
+  pass "daemon logs show no remote-seam provider"
 fi
 
 step "dashboard deployment profile"
-billing="$(env_present gibson-dashboard DASHBOARD_BILLING_PAID_TIERS_ENABLED || true)"
 www="$(env_present gibson-dashboard WWW_URL || true)"
 if [ "$PROFILE" = "self-hosted" ]; then
-  [ -z "$billing" ] && pass "billing off (card-free signup)" || fail "DASHBOARD_BILLING_PAID_TIERS_ENABLED=$billing on a self-hosted dashboard"
-  [ -z "$www" ] && pass "WWW_URL absent (no marketing surface)" || fail "WWW_URL=$www on a self-hosted dashboard (dashboard#920)"
+  if [ -z "$www" ]; then pass "WWW_URL absent (no marketing surface)"; else fail "WWW_URL=$www on a self-hosted dashboard (dashboard#920)"; fi
 else
-  [ "$billing" = "true" ] && pass "billing on (card-first signup)" || fail "SaaS profile with billing off"
-  [ -n "$www" ] && pass "WWW_URL=$www" || fail "billing on with no WWW_URL — the resolver fail-closes and 500s every route (deploy#1075)"
+  if [ -n "$www" ]; then pass "WWW_URL=$www"; else fail "SaaS profile with no WWW_URL on the dashboard"; fi
 fi
 
 step "signup front door"

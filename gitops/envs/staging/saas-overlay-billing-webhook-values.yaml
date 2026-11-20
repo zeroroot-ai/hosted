@@ -4,8 +4,8 @@
 # ADR-0074 / deploy#1132 (gibson#798/#800).
 #
 # The receiver verifies Stripe subscription events and writes each tenant's
-# subscription_status into tenant_quotas, where entitlements-svc reads it to
-# payment-gate plan limits. Until this Application existed, NO environment ran
+# subscription_status into tenant_quotas. Until this Application existed, NO
+# environment ran
 # one: the Envoy route resolved to zero endpoints and subscription state never
 # reached the platform at all (gitops#357).
 #
@@ -49,8 +49,8 @@ stripe:
 spiffe:
   # The trust domain comes from global.spire.trustDomain in values.yaml of
   # this env, which the Application loads first (ADR-0164). The SPIRE
-  # controller-manager in this env watches className "gibson-gibson", the
-  # same class the entitlements-svc overlay of this env names (gitops#355).
+  # controller-manager in this env watches className "gibson-gibson"
+  # (gitops#355).
   controllerManagerClassName: "gibson-gibson"
 
 identityAdmission:

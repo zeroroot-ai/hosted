@@ -175,7 +175,7 @@ def fixture_tgz() -> bytes:
             "  podAnnotations: {}\ndashboard:\n  billing:\n    enabled: false\n",
         "gibson/charts/gibson-workloads/templates/d.yaml":
             "{{ .Values.gibson.replicas }} {{ .Values.gibson.auditExport.bucket }}\n"
-            "{{ with .Values.gibson }}{{ .entitlementsEndpoint }}{{ end }}\n",
+            "{{ with .Values.gibson }}{{ .extraEndpoint }}{{ end }}\n",
         "gibson/charts/zitadel-chart/Chart.yaml": "name: zitadel-chart\n",
         "gibson/charts/zitadel-chart/values.yaml": "zitadel:\n  configmapConfig:\n    Log: {}\n",
         "gibson/charts/zitadel-chart/templates/cm.yaml":
@@ -194,7 +194,7 @@ def fixture_tgz() -> bytes:
 SELF_TEST = [
     # (name, overlay, expected unread paths)
     ("a key the defaults declare", {"gibson-workloads": {"gibson": {"replicas": 2}}}, []),
-    ("a key only a template names", {"gibson-workloads": {"gibson": {"entitlementsEndpoint": "x"}}}, []),
+    ("a key only a template names", {"gibson-workloads": {"gibson": {"extraEndpoint": "x"}}}, []),
     ("a key under a free map", {"gibson-workloads": {"gibson": {"podAnnotations": {"a": "b"}}}}, []),
     ("a key under a map passed whole through toYaml",
      {"zitadel": {"zitadel": {"configmapConfig": {"ExternalPort": 443}}}}, []),

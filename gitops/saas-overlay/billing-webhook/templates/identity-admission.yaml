@@ -1,8 +1,10 @@
 {{/*
 SaaS overlay: platform identity admission for billing.
 
-The same two policies as the entitlements-svc overlay, which carries the full
-argument. The SPIFFE ID of billing can complete a signup step at the daemon,
+The core umbrella ships the same shape for its platform identities
+(gibson-workloads/templates/spire-server/platform-identity-admission.yaml);
+that file carries the full argument. The SPIFFE ID of billing can complete a
+signup step at the daemon,
 so a pod that wears `app.kubernetes.io/component: billing-webhook` or the
 billing ServiceAccount could mark a signup paid. The literal workload
 selectors of the ClusterSPIFFEID describe the pod, and the pod creator writes
@@ -10,8 +12,12 @@ the pod. `request.userInfo.username` is the one attribute that a pod cannot
 assert, so these policies admit such a pod or workload only from the
 built-in controllers and the named workload creators.
 
-The policy names differ from the entitlements-svc policies because both are
-cluster-scoped and each chart owns its own pair.
+TWO POLICIES. The pods policy alone has a bypass: a Deployment makes its pod
+through replicaset-controller, which is on the list. So a second policy
+validates the pod TEMPLATE of each workload kind on CREATE and UPDATE.
+
+The overlay owns these policies so that the admission list of each chart
+stays in step with its own ClusterSPIFFEID (ADR-0074).
 
 Ships in ["Deny"]. `identityAdmission.workloadCreators` is required under
 Deny: the legitimate creator differs per install.

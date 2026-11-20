@@ -48,7 +48,7 @@ YELLOW:= \033[0;33m
 RED   := \033[0;31m
 NC    := \033[0m
 
-.PHONY: check-apiserver-cidrs check-kind-apiserver-cidrs help require-charts apex-zone-init apex-zone-plan substrate preflight require-env require-mode teardown recreate eks-plan status smoke-signup smoke-entitlements stripe-listen verify-profile verify-saas-surfaces verify-selfhosted-seams verify-harness wait-root
+.PHONY: check-apiserver-cidrs check-kind-apiserver-cidrs help require-charts apex-zone-init apex-zone-plan substrate preflight require-env require-mode teardown recreate eks-plan status smoke-signup stripe-listen verify-profile verify-saas-surfaces verify-selfhosted-seams verify-harness wait-root
 
 help: ## Show available targets
 	@echo "Usage: make <target>"
@@ -81,7 +81,6 @@ help: ## Show available targets
 	@echo "Shippability gates:"
 	@echo "  smoke                   Envoy edge TLS handshake (dashboard → the app host; override with URL=)"
 	@echo "  smoke-signup            Gate 3: signup-to-working e2e (deploy#88)"
-	@echo "  smoke-entitlements      Entitlements seam: mTLS/DB/plans/grpcProvider + concrete limit (deploy#1006)"
 	@echo "  verify-release          Run helm-test Pods (post-install assertions, deploy#355)"
 	@echo "  verify-saas-surfaces    SaaS web surfaces: www / docs / app login (deploy#1041)"
 	@echo "  verify-selfhosted-seams Self-hosted seams: login front door, signup, bootstrap, docs (deploy#1039)"
@@ -482,7 +481,7 @@ wait-root:
 # Live deployment-profile verification (deploy#1137)
 # ===============================================================
 # Asserts a standing cluster actually runs the profile it claims: images,
-# entitlements seam, dashboard profile, signup front door, and that the edge
+# plan limits off, dashboard profile, signup front door, and that the edge
 # serves rather than 500ing on an incoherent combination.
 #
 # Local by design. CICD-CONTEXT decision #3 keeps full-umbrella bringup out of
@@ -531,9 +530,8 @@ verify-harness: ## Prove the live verification suites fail closed (offline, depl
 # ===============================================================
 # kind has no public ingress, so Stripe cannot POST to the edge. The SaaS
 # profile the kind cluster runs needs those deliveries — the receiver projects
-# subscription_status into tenant_quotas, which is where the entitlements
-# provider reads it — so without a tunnel signup completes and the tenant's
-# billing state never converges.
+# subscription_status into tenant_quotas — so without a tunnel signup completes
+# and the tenant's billing state never converges.
 #
 # The target reconciles the signing secret before it forwards anything: the
 # secret `stripe listen` signs with is NOT a Dashboard endpoint secret, and a
@@ -565,21 +563,6 @@ stripe-listen: ## kind Stripe webhook tunnel — reconciles the signing secret, 
 smoke-signup: ## Gate 3 signup-to-working e2e (deploy#88)
 	@printf "$(GREEN)▶$(NC) Gate 3 signup smoke...\n"
 	@NAMESPACE=$(NAMESPACE) ./scripts/smoke-signup.sh
-
-# Entitlements seam smoke (deploy#1006 / gibson#1026).
-# Detects the four silent fail-open modes for the entitlements runtime seam:
-#   1. entitlements-svc plain gRPC instead of mTLS (wrong BILLING_SVID)
-#   2. entitlements-svc DB unreachable (missing PG* env)
-#   3. plan registry load failure (lookupKey drift) → fail-open
-#   4. daemon grpcProvider construction failure → ConfigProvider fallback (unlimited)
-# Also asserts the concrete Team plan limit (concurrent_missions=10) through the
-# full DB → plans-registry → seam path so a fail-open (returning 0/unlimited)
-# makes this check FAIL.
-# Env: NAMESPACE (default: $(NAMESPACE))
-#      KEEP_ROW=1 to skip cleanup of the test tenant_quotas seed row
-smoke-entitlements: ## Entitlements seam smoke: mTLS, DB, plans, grpcProvider, concrete limit (deploy#1006)
-	@printf "$(GREEN)▶$(NC) Entitlements seam smoke...\n"
-	@NAMESPACE=$(NAMESPACE) ./scripts/smoke-entitlements.sh
 
 # -----------------------------------------------------------------------------
 # verify-release — post-install chart-test invocation (deploy#355, slice 5.10)
@@ -814,10 +797,9 @@ check-overlay-oidc-client-roles: ## Every overlay OIDC client declares its Zitad
 	@python3 scripts/check-overlay-oidc-client-roles.py
 
 .PHONY: check-saas-overlay
-check-saas-overlay: ## The two SaaS overlay charts render, and each render holds its contract with the core chart (ADR-0074, hosted#413)
+check-saas-overlay: ## The SaaS overlay chart renders, and the render holds its contract with the core chart (ADR-0074, hosted#413)
 	@printf "$(GREEN)▶$(NC) check-saas-overlay...\n"
 	@bats gitops/saas-overlay/billing-webhook/tests/overlay-render.bats
-	@bats gitops/saas-overlay/entitlements-svc/tests/overlay-render.bats
 check: check-saas-overlay
 
 check-scp-attachments: ## Exactly two SCPs attach to the workload account, and no policy attaches to nothing (ADR-0073, hosted#418)
@@ -945,7 +927,7 @@ check-values-files-are-named: ## Every values file under gitops/ is rendered by 
 	@./scripts/check-values-files-are-named.sh
 
 .PHONY: check-no-chart-source
-check-no-chart-source: ## No chart source in this repo, except the two SaaS overlay charts (ADR-0086, hosted#415)
+check-no-chart-source: ## No chart source in this repo, except the SaaS overlay chart (ADR-0086, hosted#415)
 	@printf "$(GREEN)▶$(NC) check-no-chart-source...\n"
 	@python3 scripts/check-no-chart-source.py --selftest
 	@python3 scripts/check-no-chart-source.py
@@ -1256,6 +1238,12 @@ check-overlay-values-read: ## Every key of each cloud overlay is read by the cha
 check-env-renders-at-pin: ## Each cloud env renders with the chart it pins, and each SaaS overlay egress group has a policy there (hosted#574)
 	@printf "$(GREEN)▶$(NC) check-env-renders-at-pin...\n"
 	@./scripts/check-env-renders-at-pin.py
+
+.PHONY: check-profile-coherence
+check-profile-coherence: ## No env renders the entitlements seam at the chart it pins, and the signup knob agrees (gibson#1525)
+	@printf "$(GREEN)▶$(NC) check-profile-coherence...\n"
+	@./gitops/scripts/check-profile-coherence.sh
+check: check-profile-coherence
 
 .PHONY: check-teardown
 check-teardown: ## The teardown verb and its AWS and EC2 scripts fail closed: no MODE, an EC2 preserve with no preserve input set, no keyring, a PartiallyFailed backup, an unretryable destroy, a leaked resource, an unswept webhook (deploy#1738, deploy#1746)

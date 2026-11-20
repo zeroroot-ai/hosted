@@ -1,3 +1,0 @@
-kind: ConfigMap
-metadata:
-  name: {{ .Release.Name }}-third
