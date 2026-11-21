@@ -27,7 +27,7 @@
 # same HMAC after a restore proves that every tenant key came back, and a
 # different HMAC after a wipe proves that none did.
 #
-# The caller sets NS, TENANT, TENANT_NS, PLAINTEXT, GRAPH_MARKER,
+# The caller sets NS, TENANT, TENANT_NS, TIER, PLAINTEXT, GRAPH_MARKER,
 # READY_TIMEOUT and KEK_MAC (check only), and defines die() and note().
 #
 #   markers_seed     write each record and read it back. Sets KEK_MAC.
@@ -247,6 +247,7 @@ metadata:
 spec:
   displayName: Restore Loop
   owner: restore-loop@zeroroot.ai
+  tier: ${TIER}
 YAML
   kubectl wait --for=jsonpath='{.status.phase}'=Ready "tenant/${TENANT}" --timeout="${READY_TIMEOUT}s" \
     || die "tenant ${TENANT} never reached Ready, so there is no tenant to lose"
