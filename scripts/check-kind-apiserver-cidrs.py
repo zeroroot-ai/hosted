@@ -137,6 +137,65 @@ def params_of(app: dict) -> dict[str, str]:
     return {p["name"]: str(p["value"]) for p in raw}
 
 
+CLUSTER_RANGES = re.compile(
+    r'^(KIND_POD_CIDR=.*?)\n(KIND_SERVICE_CIDR=.*?)\n', re.M
+)
+CLUSTER_PARAMS = re.compile(
+    r'^(cluster_cidr_params_yaml=".*?[^\\]"\n)', re.M | re.S
+)
+
+
+def check_cluster_ranges(text: str) -> None:
+    """global.networkPolicy.clusterCIDRs is the range that the kind config sets (charts#833).
+
+    The chart refuses to render with no value. The two ranges come from two
+    variables. The kind config sets podSubnet and serviceSubnet from them, and the
+    gibson Application passes them as parameters. A range typed twice can rot, so
+    this runs the lifted lines and reads the config and the parameters back.
+    """
+    ranges = CLUSTER_RANGES.search(text)
+    params = CLUSTER_PARAMS.search(text)
+    if not ranges or not params:
+        fail(
+            "scripts/recreate-kind.sh no longer sets KIND_POD_CIDR, KIND_SERVICE_CIDR and "
+            "cluster_cidr_params_yaml. The chart refuses to render without "
+            "global.networkPolicy.clusterCIDRs (charts#833)."
+        )
+    if '  podSubnet: "${KIND_POD_CIDR}"' not in text or \
+            '  serviceSubnet: "${KIND_SERVICE_CIDR}"' not in text:
+        fail(
+            "the kind config does not set podSubnet and serviceSubnet from KIND_POD_CIDR and "
+            "KIND_SERVICE_CIDR, so the cluster can use a range that the chart does not name."
+        )
+    m = APP_HEREDOC.search(text)
+    if not m or "${cluster_cidr_params_yaml}" not in m.group(1):
+        fail(
+            "the gibson Application does not interpolate ${cluster_cidr_params_yaml}. The ranges "
+            "would be set and never passed to the chart, so the render fails (charts#833)."
+        )
+    harness = "set -u\n" + ranges.group(1) + "\n" + ranges.group(2) + "\n" + params.group(1) + \
+        "\nprintf 'PARAMS<<<%s>>>' \"$cluster_cidr_params_yaml\"\n"
+    with tempfile.NamedTemporaryFile("w", suffix=".sh", delete=False) as fh:
+        fh.write(harness)
+        path = fh.name
+    proc = subprocess.run(["bash", path], capture_output=True, text=True)
+    Path(path).unlink(missing_ok=True)
+    got = re.search(r"PARAMS<<<(.*)>>>", proc.stdout, re.S)
+    if proc.returncode != 0 or not got:
+        fail(f"the cluster range lines do not run: {proc.stderr.strip()}")
+    body = m.group(1).replace("${cluster_cidr_params_yaml}", got.group(1))
+    body = re.sub(r'\$\{[A-Za-z_][A-Za-z0-9_]*_params_yaml\}', "", body)
+    body = re.sub(r'\$\{[^}]*\}', "x", body)
+    values = params_of(yaml.safe_load(body))
+    want = {
+        "global.networkPolicy.clusterCIDRs[0]": "10.244.0.0/16",
+        "global.networkPolicy.clusterCIDRs[1]": "10.96.0.0/16",
+    }
+    for name, value in want.items():
+        if values.get(name) != value:
+            fail(f"the Application passes {name}={values.get(name)!r}, not {value!r}")
+
+
 def main() -> None:
     selftest = "--selftest" in sys.argv
     text = SCRIPT.read_text()
@@ -191,7 +250,25 @@ def main() -> None:
         fail(f"the refusal does not say what to do about it: {err.strip()!r}")
     checks += 1
 
+    check_cluster_ranges(text)
+    checks += 1
+
     if selftest:
+        for what, broken_text, needle in [
+            ("an Application that drops the cluster ranges",
+             text.replace("${cluster_cidr_params_yaml}", ""), "does not interpolate"),
+            ("a kind config that no longer sets the pod range",
+             text.replace('  podSubnet: "${KIND_POD_CIDR}"', ""), "does not set podSubnet"),
+            ("a recreate verb with no cluster ranges",
+             text.replace("KIND_POD_CIDR=", "UNUSED_POD="), "no longer sets"),
+        ]:
+            try:
+                check_cluster_ranges(broken_text)
+            except SystemExit as exc:
+                if needle not in str(exc):
+                    fail(f"selftest: wrong refusal for {what}: {exc}")
+            else:
+                fail(f"selftest: {what} was accepted")
         # The check must fail when the parameters stop reaching the chart.
         broken = text.replace("${api_cidr_params_yaml}", "")
         try:
@@ -209,13 +286,13 @@ def main() -> None:
                 fail(f"selftest: wrong refusal for a missing derivation: {exc}")
         else:
             fail("selftest: a recreate-kind.sh with no derivation was accepted")
-        print("check-kind-apiserver-cidrs: selftest OK — an unwired list and a missing "
-              "derivation are both refused")
+        print("check-kind-apiserver-cidrs: selftest OK — an unwired list, a missing "
+              "derivation and a broken cluster range are each refused")
 
-    if checks != 3:
-        fail(f"ran {checks} of 3 cases")
+    if checks != 4:
+        fail(f"ran {checks} of 4 cases")
     print(
-        "check-kind-apiserver-cidrs: 3/3 — the kind bringup names both apiserver addresses, "
+        "check-kind-apiserver-cidrs: 4/4 — the kind bringup passes the ranges of its own config as clusterCIDRs, names both apiserver addresses, "
         "keeps every endpoint of a multi-address control plane, refuses a half-read, and the "
         "Application it writes still parses"
     )

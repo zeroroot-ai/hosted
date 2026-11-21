@@ -60,7 +60,7 @@ STUB
 # setec launcher, so it mounts /dev/kvm from the host. The config is the
 # heredoc in scripts/recreate-kind.sh, parsed as YAML here.
 kind_config() {
-  awk '/--config=- <<.KIND.$/{f=1;next} /^KIND$/{f=0} f' "$1"
+  awk '/--config=- <<.?KIND.?$/{f=1;next} /^KIND$/{f=0} f' "$1"
 }
 
 @test "the kind node mounts /dev/kvm from the host" {

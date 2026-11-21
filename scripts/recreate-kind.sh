@@ -306,12 +306,20 @@ rm -f "$REPO/bootstrap/kind/gibson/terraform.tfstate" "$REPO/bootstrap/kind/gibs
 # that looks prepared.
 [ -c /dev/kvm ] \
   || die "this host has no /dev/kvm, so the kind node cannot run a setec sandbox. On a GitHub runner, give the runner user access to /dev/kvm before the recreate"
-kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG_PATH" --wait 0s --config=- <<'KIND'
+# The pod range and the Service range of the cluster. They are the defaults of
+# kind. The config below states them, so the range that the cluster uses and the
+# range that the chart denies to a connector (global.networkPolicy.clusterCIDRs)
+# come from these two lines and from nowhere else (charts#833).
+KIND_POD_CIDR="10.244.0.0/16"
+KIND_SERVICE_CIDR="10.96.0.0/16"
+kind create cluster --name "$CLUSTER" --kubeconfig "$KUBECONFIG_PATH" --wait 0s --config=- <<KIND
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 networking:
   disableDefaultCNI: true
   kubeProxyMode: none
+  podSubnet: "${KIND_POD_CIDR}"
+  serviceSubnet: "${KIND_SERVICE_CIDR}"
 nodes:
   - role: control-plane
     extraMounts:
@@ -635,6 +643,17 @@ for c in "${API_CIDRS[@]}"; do
 done
 log "apiserver reachable at ${API_CIDRS[*]} -> global.networkPolicy.apiServerCIDRs"
 
+# The pod range and the Service range that the kind config above set. The
+# connector operator denies both to a connector pod, and the chart refuses to
+# render without them (charts#833). A parameter wins over the rung file, so the
+# value is the range of this cluster and never a copy that can rot.
+cluster_cidr_params_yaml="
+        - name: global.networkPolicy.clusterCIDRs[0]
+          value: \"${KIND_POD_CIDR}\"
+        - name: global.networkPolicy.clusterCIDRs[1]
+          value: \"${KIND_SERVICE_CIDR}\""
+log "cluster ranges ${KIND_POD_CIDR} ${KIND_SERVICE_CIDR} -> global.networkPolicy.clusterCIDRs"
+
 # ---------------------------------------------------------------------------
 # CoreDNS answers for the platform's own hosts (hosted#397). api.<domain> has
 # no public record on kind. A setec sandbox, a plugin and the e2e runner reach
@@ -947,7 +966,7 @@ spec:
         # the previous seed during a rotation. Each launcher refuses a disk
         # that none of these keys signed.
         - name: gibson-workloads.setec.launcher.diskBuilder.publicKeys[0]
-          value: "${SETEC_DISK_PUBLIC_KEY}"${disk_key_params_yaml}${api_cidr_params_yaml}
+          value: "${SETEC_DISK_PUBLIC_KEY}"${disk_key_params_yaml}${api_cidr_params_yaml}${cluster_cidr_params_yaml}
   destination:
     server: https://kubernetes.default.svc
     namespace: ${NS}

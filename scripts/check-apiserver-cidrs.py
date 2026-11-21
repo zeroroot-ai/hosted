@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Every cluster overlay names the addresses a pod reaches the kube-apiserver through.
+"""Every cluster overlay names the addresses a pod reaches the kube-apiserver through,
+and the pod and Service ranges of its cluster.
 
 `global.networkPolicy.apiServerCIDRs` ships EMPTY in the chart, and the helper
 `gibson.netpolEgressAPIServer` renders NOTHING when it is empty. An omission is
@@ -51,6 +52,22 @@ so a packet to the Service leaves as the endpoint address, while an engine that
 evaluates the pre-DNAT address sees the ClusterIP. Measured on staging 2026-09-10:
 with only the VPC CIDR allowed, the ENIs answered and the ClusterIP timed out.
 
+THE CLUSTER RANGES (global.networkPolicy.clusterCIDRs, charts#833)
+
+The connector operator denies the pod range and the Service range to a connector
+pod, and the chart refuses to render with no value. The overlay holds both, and
+this check derives both from the same workspace:
+
+  pod range        EC2 (k3s): the k3s default 10.42.0.0/16 (K3S_DEFAULT_POD_CIDR).
+                   The node-init template sets no --cluster-cidr, and this check
+                   fails when it does, so the default stays the one source. The
+                   flag would also change user_data and replace the server.
+                   Source: the k3s docs, "Networking", flag --cluster-cidr,
+                   default "10.42.0.0/16" (https://docs.k3s.io/networking/basic-network-options).
+                   EKS: `vpc_cidr`, because Cilium ENI mode gives each pod an
+                   address of the VPC.
+  Service range    `service_cidr`, as above.
+
   check-apiserver-cidrs.py             exit 1 when an overlay is empty or disagrees
   check-apiserver-cidrs.py --selftest  prove each assertion fails on a fixture
 """
@@ -74,13 +91,22 @@ ROOT = Path(__file__).resolve().parent.parent
 #   kind  `make recreate ENV=kind` builds its Argo Applications inline and derives
 #         the pair from the live cluster at bringup, which is the better source
 #         where it is available (check-kind-apiserver-cidrs.py).
+#
+# The second item is the variable that holds the pod range of the cluster, or
+# None for k3s, whose pod range is K3S_DEFAULT_POD_CIDR.
 SUBSTRATE = {
-    "staging": "bootstrap/ec2/gibson",
-    "drill": "bootstrap/ec2/gibson",
-    "prod": "bootstrap/eks/gibson",
+    "staging": ("bootstrap/ec2/gibson", None),
+    "drill": ("bootstrap/ec2/gibson", None),
+    "prod": ("bootstrap/eks/gibson", "vpc_cidr"),
 }
 
+# The pod range of k3s with no --cluster-cidr flag. Source: the k3s docs,
+# https://docs.k3s.io/networking/basic-network-options (--cluster-cidr).
+K3S_DEFAULT_POD_CIDR = "10.42.0.0/16"
+NODE_INIT = "templates/node-init.sh.tftpl"
+
 KEY_PATH = ("global", "networkPolicy", "apiServerCIDRs")
+CLUSTER_KEY_PATH = ("global", "networkPolicy", "clusterCIDRs")
 
 
 class Problem(Exception):
@@ -136,7 +162,8 @@ def pinned_cluster_ips(values: dict) -> dict[str, str]:
     return found
 
 
-def expected_for(env: str, workspace_rel: str, root: Path) -> tuple[list[str], str]:
+def expected_all(env: str, workspace_rel: str, pod_var: str | None,
+                 root: Path) -> tuple[list[str], str, list[str]]:
     workspace = root / workspace_rel
     values_path = root / "gitops" / "envs" / env / "values.yaml"
     if not values_path.is_file():
@@ -159,27 +186,53 @@ def expected_for(env: str, workspace_rel: str, root: Path) -> tuple[list[str], s
     apiserver = ipaddress.IPv4Address(int(svc_range.network_address) + 1)
     note = f"service range {declared} declared by {workspace_rel}"
 
-    return [node_range, f"{apiserver}/32"], note
+    if pod_var is None:
+        template = workspace / NODE_INIT
+        if template.is_file() and "--cluster-cidr" in template.read_text():
+            raise Problem(
+                f"{workspace_rel}/{NODE_INIT} sets --cluster-cidr. This check takes the k3s "
+                f"default {K3S_DEFAULT_POD_CIDR} as the pod range, so it cannot tell what the "
+                f"flag sets. A change to the template also replaces the server "
+                f"(user_data_replace_on_change). Remove the flag."
+            )
+        pod_range = K3S_DEFAULT_POD_CIDR
+    else:
+        pod_range = tfvar(workspace, env, pod_var, required=True)
+    ipaddress.IPv4Network(pod_range)
+    return [node_range, f"{apiserver}/32"], note, [pod_range, declared]
 
 
-def overlay_cidrs(root: Path, env: str) -> list[str] | None:
+def overlay_cidrs(root: Path, env: str, key_path: tuple[str, ...] = KEY_PATH) -> list[str] | None:
     values = yaml.safe_load((root / "gitops" / "envs" / env / "values.yaml").read_text()) or {}
     node = values
-    for part in KEY_PATH:
+    for part in key_path:
         if not isinstance(node, dict) or part not in node:
             return None
         node = node[part]
     return node if isinstance(node, list) else None
 
 
-def violations(root: Path, substrate: dict[str, str]) -> list[str]:
+def violations(root: Path, substrate: dict[str, tuple[str, str]]) -> list[str]:
     out: list[str] = []
-    for env, workspace_rel in sorted(substrate.items()):
+    for env, (workspace_rel, pod_var) in sorted(substrate.items()):
         try:
-            want, note = expected_for(env, workspace_rel, root)
+            want, note, want_cluster = expected_all(env, workspace_rel, pod_var, root)
         except Problem as exc:
             out.append(str(exc))
             continue
+        got_cluster = overlay_cidrs(root, env, CLUSTER_KEY_PATH)
+        if not got_cluster:
+            out.append(
+                f"{env}: global.networkPolicy.clusterCIDRs is empty or absent, so the chart "
+                f"refuses to render (charts#833). Set it to {want_cluster} ({note}, pod "
+                f"range `{pod_var or 'k3s default'}`)."
+            )
+        elif sorted(got_cluster) != sorted(want_cluster):
+            out.append(
+                f"{env}: clusterCIDRs is {got_cluster}, derived expects {want_cluster} "
+                f"({note}, pod range `{pod_var or 'k3s default'}`). The connector egress rule denies the "
+                f"ranges that this list names, so a stale range leaves the real one open."
+            )
         got = overlay_cidrs(root, env)
         if not got:
             out.append(
@@ -199,13 +252,19 @@ def violations(root: Path, substrate: dict[str, str]) -> list[str]:
 
 
 def _fixture(tmp: Path, *, vpc: str | None, svc_declared: str | None,
-             overlay_cidrs_value, cluster_ip: str | None = None) -> Path:
+             overlay_cidrs_value, cluster_ip: str | None = None,
+             pod: str | None = K3S_DEFAULT_POD_CIDR,
+             cluster_cidrs_value="default",
+             node_init: str | None = None) -> Path:
     root = tmp
     ws = root / "bootstrap" / "fake"
     (ws / "envs").mkdir(parents=True)
     body = 'variable "cluster_name" {\n  type = string\n}\n'
     if vpc:
         body += f'variable "vpc_cidr" {{\n  type = string\n  default = "{vpc}"\n}}\n'
+    if node_init is not None:
+        (ws / "templates").mkdir()
+        (ws / "templates" / "node-init.sh.tftpl").write_text(node_init)
     if svc_declared:
         body += f'variable "service_cidr" {{\n  type = string\n  default = "{svc_declared}"\n}}\n'
     (ws / "variables.tf").write_text(body)
@@ -213,8 +272,14 @@ def _fixture(tmp: Path, *, vpc: str | None, svc_declared: str | None,
     d: dict = {}
     if cluster_ip:
         d["gibson-workloads"] = {"envoy": {"service": {"clusterIP": cluster_ip}}}
-    if overlay_cidrs_value is not None:
-        d["global"] = {"networkPolicy": {"apiServerCIDRs": overlay_cidrs_value}}
+    if cluster_cidrs_value == "default":
+        cluster_cidrs_value = [pod, svc_declared] if pod and svc_declared else None
+    if overlay_cidrs_value is not None or cluster_cidrs_value is not None:
+        d["global"] = {"networkPolicy": {}}
+        if overlay_cidrs_value is not None:
+            d["global"]["networkPolicy"]["apiServerCIDRs"] = overlay_cidrs_value
+        if cluster_cidrs_value is not None:
+            d["global"]["networkPolicy"]["clusterCIDRs"] = cluster_cidrs_value
     p = root / "gitops" / "envs" / "fake" / "values.yaml"
     p.parent.mkdir(parents=True)
     p.write_text(yaml.safe_dump(d))
@@ -229,7 +294,7 @@ def selftest() -> int:
         tmp = Path(d)
 
         def run(name, **kw):
-            sub = {"fake": "bootstrap/fake"}
+            sub = {"fake": ("bootstrap/fake", None)}
             return violations(_fixture(tmp / name, **kw), sub)
 
         # The matching case must be silent, or every assertion below is meaningless.
@@ -266,6 +331,22 @@ def selftest() -> int:
             ("other_service_range", dict(vpc="10.60.0.0/16", svc_declared="10.43.0.0/16",
                                          overlay_cidrs_value=["10.60.0.0/16", "172.20.0.1/32"]),
              "derived expects"),
+            ("cluster_cidrs_absent", dict(vpc="10.60.0.0/16", svc_declared="172.20.0.0/16",
+                                          overlay_cidrs_value=["10.60.0.0/16", "172.20.0.1/32"],
+                                          cluster_cidrs_value=None),
+             "clusterCIDRs is empty or absent"),
+            ("cluster_cidrs_stale_pod", dict(vpc="10.60.0.0/16", svc_declared="172.20.0.0/16",
+                                             overlay_cidrs_value=["10.60.0.0/16", "172.20.0.1/32"],
+                                             cluster_cidrs_value=["10.44.0.0/16", "172.20.0.0/16"]),
+             "clusterCIDRs is"),
+            ("cluster_cidrs_no_service", dict(vpc="10.60.0.0/16", svc_declared="172.20.0.0/16",
+                                              overlay_cidrs_value=["10.60.0.0/16", "172.20.0.1/32"],
+                                              cluster_cidrs_value=["10.42.0.0/16"]),
+             "clusterCIDRs is"),
+            ("cluster_cidr_flag", dict(vpc="10.60.0.0/16", svc_declared="172.20.0.0/16",
+                                       overlay_cidrs_value=["10.60.0.0/16", "172.20.0.1/32"],
+                                       node_init="k3s --cluster-cidr 10.99.0.0/16\n"),
+             "sets --cluster-cidr"),
         ]:
             got = run(name, **kw)
             if not any(needle in g for g in got):
@@ -273,12 +354,13 @@ def selftest() -> int:
                 return 1
             cases += 1
 
-    if cases != 9:
-        print(f"SELFTEST FAIL: ran {cases} of 9 cases")
+    if cases != 13:
+        print(f"SELFTEST FAIL: ran {cases} of 13 cases")
         return 1
     print("check-apiserver-cidrs: selftest OK — a correct overlay is silent; empty, absent, "
           "stale, half, an underivable range, no service_cidr, a pinned clusterIP and a "
-          "Service range the overlay does not name each fail")
+          "Service range the overlay does not name each fail, and so do an empty, a stale and a "
+          "half clusterCIDRs and a --cluster-cidr flag in the k3s template")
     return 0
 
 
@@ -307,9 +389,9 @@ def main() -> int:
         for f in fails:
             print(f"  {f}", file=sys.stderr)
         return 1
-    for env, ws in sorted(substrate.items()):
-        want, note = expected_for(env, ws, ROOT)
-        print(f"  ✓ {env}: {want[0]} + {want[1]} ({note})")
+    for env, (ws, pod_var) in sorted(substrate.items()):
+        want, note, cluster = expected_all(env, ws, pod_var, ROOT)
+        print(f"  ✓ {env}: {want[0]} + {want[1]} ({note}); clusterCIDRs {cluster}")
     print(f"check-apiserver-cidrs: {len(substrate)} cloud overlay(s) name both apiserver "
           "addresses, each derived from its own substrate")
     return 0

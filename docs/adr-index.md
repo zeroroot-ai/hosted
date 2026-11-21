@@ -51,7 +51,7 @@ Do not edit the tables by hand.
 | ADR-0056 | gibson is the one Go repo for the platform backend and the first-party plugins |
 | ADR-0058 | The SDK is the component-development surface only |
 | ADR-0059 | The tenant brings the embedding provider |
-| ADR-0060 | Billing is one private component with three connection points |
+| ADR-0060 | Billing is one private component with two connection points |
 | ADR-0061 | Connector auth is a platform capability (was 0064 until 2026-10-05) |
 | ADR-0063 | Mission origination requires a parent mission |
 | ADR-0064 | One light brand across the marketing site and the console |
@@ -114,7 +114,6 @@ Do not edit the tables by hand.
 | ADR-0137 | The schema declares which variable an edge feeds, and the trainer learns each strength |
 | ADR-0141 | The setec sandbox substrate is x86 with KVM |
 | ADR-0142 | A Gibson cluster dials one named setec fleet over mTLS, and the fleet enrolls each cluster |
-| ADR-0143 | Until the cutover, setec uses stock runtimes and a node installer |
 | ADR-0144 | Warm start is a pool of base snapshots that setec builds |
 | ADR-0145 | A restored sandbox must pass five isolation invariants |
 | ADR-0146 | A Sandbox is ephemeral or a session, and a session survives a suspend and a node loss |
@@ -136,6 +135,15 @@ Do not edit the tables by hand.
 | ADR-0169 | A fork starts a node from the state of an earlier node |
 | ADR-0170 | A rewind starts a new run from a checkpoint |
 | ADR-0171 | Every credential rotates, and the drill proves it |
+| ADR-0172 | agentgateway is the one gateway for model, MCP and A2A traffic |
+| ADR-0173 | Open Responses is the one shape of a model call |
+| ADR-0174 | A2A is the one agent wire |
+| ADR-0175 | A mission state is an A2A Task state |
+| ADR-0176 | A finding and all of its evidence live in the tenant database |
+| ADR-0177 | A tool of the buyer comes in through a connector, and A2A is the one push path |
+| ADR-0178 | The check that raised a finding verifies its fix |
+| ADR-0179 | An agent merges its own fix, and the fix proves that the service still works |
+| ADR-0180 | A response action runs inside the grant |
 
 ## Retired
 
@@ -183,3 +191,4 @@ Do not edit the tables by hand.
 | ADR-0082 | A recreate restores only a named backup | ADR-0083 |
 | ADR-0085 | The chart is Apache-2.0, the images are not | ADR-0089 |
 | ADR-0091 | Staging is one EC2 instance with k3s | ADR-0095 |
+| ADR-0143 | Until the cutover, setec used stock runtimes and a node installer | ADR-0166 |
