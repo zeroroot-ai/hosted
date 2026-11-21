@@ -25,8 +25,6 @@ case "$MODE" in seed|check) ;; *) echo "usage: restore-markers.sh seed|check <st
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NS="${NS:-gibson}"
 TENANT="${TENANT:-restoredrill}"
-# shellcheck disable=SC2034  # read by lib/restore-markers.sh
-TIER="team"
 # shellcheck disable=SC2034
 TENANT_NS="tenant-${TENANT}"
 # shellcheck disable=SC2034

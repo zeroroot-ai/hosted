@@ -18,7 +18,7 @@
 #   2. it belongs to the account that gitops/envs/<env>/stripe-account.yaml
 #      names: the sandbox account for staging and drill, the main account
 #      for prod;
-#   3. every plan lookupKey in the chart's gibson-workloads/files/plans.yaml has an
+#   3. every plan lookupKey in the chart's gibson-operators/files/plans.yaml has an
 #      ACTIVE price in that mode (the dashboard resolves prices at runtime by
 #      lookup_key — a missing one silently degrades pricing);
 #   4. a webhook endpoint exists for $WEBHOOK_URL. If absent, it is CREATED
@@ -50,7 +50,7 @@ readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # invocation read a path that cannot exist and the lookupKey check had nothing
 # to compare against (hosted#363).
 readonly CHARTS_ROOT="${CHARTS_ROOT:-${SCRIPT_DIR}/../../charts}"
-readonly PLANS_FILE="${PLANS_FILE:-${CHARTS_ROOT}/helm/gibson-workloads/files/plans.yaml}"
+readonly PLANS_FILE="${PLANS_FILE:-${CHARTS_ROOT}/helm/gibson-operators/files/plans.yaml}"
 readonly STRIPE_KEY_FILE="${STRIPE_KEY_FILE:-$HOME/.stripe.tok}"
 readonly STRIPE_WEBHOOK_FILE="${STRIPE_WEBHOOK_FILE:-$HOME/.stripe-webhook.tok}"
 # The event set the billing receiver consumes. Ground truth is two switches

@@ -363,11 +363,6 @@ gibson-workloads:
         # s3 + source bucket at steady-state as originally planned.
         enabled: true
         initMode: download
-    # Plan limits are off (gibson#1525): the product is open source. With no
-    # endpoint the daemon uses its unlimited provider, and the chart refuses
-    # entitlementsRequired: true with an empty endpoint.
-    entitlementsEndpoint: ""
-    entitlementsRequired: false
     # The neutral connection points (ADR-0060, D54, charts#375). The signup
     # waits on the external step of the billing service, at its redirect
     # endpoint on the app host. The SPIFFE path names the one caller that can
