@@ -59,7 +59,6 @@ CLUSTER="gibson"
 RUNG="${RUNG:-}"
 NS="gibson"
 TENANT="restoreloop"
-TIER="team"
 READY_TIMEOUT="${READY_TIMEOUT:-1800}"
 
 while [ $# -gt 0 ]; do
@@ -210,7 +209,6 @@ metadata:
 spec:
   displayName: Final Backup Loop
   owner: final-loop@zeroroot.ai
-  tier: ${TIER}
 YAML
   wait_for "$READY_TIMEOUT" "the tenant ${t} never got its namespace tenant-${t}" -- \
     kubectl get namespace "tenant-${t}"
