@@ -870,6 +870,16 @@ global:
     apiServerCIDRs:
       - "10.40.0.0/16"
       - "172.20.0.1/32"
+    # The pod range and the Service range of this cluster. The connector
+    # operator denies both to a connector pod (ADR-0177, charts#833). The
+    # chart refuses to render with no value. Cilium ENI mode gives each pod
+    # a VPC address, so the pod range is var.vpc_cidr of bootstrap/eks/gibson.
+    # The Service range is var.service_cidr of the same workspace.
+    # scripts/check-apiserver-cidrs.py fails when this list and the
+    # substrate disagree.
+    clusterCIDRs:
+      - "10.40.0.0/16"
+      - "172.20.0.0/16"
     # The egress host group of the billing pod (D76, hosted#525). The
     # billing-webhook overlay labels its pod egress-fqdn: billing. The pod
     # calls the payment provider API, the sign-in issuer on the app host and

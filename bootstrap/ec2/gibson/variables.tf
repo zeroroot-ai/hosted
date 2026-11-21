@@ -170,8 +170,14 @@ variable "argocd_extra_cluster_resources" {
   default = []
 }
 
+variable "pod_cidr" {
+  description = "The pod range of the cluster. k3s hands each node a part of it, and Cilium uses that part (ipam mode kubernetes). The overlay names it in global.networkPolicy.clusterCIDRs (scripts/check-apiserver-cidrs.py reads this value)."
+  type        = string
+  default     = "10.42.0.0/16"
+}
+
 variable "service_cidr" {
-  description = "The Kubernetes Service range. The NetworkPolicies allow its first address, the apiserver ClusterIP (scripts/check-apiserver-cidrs.py reads this value)."
+  description = "The Kubernetes Service range. The NetworkPolicies allow its first address, the apiserver ClusterIP. The overlay also names it in global.networkPolicy.clusterCIDRs (scripts/check-apiserver-cidrs.py reads this value)."
   type        = string
   default     = "172.20.0.0/16"
 }
