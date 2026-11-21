@@ -192,14 +192,14 @@ _Avoid_: "real IP header", "trusted XFF" (there is no trusted header, only the p
 The first-admin/first-tenant seed on a fresh self-hosted install, since there is no self-serve signup to create the initial principal. A bringup hook/CLI step from install-time config (cf. GitLab's initial `root` admin).
 
 **Seam**:
-The interface where a **SaaS-only component** attaches to the core, carrying a **defined fail-safe self-hosted default** that takes over when the component is absent. Proven template: entitlements (ADR-0060) — `ENTITLEMENTS_ENDPOINT` unset → OSS `ConfigProvider`; set → the closed Stripe service. The rule: *off = absent = degrade to the free/open behavior* (the safe failure direction).
+The interface where a **SaaS-only component** attaches to the core, carrying a **defined fail-safe self-hosted default** that takes over when the component is absent. The two neutral connection points of billing (ADR-0060) are the template: the signup step with the account link, and the tenant activation signal. The entitlements seam that first proved the pattern is deleted (gibson#1525). The rule: *off = absent = degrade to the free/open behavior* (the safe failure direction).
 _Avoid_: feature flag (a seam is component presence/absence per profile, not a runtime flag in one image), license gate
 
 **Deployment profile**:
 The Helm values set selecting which components are present: `self-hosted` (core only) vs `saas` (superset). The **toggle mechanism** is deployment-profile + fail-safe seam, **not** a runtime license-key gate. [grill 2026-06-29 Q1=A]
 
 **SaaS overlay**:
-The packaging of all SaaS-only components as **separate charts/Argo apps layered on top of** the core umbrella — NOT folded into it. The **core umbrella carries only the seam knobs** (e.g. the daemon's `ENTITLEMENTS_ENDPOINT`, unset by default) and **zero closed/SaaS image references**; the overlay supplies the SaaS-only deployables (billing, marketing, signup enablement, fleet) and **sets the seam knobs** (points the core at them). Self-hosted installs the core umbrella alone. GitLab model: the self-managed chart contains no `.com`-only services. [grill Q5 → chose separate-overlay over gated-within]
+The packaging of all SaaS-only components as **separate charts/Argo apps layered on top of** the core umbrella — NOT folded into it. The **core umbrella carries only the seam knobs** (e.g. the daemon's signup step and tenant activation settings) and **zero closed/SaaS image references**; the overlay supplies the SaaS-only deployables (billing, marketing, signup enablement, fleet) and **sets the seam knobs** (points the core at them). Self-hosted installs the core umbrella alone. GitLab model: the self-managed chart contains no `.com`-only services. [grill Q5 → chose separate-overlay over gated-within]
 _Consequence_: the entitlements-svc of deploy#1002 moved into the SaaS overlay, and gibson#1525 then deleted it with the plan limits. The billing-webhook chart is the one overlay chart.
 _Avoid_: "saas umbrella" (it's a composition in ZeroRoot's private gitops, not a second shipped chart), gated-within
 
@@ -236,9 +236,9 @@ _Avoid_: cross-origin contact form (the shape we are deleting), SES for leads
 **Seam convention** [grill Q6]:
 The formalized, enforced contract every **seam** must satisfy — so "toggle on/off and it works" is a *proven* property, not per-seam luck:
 1. **Declaration** — a config knob on the core (env/values) where unset/empty = the fail-safe self-hosted default; every seam listed in the **seam registry** (the catalog above + the ADR table: knob → fail-safe → the SaaS component that fills it).
-2. **Fail-safe test** — every seam ships a unit test proving *knob unset → free/open behavior runs* (generalizing `entitlements.TestNew_DefaultsToConfigProvider`).
+2. **Fail-safe test** — every seam ships a unit test proving *knob unset → free/open behavior runs*.
 3. **No-closed-refs render guard** — CI asserts the core umbrella rendered with the `self-hosted` profile contains **zero** closed/SaaS image references (same shape as the no-committed-`.tgz` guard, deploy#1001) — mechanically enforcing the **SaaS overlay** separation.
-4. **Observable degradation** — every fail-safe *activation* emits a metric/log, and the core logs its resolved seam state (wired vs fail-safe) at startup, so a SaaS deployment silently running a seam degraded (e.g. entitlements unreachable → unlimited) is detectable/alertable. Fail-open is safe *and* visible.
+4. **Observable degradation** — every fail-safe *activation* emits a metric/log, and the core logs its resolved seam state (wired vs fail-safe) at startup, so a SaaS deployment silently running a seam degraded (e.g. a SaaS component unreachable) is detectable/alertable. Fail-open is safe *and* visible.
 _Avoid_: ad-hoc seam, "it'll fail open" (must be tested + observable, not assumed)
 
 ## Relationships

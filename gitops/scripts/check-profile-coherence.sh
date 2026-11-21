@@ -34,7 +34,7 @@
 #   scripts/check-profile-coherence.sh              # every env under envs/
 #   scripts/check-profile-coherence.sh staging prod  # named envs
 #   scripts/check-profile-coherence.sh --selftest   # prove the checker refuses
-#                                                   # an env with the seam on
+#                                                   # a render with the seam on
 #
 # Requires: helm, python3, and a ghcr login able to pull
 # oci://ghcr.io/zeroroot-ai/charts/gibson.
@@ -204,7 +204,7 @@ report() { # report <env> <check> <message>
 check_env() {
   local env="$1"
   local values="${2:-${REPO_ROOT}/envs/${env}/values.yaml}"
-  local version tgz rendered facts
+  local version tgz rendered
 
   version="$(chart_version "$env")"
   [ -n "$version" ] || { echo "::error::cannot resolve the pinned chart version for ${env} from its platform Application"; exit 2; }
@@ -218,6 +218,15 @@ check_env() {
     return
   fi
 
+  evaluate_render "$env" "$rendered"
+}
+
+# ---------------------------------------------------------------------------
+# evaluate_render <env> <rendered.yaml> — judge one render. Split from
+# check_env so the selftest can feed it a render with a workload added by hand.
+# ---------------------------------------------------------------------------
+evaluate_render() {
+  local env="$1" rendered="$2" facts
   if ! facts="$(profile_facts "$rendered" 2>"${WORKDIR}/${env}.parse.err")"; then
     printf '  %s[FAIL]%s could not read profile knobs from the render: %s\n' \
       "$RED" "$NC" "$(tail -1 "${WORKDIR}/${env}.parse.err")"
@@ -260,39 +269,74 @@ check_env() {
 }
 
 # ---------------------------------------------------------------------------
-# selftest — build an overlay with the entitlements seam on from a real one and
-# assert the checker rejects it for both reasons. Proves the guard can still catch a regression, rather
-# than passing because every assertion silently became a no-op.
+# selftest — prove the checker can still fail. A values key cannot make the
+# test, because a chart from 0.157.0 on reads no entitlements key and renders
+# nothing for one. So the selftest takes the real render of staging at its pin
+# and adds a Deployment that sets both knobs. Two proofs, one per direction:
+#   1. the clean render passes with no failure
+#   2. the render with the seam on fails for BOTH reasons
+# This holds at every chart version, because it depends on no chart input.
 # ---------------------------------------------------------------------------
 selftest() {
   printf '%s=== selftest ===%s\n' "$GREEN" "$NC"
-  local base="${REPO_ROOT}/envs/staging/values.yaml"
-  local mutant="${WORKDIR}/incoherent.yaml"
-
-  # Turn the entitlements seam back on in a real overlay. Both halves are set,
-  # so the chart renders it and only this guard can refuse it.
-  sed -e 's|^    entitlementsEndpoint: ""$|    entitlementsEndpoint: "gibson-entitlements-svc:9091"|' \
-      -e 's|^    entitlementsRequired: false$|    entitlementsRequired: true|' "$base" >"$mutant"
-  if cmp -s "$base" "$mutant"; then
-    printf '  %s[FAIL]%s selftest: the mutation changed nothing in %s\n' "$RED" "$NC" "$base"
+  local version tgz clean mutant
+  version="$(chart_version staging)"
+  [ -n "$version" ] || { echo "::error::cannot resolve the pinned chart version for staging"; return 1; }
+  tgz="$(fetch_chart "$version")"
+  clean="${WORKDIR}/selftest-clean.yaml"
+  mutant="${WORKDIR}/selftest-incoherent.yaml"
+  if ! helm template gibson "$tgz" -n gibson -f "${REPO_ROOT}/envs/staging/values.yaml" >"$clean" 2>"${WORKDIR}/selftest.err"; then
+    printf '  %s[FAIL]%s selftest: staging does not render: %s\n' "$RED" "$NC" "$(tail -1 "${WORKDIR}/selftest.err")"
     return 1
   fi
 
   local before=$fail_count
+  evaluate_render selftest-clean "$clean" >"${WORKDIR}/selftest-clean.out" 2>&1 || true
+  if [ "$fail_count" -ne "$before" ]; then
+    printf '  %s[FAIL]%s selftest: the checker rejected the clean render of staging\n' "$RED" "$NC"
+    sed 's/^/    | /' "${WORKDIR}/selftest-clean.out" >&2
+    return 1
+  fi
+
+  {
+    cat "$clean"
+    cat <<'YAML'
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: selftest-incoherent
+spec:
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/component: selftest-incoherent
+    spec:
+      containers:
+        - name: daemon
+          image: selftest
+          env:
+            - name: ENTITLEMENTS_ENDPOINT
+              value: "gibson-entitlements-svc:9091"
+            - name: GIBSON_ENTITLEMENTS_REQUIRED
+              value: "true"
+YAML
+  } >"$mutant"
+
   # Output is captured, not discarded: the mutant's own FAIL lines would read
   # as real failures in CI, but they are the evidence when the selftest itself
   # goes wrong, so dump them only then.
-  check_env staging "$mutant" >"${WORKDIR}/selftest.out" 2>&1 || true
+  evaluate_render selftest-incoherent "$mutant" >"${WORKDIR}/selftest.out" 2>&1 || true
   if [ "$fail_count" -eq $((before + 2)) ] \
       && grep -q 'ENTITLEMENTS_ENDPOINT=gibson-entitlements-svc:9091 renders' "${WORKDIR}/selftest.out" \
       && grep -q 'GIBSON_ENTITLEMENTS_REQUIRED=true renders' "${WORKDIR}/selftest.out"; then
-    printf '  %s[PASS]%s selftest: an overlay with the entitlements seam on is rejected\n' "$GREEN" "$NC"
+    printf '  %s[PASS]%s selftest: a render with the entitlements seam on is rejected\n' "$GREEN" "$NC"
     fail_count=$before
     warn_count=0
     USED_EXEMPTIONS=()
     return 0
   fi
-  printf '  %s[FAIL]%s selftest: the checker did NOT reject an incoherent overlay\n' "$RED" "$NC"
+  printf '  %s[FAIL]%s selftest: the checker did NOT reject a render with the seam on\n' "$RED" "$NC"
   sed 's/^/    | /' "${WORKDIR}/selftest.out" >&2
   return 1
 }
