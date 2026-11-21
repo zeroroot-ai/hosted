@@ -993,8 +993,9 @@ global:
       - "172.20.0.1/32"
     # The pod range and the Service range of this cluster. The connector
     # operator denies both to a connector pod (charts#833). The
-    # chart refuses to render with no value. The values are the ones that
-    # bootstrap/ec2/gibson gives k3s as --cluster-cidr and --service-cidr.
+    # chart refuses to render with no value. The pod range is the k3s default,
+    # which the node-init template keeps by setting no --cluster-cidr. The
+    # Service range is the --service-cidr that bootstrap/ec2/gibson sets.
     # scripts/check-apiserver-cidrs.py fails when this list and the
     # substrate disagree.
     clusterCIDRs:

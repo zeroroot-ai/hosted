@@ -344,7 +344,6 @@ locals {
     node_ip                      = aws_eip.node.public_ip
     instance_type                = var.instance_type
     cluster_name                 = var.cluster_name
-    pod_cidr                     = var.pod_cidr
     service_cidr                 = var.service_cidr
     self_terminate_after_minutes = var.self_terminate_after_minutes
     agent_token                  = local.agent_token

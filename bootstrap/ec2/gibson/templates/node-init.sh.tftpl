@@ -175,10 +175,6 @@ ${ecr_credential_provider}
 #                      is NotReady until then, and no pod starts.
 # --disable-kube-proxy Cilium replaces kube-proxy (hosted#446, setec#182) and
 #                      serves the edge NodePort (ADR-0079).
-# --cluster-cidr       the pod range. k3s would use 10.42.0.0/16 with no flag.
-#                      The flag makes the range a reviewed value, so the
-#                      overlay can name it in global.networkPolicy.clusterCIDRs
-#                      (scripts/check-apiserver-cidrs.py).
 # --service-cidr       the Service range. The apiserver egress rule names its
 #                      first address (scripts/check-apiserver-cidrs.py).
 # --tls-san            the Elastic IP, so a kubeconfig that names the public
@@ -229,7 +225,6 @@ else
     --flannel-backend=none \
     --disable-network-policy \
     --disable-kube-proxy \
-    --cluster-cidr "${pod_cidr}" \
     --service-cidr "${service_cidr}" \
     --kube-apiserver-arg=service-node-port-range=80-32767 \
     --write-kubeconfig-mode 0600 \
