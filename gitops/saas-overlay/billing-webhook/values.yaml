@@ -18,9 +18,9 @@
 # may pin their own digest; kind/dev overlays are exempt from the digest guard.
 image:
   repository: ghcr.io/zeroroot-ai/billing
-  # billing 4b2c65f: the two redirect endpoints (billing#20) and the license
-  # file (billing#33).
-  tag: "sha-4b2c65f@sha256:2e4715c0f95fcac3e9eae410e94b697e49aba322c44586e3e8201c3f9467a46c"
+  # billing 6418396: one plan, no limits service and no tenant quota writes
+  # (billing#56, #58, #59), on Go 1.27.4 (billing#62).
+  tag: "sha-6418396@sha256:43d71665c51f623378e6279dd7da347770c97c7dae4cb47dc7b76083e1b357a0"
   pullPolicy: Always
 
 # Image pull secrets for the closed ghcr.io/zeroroot-ai/billing image.
