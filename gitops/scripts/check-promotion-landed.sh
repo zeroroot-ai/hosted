@@ -86,6 +86,18 @@ assert_landed() {
 
   if [ "$health" != "Healthy" ]; then
     echo "${RED}✗${NC} app health is ${health}, want Healthy"
+    # Name each resource that is not Healthy, with its message. Without this
+    # list a Degraded app gives no cause, and the next step is a guess.
+    local unhealthy
+    unhealthy="$(jq -r '
+      [ .status.resources[]?
+        | select(.health.status? != null and .health.status != "Healthy")
+        | "\(.kind)/\(.namespace // "-")/\(.name) [\(.health.status)] \(.health.message // "")"
+      ] | .[]' "$doc")"
+    if [ -n "$unhealthy" ]; then
+      echo "    resources that are not Healthy:"
+      printf '    %s\n' "$unhealthy"
+    fi
     failures=$((failures + 1))
   fi
 
@@ -193,6 +205,8 @@ EOF
 }
 
 SYNCED_ONLY='[{"kind":"Deployment","namespace":"gibson","name":"gibson","status":"Synced"}]'
+UNHEALTHY='[{"kind":"Deployment","namespace":"gibson","name":"gibson","status":"Synced","health":{"status":"Healthy"}},
+  {"kind":"Deployment","namespace":"gibson","name":"gibson-tenant-operator","status":"Synced","health":{"status":"Degraded","message":"Deployment exceeded its progress deadline"}}]'
 PRUNE_RESIDUE='[{"kind":"Deployment","namespace":"gibson","name":"gibson","status":"Synced"},
   {"group":"apps","kind":"StatefulSet","namespace":"gibson","name":"gibson-redis-master","status":"OutOfSync","requiresPruning":true},
   {"group":"policy","kind":"PodDisruptionBudget","namespace":"gibson","name":"gibson-envoy","status":"OutOfSync","requiresPruning":true}]'
@@ -253,6 +267,7 @@ selftest() {
   fixture Succeeded Healthy 0.109.2 0.113.0 "$SYNCED_ONLY"   >"$tmp/stale.json"
   fixture Failed    Healthy 0.113.0 0.113.0 "$SYNCED_ONLY"   >"$tmp/failedop.json"
   fixture Succeeded Degraded 0.113.0 0.113.0 "$SYNCED_ONLY"  >"$tmp/degraded.json"
+  fixture Succeeded Degraded 0.113.0 0.113.0 "$UNHEALTHY"    >"$tmp/unhealthy.json"
   fixture Succeeded Healthy 0.113.0 0.113.0 "$HOOKS"         >"$tmp/hooks.json"
   printf '%s\n' "$RESIDUE_ALLOWLIST" >"$tmp/allowlist.yaml"
   printf 'resources: []\n'           >"$tmp/empty-allowlist.yaml"
@@ -283,6 +298,8 @@ selftest() {
   check "multi-source at a stale chart revision" 1 "$tmp/multi-stale.json" "ran revision '0.114.0'"
   check "failed operation" 1 "$tmp/failedop.json" "phase is Failed"
   check "degraded health" 1 "$tmp/degraded.json" "health is Degraded"
+  # A Degraded app names the resource that is not Healthy, and its message.
+  check "degraded health names the resource" 1 "$tmp/unhealthy.json" "Deployment/gibson/gibson-tenant-operator \\[Degraded\\] Deployment exceeded its progress deadline"
 
   if [ "$failures" -ne 0 ]; then
     echo "[selftest] ${failures} case(s) failed"
