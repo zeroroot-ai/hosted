@@ -64,6 +64,8 @@ LAND_POLL="${LAND_POLL:-20}"
 
 # shellcheck source=lib/smoke-probe.sh
 source "$REPO/scripts/lib/smoke-probe.sh"
+# shellcheck source=lib/workload-diag.sh
+source "$REPO/scripts/lib/workload-diag.sh"
 
 # refresh_and_read: a hard refresh, then the app document in
 # /tmp/${APP}-app.json. Argo removes the annotation when the refresh is done.
@@ -121,6 +123,7 @@ until refresh_and_read && pins_chart_version && bash "$LANDED_CHECK" "/tmp/${APP
   printf '  not landed yet: %s\n' "$(tail -n1 "/tmp/${APP}-landed.log")"
   if [ "$(date +%s)" -ge "$land_deadline" ]; then
     cat "/tmp/${APP}-landed.log" >&2
+    workload_diag "$NAMESPACE" >&2
     echo "prove-promotion: the promotion did not land within ${LAND_WAIT}s" >&2
     exit 1
   fi
