@@ -57,7 +57,7 @@ JSON
 ]}
 JSON
   [ "$status" -eq 0 ]
-  [[ "$output" == *"Pod/gibson-tenant-operator-abc Running | manager: waiting CrashLoopBackOff back-off 5m0s (last: Error exit 1) restarts 7"* ]]
+  [[ "$output" == *"Pod/gibson-tenant-operator-abc Running | manager: waiting CrashLoopBackOff (last: Error exit 1) restarts 7"* ]]
   [[ "$output" != *"gibson-dashboard-xyz"* ]]
   [[ "$output" != *"migrate-1"* ]]
 }
@@ -85,7 +85,7 @@ JSON
 ]}
 JSON
   [ "$status" -eq 0 ]
-  [ "${lines[0]}" = "Pod/c Unhealthy (message not printed)" ]
+  [ "${lines[0]}" = "Pod/c Unhealthy" ]
   [ "${lines[1]}" = "Pod/b FailedMount: second" ]
   [[ "$output" != *"first"* ]]
   [[ "$output" != *"pulled"* ]]
@@ -125,57 +125,68 @@ JSON
   [ "${lines[0]}" = "Pod/a FailedScheduling: recurring" ]
 }
 
-# A token put into each message source never reaches the output.
+# A token put into each message source never reaches the output. The shapes
+# come from the review of hosted#211: a pattern missed each of them, so a
+# message prints only for an allowlisted reason.
 TOKEN="s3cr3t-T0KEN-value"
 
-@test "a probe or hook event prints no message" {
-  run workload_diag_events <<JSON
-{"items":[
- {"type":"Warning","reason":"Unhealthy","message":"Readiness probe failed: AUTH $TOKEN","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"Pod","name":"redis"}},
- {"type":"Warning","reason":"FailedPostStartHook","message":"Exec lifecycle hook output: $TOKEN","lastTimestamp":"2026-11-23T02:01:00Z","involvedObject":{"kind":"Pod","name":"daemon"}}
-]}
-JSON
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"Pod/redis Unhealthy (message not printed)"* ]]
-  [[ "$output" == *"Pod/daemon FailedPostStartHook (message not printed)"* ]]
-  [[ "$output" != *"$TOKEN"* ]]
+leak_shapes() {
+  printf '%s\n' \
+    "password: $TOKEN" "password=$TOKEN" "token=$TOKEN at start" "{\\\"token\\\":\\\"$TOKEN\\\"}" \
+    "?access_token=$TOKEN" "client_secret=$TOKEN" "X-Amz-Signature=$TOKEN" \
+    "BEARER $TOKEN" "Authorization: Basic $TOKEN" "token $TOKEN" "data: $TOKEN" \
+    "exec: /app --db-password=$TOKEN --token $TOKEN" "https://user:$TOKEN@host/x"
 }
 
-@test "an External Secrets event prints no message" {
-  run workload_diag_events <<JSON
+@test "no message of an event outside the allowlist prints, for every leak shape" {
+  while IFS= read -r m; do
+    run workload_diag_events <<JSON
 {"items":[
- {"type":"Warning","reason":"UpdateFailed","message":"template: unable to parse {\"password\":\"$TOKEN\"}","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"ExternalSecret","name":"gibson-db"}}
+ {"type":"Warning","reason":"Unhealthy","message":"$m","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"Pod","name":"redis"}},
+ {"type":"Warning","reason":"FailedPostStartHook","message":"$m","lastTimestamp":"2026-11-23T02:01:00Z","involvedObject":{"kind":"Pod","name":"daemon"}},
+ {"type":"Warning","reason":"FailedCreate","message":"$m","lastTimestamp":"2026-11-23T02:02:00Z","involvedObject":{"kind":"ReplicaSet","name":"r"}},
+ {"type":"Warning","reason":"UpdateFailed","message":"$m","lastTimestamp":"2026-11-23T02:03:00Z","involvedObject":{"kind":"ExternalSecret","name":"gibson-db"}}
 ]}
 JSON
-  [ "$status" -eq 0 ]
-  [[ "$output" == *"ExternalSecret/gibson-db UpdateFailed (message not printed)"* ]]
-  [[ "$output" != *"$TOKEN"* ]]
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"$TOKEN"* ]] || { echo "leaked: $m -> $output"; return 1; }
+    [[ "$output" == *"Pod/redis Unhealthy"* ]]
+    [[ "$output" == *"ReplicaSet/r FailedCreate"* ]]
+    [[ "$output" == *"ExternalSecret/gibson-db UpdateFailed"* ]]
+  done < <(leak_shapes)
 }
 
-@test "a query secret, a Bearer value and URL credentials are redacted in any message" {
-  run workload_diag_events <<JSON
-{"items":[
- {"type":"Warning","reason":"FailedCreate","message":"GET https://user:$TOKEN@host/x?token=$TOKEN&a=1 Authorization: Bearer $TOKEN","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"ReplicaSet","name":"r"}}
-]}
+@test "an allowlisted event prints its message" {
+  run workload_diag_events <<'JSON'
+{"items":[{"type":"Warning","reason":"FailedScheduling","message":"0/3 nodes are available: 3 Insufficient cpu.","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"Pod","name":"p"}}]}
 JSON
   [ "$status" -eq 0 ]
-  [[ "$output" != *"$TOKEN"* ]]
-  [[ "$output" == *"?token=[redacted]&a=1"* ]]
-  [[ "$output" == *"Bearer [redacted]"* ]]
-  [[ "$output" == *"://[redacted]@host"* ]]
+  [ "${lines[0]}" = "Pod/p FailedScheduling: 0/3 nodes are available: 3 Insufficient cpu." ]
 }
 
-@test "a container waiting message is redacted and cut" {
-  export WORKLOAD_DIAG_MAX=60
-  run workload_diag_pods <<JSON
+@test "a waiting message outside the allowlist does not print, for every leak shape" {
+  while IFS= read -r m; do
+    for reason in RunContainerError CreateContainerError PostStartHookError CrashLoopBackOff; do
+      run workload_diag_pods <<JSON
 {"items":[{"metadata":{"name":"p"},"status":{"phase":"Pending","containerStatuses":[
- {"name":"c","ready":false,"restartCount":0,"state":{"waiting":{"reason":"RunContainerError",
-  "message":"exec: /app --api-key=x?key=$TOKEN $(printf 'x%.0s' {1..200})"}}}]}}]}
+ {"name":"c","ready":false,"restartCount":0,"state":{"waiting":{"reason":"$reason","message":"$m"}}}]}}]}
+JSON
+      [ "$status" -eq 0 ]
+      [[ "$output" != *"$TOKEN"* ]] || { echo "leaked: $reason $m"; return 1; }
+      [[ "$output" == *"c: waiting $reason restarts 0"* ]]
+    done
+  done < <(leak_shapes)
+}
+
+@test "an image pull waiting message prints and is cut" {
+  export WORKLOAD_DIAG_MAX=40
+  run workload_diag_pods <<'JSON'
+{"items":[{"metadata":{"name":"p"},"status":{"phase":"Pending","containerStatuses":[
+ {"name":"c","ready":false,"restartCount":0,"state":{"waiting":{"reason":"ImagePullBackOff",
+  "message":"Back-off pulling image ghcr.io/zeroroot-ai/gibson-bootstrap-runner@sha256:c254c8d0"}}}]}}]}
 JSON
   [ "$status" -eq 0 ]
-  [[ "$output" != *"$TOKEN"* ]]
-  [[ "$output" == *"RunContainerError"* ]]
-  [[ "$output" == *"…"* ]]
+  [[ "$output" == *"waiting ImagePullBackOff Back-off pulling image ghcr.io/zeroroot"*"…"* ]]
 }
 
 @test "a container terminated message is never printed" {
@@ -186,4 +197,17 @@ JSON
   [ "$status" -eq 0 ]
   [[ "$output" == *"c: ended Error exit 2"* ]]
   [[ "$output" != *"$TOKEN"* ]]
+}
+
+@test "a ReplicaFailure condition that is True is named, without its message" {
+  run workload_diag_workloads <<JSON
+{"items":[{"kind":"Deployment","metadata":{"name":"d"},"spec":{"replicas":1},
+ "status":{"readyReplicas":1,"updatedReplicas":1,"conditions":[
+  {"type":"Available","status":"True"},
+  {"type":"ReplicaFailure","status":"True","reason":"FailedCreate","message":"admission webhook denied: env $TOKEN"}]}}]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Deployment/d ready 1/1 updated 1/1 | ReplicaFailure: FailedCreate"* ]]
+  [[ "$output" != *"$TOKEN"* ]]
+  [[ "$output" != *"Available"* ]]
 }

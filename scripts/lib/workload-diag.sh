@@ -9,23 +9,19 @@
 # Application status. So a Degraded app names no resource in the document that
 # check-promotion-landed.sh reads (promote-staging run 45101003946). This reads
 # the workloads themselves and prints:
-#   - each Deployment, StatefulSet and DaemonSet that is not ready or not fully
-#     rolled out, with its conditions that are not True
+#   - each Deployment, StatefulSet and DaemonSet that is not ready, not fully
+#     rolled out, or has a bad condition
 #   - each pod that is not Running and Ready, with the reason of each container
-#     that waits or ended
+#     that waits or ended, its last exit and its restarts
 #   - the last Warning events of the namespace
 #
 # hosted is public, and so is each run log. This prints no container log, no
-# env value, no spec and no Secret or ConfigMap data. A message that a workload
-# can fill is either dropped or cut and redacted:
-#   - the message of a probe or hook event (exec output, probe URL) and of an
-#     External Secrets event (a provider or template error) is dropped: only
-#     the reason and the object print
-#   - every other message is cut to WORKLOAD_DIAG_MAX (300) characters, and a
-#     query value of token, key, secret, password, sig, signature or code, a
-#     Bearer value and the user part of a URL are replaced by [redacted]
-#   - terminated.message is never printed (FallbackToLogsOnError copies log
-#     lines into it)
+# env value, no spec and no Secret or ConfigMap data. A free-text message can
+# hold text that a workload wrote (probe and hook output, a runtime error that
+# quotes args, a webhook denial that quotes a field), and no pattern can find
+# every secret in free text. So a message prints only when Kubernetes writes it
+# from a fixed template that holds names, counts and image refs (ALLOWLIST
+# below). Every other message prints its reason and its object only.
 # tests/harness/workload-diag.bats puts a token into each message source and
 # fails if it reaches the output.
 #
@@ -33,14 +29,17 @@
 # each kubectl read has a request timeout.
 # ---------------------------------------------------------------------------
 
-# The jq helpers that every filter shares.
+# The event reasons whose message Kubernetes writes from a fixed template:
+# the scheduler, the volume controllers, the image puller and the back-off.
+# shellcheck disable=SC2016 # jq source, expanded by jq and not by the shell
 WORKLOAD_DIAG_JQ_DEFS='
-  def redact:
-    tostring
-    | gsub("(?<k>[?&;](token|key|secret|password|sig|signature|code)=)[^&;\" ]*"; "\(.k)[redacted]"; "i")
-    | gsub("(?<b>[Bb]earer )[^ \"]*"; "\(.b)[redacted]")
-    | gsub("(?<s>://)[^/@ \"]*@"; "\(.s)[redacted]@");
-  def safe($max): redact | if length > $max then .[0:$max] + "…" else . end;
+  def safe_event_reason:
+    IN("FailedScheduling", "FailedMount", "FailedAttachVolume", "FailedMapVolume",
+       "ErrImagePull", "ImagePullBackOff", "BackOff", "FailedKillPod");
+  def safe_waiting_reason:
+    IN("ErrImagePull", "ImagePullBackOff", "CreateContainerConfigError", "InvalidImageName");
+  def safe_condition: .type | IN("Available", "Progressing");
+  def cut($max): tostring | if length > $max then .[0:$max] + "…" else . end;
 '
 
 # workload_diag_workloads reads `kubectl get deploy,statefulset,daemonset -o json`.
@@ -51,10 +50,11 @@ workload_diag_workloads() {
     | (.spec.replicas // $s.desiredNumberScheduled // 1) as $want
     | ($s.readyReplicas // $s.numberReady // 0) as $ready
     | ($s.updatedReplicas // $s.updatedNumberScheduled // $want) as $updated
-    | [ $s.conditions[]? | select(.status != "True") ] as $bad
+    | [ $s.conditions[]? | select((.type == "ReplicaFailure") == (.status == "True")) ] as $bad
     | select($ready < $want or $updated < $want or ($bad | length) > 0)
     | "\(.kind)/\(.metadata.name) ready \($ready)/\($want) updated \($updated)/\($want)"
-      + ([ $bad[] | " | \(.type): \(.reason // "") \((.message // "") | safe($max))" ] | join(""))'
+      + ([ $bad[] | " | \(.type): \(.reason // "")"
+                    + (if safe_condition then " \((.message // "") | cut($max))" else "" end) ] | join(""))'
 }
 
 # workload_diag_pods reads `kubectl get pods -o json`.
@@ -69,7 +69,10 @@ workload_diag_pods() {
       + ([ (.status.initContainerStatuses // [])[], (.status.containerStatuses // [])[]
            | select(.ready != true)
            | " | \(.name): "
-             + (if .state.waiting then "waiting \(.state.waiting.reason // "") \((.state.waiting.message // "") | safe($max))"
+             + (if .state.waiting then
+                  "waiting \(.state.waiting.reason // "")"
+                  + (if (.state.waiting.reason // "" | safe_waiting_reason)
+                     then " \((.state.waiting.message // "") | cut($max))" else "" end)
                 elif .state.terminated then "ended \(.state.terminated.reason // "") exit \(.state.terminated.exitCode // "")"
                 else "not ready" end)
              + (if .lastState.terminated then " (last: \(.lastState.terminated.reason // "") exit \(.lastState.terminated.exitCode // ""))" else "" end)
@@ -81,14 +84,11 @@ workload_diag_pods() {
 workload_diag_events() {
   jq -r --argjson n "${WORKLOAD_DIAG_EVENTS:-25}" --argjson max "${WORKLOAD_DIAG_MAX:-300}" \
     "${WORKLOAD_DIAG_JQ_DEFS}"'
-    def silent:
-      (.reason | IN("Unhealthy", "FailedPostStartHook", "FailedPreStopHook", "ProbeWarning"))
-      or (.involvedObject.kind | IN("ExternalSecret", "SecretStore", "ClusterSecretStore", "PushSecret"));
     [ .items[]? | select(.type == "Warning") ]
     | sort_by(.series.lastObservedTime // .lastTimestamp // .eventTime // .metadata.creationTimestamp // "")
     | .[-$n:][]
     | "\(.involvedObject.kind)/\(.involvedObject.name) \(.reason // "")"
-      + (if silent then " (message not printed)" else ": \((.message // "") | safe($max))" end)'
+      + (if (.reason // "" | safe_event_reason) then ": \((.message // "") | cut($max))" else "" end)'
 }
 
 workload_diag() {
