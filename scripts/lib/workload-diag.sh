@@ -29,13 +29,24 @@
 # each kubectl read has a request timeout.
 # ---------------------------------------------------------------------------
 
-# The event reasons whose message Kubernetes writes from a fixed template:
-# the scheduler, the volume controllers, the image puller and the back-off.
+# The events whose message Kubernetes writes from a fixed template: the
+# scheduler, the volume controllers, the image manager and the back-off. The
+# kubelet writes an image pull failure as reason Failed with the prefix
+# "Failed to pull image ". Reason Failed also carries "Error: <start error>",
+# which can quote a command and its args, so only that prefix prints. Of the
+# admission denials only the fixed quota and PodSecurity forms print.
+# FailedMount holds the tail of a volume driver error. The only CSI driver of
+# the chart is csi.spiffe.io. A new secrets CSI driver puts provider text there:
+# drop FailedMount from the list when one comes.
 # shellcheck disable=SC2016 # jq source, expanded by jq and not by the shell
 WORKLOAD_DIAG_JQ_DEFS='
-  def safe_event_reason:
-    IN("FailedScheduling", "FailedMount", "FailedAttachVolume", "FailedMapVolume",
-       "ErrImagePull", "ImagePullBackOff", "BackOff", "FailedKillPod");
+  def safe_event:
+    (.reason // "") as $r | (.message // "") as $m
+    | ($r | IN("FailedScheduling", "FailedMount", "FailedAttachVolume", "FailedMapVolume",
+               "BackOff", "FailedKillPod", "InspectFailed", "ErrImageNeverPull"))
+      or ($r == "Failed" and ($m | startswith("Failed to pull image ")))
+      or ($r == "FailedCreate"
+          and ($m | test("^Error creating: pods \"[^\"]*\" is forbidden: (exceeded quota|violates PodSecurity)")));
   def safe_waiting_reason:
     IN("ErrImagePull", "ImagePullBackOff", "CreateContainerConfigError", "InvalidImageName");
   def safe_condition: .type | IN("Available", "Progressing");
@@ -88,7 +99,7 @@ workload_diag_events() {
     | sort_by(.series.lastObservedTime // .lastTimestamp // .eventTime // .metadata.creationTimestamp // "")
     | .[-$n:][]
     | "\(.involvedObject.kind)/\(.involvedObject.name) \(.reason // "")"
-      + (if (.reason // "" | safe_event_reason) then ": \((.message // "") | cut($max))" else "" end)'
+      + (if safe_event then ": \((.message // "") | cut($max))" else "" end)'
 }
 
 workload_diag() {

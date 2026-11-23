@@ -211,3 +211,33 @@ JSON
   [[ "$output" != *"$TOKEN"* ]]
   [[ "$output" != *"Available"* ]]
 }
+
+@test "an image pull failure prints its registry error" {
+  run workload_diag_events <<'JSON'
+{"items":[{"type":"Warning","reason":"Failed","message":"Failed to pull image \"ghcr.io/zeroroot-ai/gibson-bootstrap-runner@sha256:c254\": not found","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"Pod","name":"bootstrap"}}]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Pod/bootstrap Failed: Failed to pull image"*"not found"* ]]
+}
+
+@test "a start error under reason Failed does not print" {
+  run workload_diag_events <<JSON
+{"items":[{"type":"Warning","reason":"Failed","message":"Error: failed to start container: exec /app --token $TOKEN","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"Pod","name":"p"}}]}
+JSON
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "Pod/p Failed" ]
+  [[ "$output" != *"$TOKEN"* ]]
+}
+
+@test "a fixed quota denial prints, another admission denial does not" {
+  run workload_diag_events <<JSON
+{"items":[
+ {"type":"Warning","reason":"FailedCreate","message":"Error creating: pods \"d-1\" is forbidden: exceeded quota: q, requested: cpu=2","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"ReplicaSet","name":"a"}},
+ {"type":"Warning","reason":"FailedCreate","message":"Error creating: admission webhook \"x\" denied the request: env $TOKEN","lastTimestamp":"2026-11-23T02:01:00Z","involvedObject":{"kind":"ReplicaSet","name":"b"}}
+]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ReplicaSet/a FailedCreate: Error creating: pods \"d-1\" is forbidden: exceeded quota"* ]]
+  [[ "$output" == *"ReplicaSet/b FailedCreate"* ]]
+  [[ "$output" != *"$TOKEN"* ]]
+}
