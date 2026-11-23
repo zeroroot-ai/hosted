@@ -46,7 +46,7 @@ WORKLOAD_DIAG_JQ_DEFS='
                "BackOff", "FailedKillPod", "InspectFailed", "ErrImageNeverPull"))
       or ($r == "Failed" and ($m | startswith("Failed to pull image ")))
       or ($r == "FailedCreate"
-          and ($m | test("^Error creating: pods \"[^\"]*\" is forbidden: (exceeded quota|violates PodSecurity)")));
+          and ($m | test("^(Error creating|create Pod [^ ]+ in StatefulSet [^ ]+ failed error): pods \"[^\"]*\" is forbidden: (exceeded quota: |violates PodSecurity \")")));
   def safe_waiting_reason:
     IN("ErrImagePull", "ImagePullBackOff", "CreateContainerConfigError", "InvalidImageName");
   def safe_condition: .type | IN("Available", "Progressing");

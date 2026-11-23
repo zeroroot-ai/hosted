@@ -241,3 +241,15 @@ JSON
   [[ "$output" == *"ReplicaSet/b FailedCreate"* ]]
   [[ "$output" != *"$TOKEN"* ]]
 }
+
+@test "a StatefulSet quota denial prints, and a lookalike without the exact prefix does not" {
+  run workload_diag_events <<JSON
+{"items":[
+ {"type":"Warning","reason":"FailedCreate","message":"create Pod gibson-0 in StatefulSet gibson failed error: pods \"gibson-0\" is forbidden: exceeded quota: q, requested: memory=4Gi","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"StatefulSet","name":"gibson"}},
+ {"type":"Warning","reason":"FailedCreate","message":"Error creating: pods \"d\" is forbidden: exceeded quota$TOKEN","lastTimestamp":"2026-11-23T02:01:00Z","involvedObject":{"kind":"ReplicaSet","name":"c"}}
+]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"StatefulSet/gibson FailedCreate: create Pod gibson-0 in StatefulSet gibson failed error"*"exceeded quota: q"* ]]
+  [[ "$output" != *"$TOKEN"* ]]
+}
