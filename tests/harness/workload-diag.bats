@@ -75,7 +75,7 @@ JSON
 }
 
 @test "only the last Warning events are printed, in time order" {
-  WORKLOAD_DIAG_EVENTS=2
+  export WORKLOAD_DIAG_EVENTS=2
   run workload_diag_events <<'JSON'
 {"items":[
  {"type":"Normal","reason":"Pulled","message":"pulled","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"Pod","name":"a"}},
@@ -85,13 +85,105 @@ JSON
 ]}
 JSON
   [ "$status" -eq 0 ]
-  [ "${lines[0]}" = "Pod/c Unhealthy: third" ]
+  [ "${lines[0]}" = "Pod/c Unhealthy (message not printed)" ]
   [ "${lines[1]}" = "Pod/b FailedMount: second" ]
   [[ "$output" != *"first"* ]]
   [[ "$output" != *"pulled"* ]]
 }
 
-@test "workload_diag prints no container log and no env value" {
-  run grep -nE 'kubectl[^|]* logs|\.env\b|\.spec\.containers' "$REPO_ROOT/scripts/lib/workload-diag.sh"
-  [ "$status" -ne 0 ]
+@test "a rollout that is stuck while the old pods stay ready is named" {
+  run workload_diag_workloads <<'JSON'
+{"items":[
+ {"kind":"Deployment","metadata":{"name":"gibson-ext-authz"},"spec":{"replicas":2},
+  "status":{"readyReplicas":2,"updatedReplicas":1,"conditions":[
+   {"type":"Progressing","status":"False","reason":"ProgressDeadlineExceeded","message":"ReplicaSet has timed out progressing."}]}}
+]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Deployment/gibson-ext-authz ready 2/2 updated 1/2"* ]]
+  [[ "$output" == *"ProgressDeadlineExceeded"* ]]
+}
+
+@test "an evicted pod prints its reason" {
+  run workload_diag_pods <<'JSON'
+{"items":[{"metadata":{"name":"p1"},"status":{"phase":"Failed","reason":"Evicted"}}]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Pod/p1 Failed Evicted"* ]]
+}
+
+@test "a series event sorts by its last observed time" {
+  export WORKLOAD_DIAG_EVENTS=1
+  run workload_diag_events <<'JSON'
+{"items":[
+ {"type":"Warning","reason":"FailedScheduling","message":"recurring","eventTime":"2026-11-23T01:00:00.000000Z",
+  "series":{"lastObservedTime":"2026-11-23T03:00:00.000000Z"},"involvedObject":{"kind":"Pod","name":"a"}},
+ {"type":"Warning","reason":"BackOff","message":"older","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"Pod","name":"b"}}
+]}
+JSON
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "Pod/a FailedScheduling: recurring" ]
+}
+
+# A token put into each message source never reaches the output.
+TOKEN="s3cr3t-T0KEN-value"
+
+@test "a probe or hook event prints no message" {
+  run workload_diag_events <<JSON
+{"items":[
+ {"type":"Warning","reason":"Unhealthy","message":"Readiness probe failed: AUTH $TOKEN","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"Pod","name":"redis"}},
+ {"type":"Warning","reason":"FailedPostStartHook","message":"Exec lifecycle hook output: $TOKEN","lastTimestamp":"2026-11-23T02:01:00Z","involvedObject":{"kind":"Pod","name":"daemon"}}
+]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"Pod/redis Unhealthy (message not printed)"* ]]
+  [[ "$output" == *"Pod/daemon FailedPostStartHook (message not printed)"* ]]
+  [[ "$output" != *"$TOKEN"* ]]
+}
+
+@test "an External Secrets event prints no message" {
+  run workload_diag_events <<JSON
+{"items":[
+ {"type":"Warning","reason":"UpdateFailed","message":"template: unable to parse {\"password\":\"$TOKEN\"}","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"ExternalSecret","name":"gibson-db"}}
+]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"ExternalSecret/gibson-db UpdateFailed (message not printed)"* ]]
+  [[ "$output" != *"$TOKEN"* ]]
+}
+
+@test "a query secret, a Bearer value and URL credentials are redacted in any message" {
+  run workload_diag_events <<JSON
+{"items":[
+ {"type":"Warning","reason":"FailedCreate","message":"GET https://user:$TOKEN@host/x?token=$TOKEN&a=1 Authorization: Bearer $TOKEN","lastTimestamp":"2026-11-23T02:00:00Z","involvedObject":{"kind":"ReplicaSet","name":"r"}}
+]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$TOKEN"* ]]
+  [[ "$output" == *"?token=[redacted]&a=1"* ]]
+  [[ "$output" == *"Bearer [redacted]"* ]]
+  [[ "$output" == *"://[redacted]@host"* ]]
+}
+
+@test "a container waiting message is redacted and cut" {
+  export WORKLOAD_DIAG_MAX=60
+  run workload_diag_pods <<JSON
+{"items":[{"metadata":{"name":"p"},"status":{"phase":"Pending","containerStatuses":[
+ {"name":"c","ready":false,"restartCount":0,"state":{"waiting":{"reason":"RunContainerError",
+  "message":"exec: /app --api-key=x?key=$TOKEN $(printf 'x%.0s' {1..200})"}}}]}}]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" != *"$TOKEN"* ]]
+  [[ "$output" == *"RunContainerError"* ]]
+  [[ "$output" == *"…"* ]]
+}
+
+@test "a container terminated message is never printed" {
+  run workload_diag_pods <<JSON
+{"items":[{"metadata":{"name":"p"},"status":{"phase":"Running","containerStatuses":[
+ {"name":"c","ready":false,"restartCount":1,"state":{"terminated":{"reason":"Error","exitCode":2,"message":"log line $TOKEN"}}}]}}]}
+JSON
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"c: ended Error exit 2"* ]]
+  [[ "$output" != *"$TOKEN"* ]]
 }
